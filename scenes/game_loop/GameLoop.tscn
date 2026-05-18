@@ -1,0 +1,59 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/game_loop/GameLoop.gd" id="1_gl"]
+
+[node name="root" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_gl")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 0
+color = Color(0, 0, 0, 1)
+
+[node name="VideoPlayer" type="VideoStreamPlayer" parent="."]
+layout_mode = 0
+expand = true
+
+[node name="HUD" type="Control" parent="."]
+layout_mode = 0
+mouse_filter = 2
+
+[node name="HUDBar" type="PanelContainer" parent="HUD"]
+layout_mode = 0
+
+[node name="HUDLayout" type="HBoxContainer" parent="HUD/HUDBar"]
+layout_mode = 2
+
+[node name="RoundLabel" type="Label" parent="HUD/HUDBar/HUDLayout"]
+layout_mode = 2
+text = "ROUND 1 / 1"
+
+[node name="ProgressBar" type="ProgressBar" parent="HUD/HUDBar/HUDLayout"]
+layout_mode = 2
+size_flags_horizontal = 3
+show_percentage = false
+value = 0.0
+
+[node name="PauseBtn" type="Button" parent="HUD/HUDBar/HUDLayout"]
+layout_mode = 2
+text = "|| PAUSE"
+
+[node name="MenuBtn" type="Button" parent="HUD/HUDBar/HUDLayout"]
+layout_mode = 2
+text = "< MENU"
+
+[node name="OptionsBtn" type="Button" parent="HUD/HUDBar/HUDLayout"]
+layout_mode = 2
+text = "⚙ OPTIONS"
+
+[node name="HideTimer" type="Timer" parent="HUD"]
+wait_time = 3.0
+one_shot = true
+
+[node name="EndTimer" type="Timer" parent="."]
+one_shot = true

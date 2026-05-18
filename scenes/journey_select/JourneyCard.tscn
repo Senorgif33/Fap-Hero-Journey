@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://ohwqkdqb3q8p"]
+
+[ext_resource type="Script" uid="uid://c8p17rid2mpns" path="res://scripts/journey_select/JourneyCard.gd" id="1_jcard"]
+
+[node name="JourneyCard" type="PanelContainer" unique_id=1477743021]
+script = ExtResource("1_jcard")
+
+[node name="VBox" type="VBoxContainer" parent="." unique_id=76180899]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="CoverRect" type="TextureRect" parent="VBox" unique_id=1229122687]
+layout_mode = 2
+size_flags_horizontal = 3
+expand_mode = 1
+stretch_mode = 6
+
+[node name="TitleLabel" type="Label" parent="VBox" unique_id=2005216417]
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3

@@ -1,0 +1,186 @@
+[gd_scene format=3 uid="uid://cqbh4f0hrd8mn"]
+
+[ext_resource type="Script" uid="uid://bgj4onmimjgml" path="res://scripts/options/Options.gd" id="1_opts"]
+[ext_resource type="Script" uid="uid://dscg7dyswe1h7" path="res://scripts/main/AnimatedBackground.gd" id="2_abg"]
+
+[node name="root" type="Control" unique_id=1278072632]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_opts")
+
+[node name="Background" type="ColorRect" parent="." unique_id=209026964]
+layout_mode = 0
+color = Color(0, 0, 0, 1)
+
+[node name="AnimatedBackground" type="Control" parent="." unique_id=1629300971]
+anchors_preset = 0
+script = ExtResource("2_abg")
+
+[node name="TopBar" type="HBoxContainer" parent="." unique_id=1959050967]
+layout_mode = 0
+
+[node name="BackButton" type="Button" parent="TopBar" unique_id=278981733]
+layout_mode = 2
+text = "< BACK"
+
+[node name="TitleLabel" type="Label" parent="TopBar" unique_id=1510658439]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "OPTIONS"
+horizontal_alignment = 1
+
+[node name="ContentPanel" type="PanelContainer" parent="." unique_id=2073912755]
+layout_mode = 0
+
+[node name="ContentScroll" type="ScrollContainer" parent="ContentPanel" unique_id=683705975]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+
+[node name="MarginWrapper" type="MarginContainer" parent="ContentPanel/ContentScroll" unique_id=231099323]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 0
+
+[node name="ContentVBox" type="VBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper" unique_id=97372042]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="AudioSection" type="VBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox" unique_id=1420965730]
+layout_mode = 2
+
+[node name="AudioHeader" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection" unique_id=1369014179]
+layout_mode = 2
+text = "AUDIO"
+
+[node name="AudioDivider" type="HSeparator" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection" unique_id=1867101801]
+layout_mode = 2
+
+[node name="MasterRow" type="HBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection" unique_id=1890680011]
+layout_mode = 2
+
+[node name="MasterLabel" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow" unique_id=507941285]
+layout_mode = 2
+text = "MASTER VOLUME"
+
+[node name="MasterSlider" type="HSlider" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow" unique_id=5367122]
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 1.0
+step = 0.01
+value = 1.0
+
+[node name="MasterValue" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow" unique_id=1312614152]
+layout_mode = 2
+text = "100%"
+
+[node name="SectionGap" type="Control" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox" unique_id=181150838]
+custom_minimum_size = Vector2(0, 24)
+layout_mode = 2
+
+[node name="DisplaySection" type="VBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox" unique_id=1703376500]
+layout_mode = 2
+
+[node name="DisplayHeader" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection" unique_id=1687603665]
+layout_mode = 2
+text = "DISPLAY"
+
+[node name="DisplayDivider" type="HSeparator" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection" unique_id=28846271]
+layout_mode = 2
+
+[node name="FullscreenRow" type="HBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection" unique_id=512402393]
+layout_mode = 2
+
+[node name="FsLabel" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/FullscreenRow" unique_id=799750761]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "FULLSCREEN"
+
+[node name="FsToggle" type="Button" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/FullscreenRow" unique_id=1609010535]
+layout_mode = 2
+toggle_mode = true
+text = "OFF"
+
+[node name="ResolutionRow" type="HBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection" unique_id=1821705033]
+layout_mode = 2
+
+[node name="ResLabel" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/ResolutionRow" unique_id=1237121833]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "RESOLUTION"
+
+[node name="ResDropdown" type="OptionButton" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/ResolutionRow" unique_id=1530432207]
+layout_mode = 2
+
+[node name="SectionGap2" type="Control" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox" unique_id=1492173939]
+custom_minimum_size = Vector2(0, 24)
+layout_mode = 2
+
+[node name="IntifaceSection" type="VBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox" unique_id=388090439]
+layout_mode = 2
+
+[node name="IntifaceHeader" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection" unique_id=637286422]
+layout_mode = 2
+text = "INTIFACE"
+
+[node name="IntifaceDivider" type="HSeparator" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection" unique_id=1085229917]
+layout_mode = 2
+
+[node name="AddressRow" type="HBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection" unique_id=219419449]
+layout_mode = 2
+
+[node name="AddressLabel" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AddressRow" unique_id=503147492]
+layout_mode = 2
+text = "ADDRESS"
+
+[node name="AddressInput" type="LineEdit" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AddressRow" unique_id=1554009889]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "ws://localhost:12345"
+
+[node name="AutoConnectRow" type="HBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection" unique_id=1125516796]
+layout_mode = 2
+
+[node name="AutoConnectLabel" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AutoConnectRow" unique_id=722365948]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "AUTO-CONNECT ON LAUNCH"
+
+[node name="AutoConnectToggle" type="Button" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AutoConnectRow" unique_id=1555326985]
+layout_mode = 2
+toggle_mode = true
+text = "OFF"
+
+[node name="ConnectionRow" type="HBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection" unique_id=308066761]
+layout_mode = 2
+
+[node name="ConnectBtn" type="Button" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow" unique_id=1449580210]
+layout_mode = 2
+text = "> CONNECT"
+
+[node name="ScanBtn" type="Button" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow" unique_id=203484428]
+layout_mode = 2
+disabled = true
+text = "> SCAN"
+
+[node name="StatusLabel" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow" unique_id=2141625647]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "● DISCONNECTED"
+
+[node name="DeviceRow" type="HBoxContainer" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection" unique_id=1733917558]
+layout_mode = 2
+
+[node name="DeviceLabel" type="Label" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/DeviceRow" unique_id=1208849919]
+layout_mode = 2
+text = "DEVICE"
+
+[node name="DeviceDropdown" type="OptionButton" parent="ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/DeviceRow" unique_id=1467889269]
+layout_mode = 2
+size_flags_horizontal = 3
+disabled = true

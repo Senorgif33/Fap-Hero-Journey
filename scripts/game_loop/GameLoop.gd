@@ -1,0 +1,357 @@
+extends Control
+
+const OptionsScene = preload("res://scenes/options/Options.tscn")
+
+# ---------------------------------------------------------------------------
+# GameLoop.gd  –  Round controller and video player
+# Reads the active journey from GameState, loads each round's video and
+# funscript in sequence, then transitions to EndScreen when all rounds finish.
+#
+# MP4 NOTE: Godot's built-in VideoStreamPlayer only decodes .ogv (Theora).
+# Install EIRTeam.FFmpeg GDExtension for MP4 support, then replace the
+# _load_video() body with that extension's API.
+# ---------------------------------------------------------------------------
+
+const COLOR_BG:           Color = Color(0.0,   0.0,   0.0,   1.0)
+const COLOR_PANEL_BG:     Color = Color(0.055, 0.008, 0.086, 0.88)
+const COLOR_PURPLE_BRIGHT:Color = Color(0.698, 0.118, 1.0,   1.0)
+const COLOR_PURPLE_MID:   Color = Color(0.408, 0.063, 0.627, 1.0)
+const COLOR_MAGENTA:      Color = Color(0.878, 0.0,   0.878, 1.0)
+const COLOR_WHITE_SOFT:   Color = Color(0.878, 0.780, 1.0,   1.0)
+const COLOR_BG_ZERO:      Color = Color(0.0,   0.0,   0.0,   0.0)
+
+const HUD_BAR_HEIGHT:  int   = 68
+const HUD_HIDE_DELAY:  float = 3.0
+const VIDEO_EXTS:      Array = ["mp4", "mkv", "webm", "avi", "mov", "ogv"]
+
+@onready var _bg:          ColorRect         = $Background
+@onready var _video:       VideoStreamPlayer = $VideoPlayer
+@onready var _hud:         Control           = $HUD
+@onready var _hud_bar:     PanelContainer    = $HUD/HUDBar
+@onready var _hud_layout:  HBoxContainer     = $HUD/HUDBar/HUDLayout
+@onready var _round_lbl:   Label             = $HUD/HUDBar/HUDLayout/RoundLabel
+@onready var _progress:    ProgressBar       = $HUD/HUDBar/HUDLayout/ProgressBar
+@onready var _pause_btn:   Button            = $HUD/HUDBar/HUDLayout/PauseBtn
+@onready var _menu_btn:    Button            = $HUD/HUDBar/HUDLayout/MenuBtn
+@onready var _options_btn: Button            = $HUD/HUDBar/HUDLayout/OptionsBtn
+@onready var _hide_timer:  Timer             = $HUD/HideTimer
+@onready var _end_timer:   Timer             = $EndTimer
+
+var _paused: bool = false
+
+
+func _ready() -> void:
+	_apply_layout()
+	_apply_theme()
+	_connect_signals()
+	_load_current_round()
+	_show_hud()
+
+
+func _process(_delta: float) -> void:
+	if _video.is_playing():
+		var len: float = _video.get_stream_length()
+		if len > 0.0:
+			_progress.value = _video.stream_position / len
+		# Keep funscript in sync with video clock
+		FunscriptPlayer.SyncTo(_video.stream_position)
+
+
+# ---------------------------------------------------------------------------
+# Round loading
+# ---------------------------------------------------------------------------
+
+func _load_current_round() -> void:
+	var round: Dictionary = GameState.CurrentRound()
+	if round.is_empty():
+		push_error("GameLoop: GameState has no current round — returning to menu")
+		_go_to_menu()
+		return
+
+	var total: int = GameState.TotalRounds()
+	var idx:   int = GameState.RoundIndex + 1
+	_round_lbl.text = "ROUND %d / %d  —  %s" % [idx, total,
+		(round.get("name", "") as String).to_upper()]
+
+	_progress.value = 0.0
+	_paused = false
+	_pause_btn.text = "|| PAUSE"
+
+	var fs_path: String = round.get("funscript_path", "")
+	if fs_path != "":
+		FunscriptPlayer.LoadFunscript(fs_path)
+
+	var folder: String = round.get("folder", "")
+	var video_path: String = _find_video(folder)
+	_load_video(video_path)
+
+
+func _find_video(folder: String) -> String:
+	if folder == "":
+		return ""
+	var dir: DirAccess = DirAccess.open(folder)
+	if dir == null:
+		return ""
+	dir.list_dir_begin()
+	var fname: String = dir.get_next()
+	while fname != "":
+		if not dir.current_is_dir() and fname.get_extension().to_lower() in VIDEO_EXTS:
+			dir.list_dir_end()
+			return folder + "/" + fname
+		fname = dir.get_next()
+	dir.list_dir_end()
+	return ""
+
+
+func _load_video(path: String) -> void:
+	if path == "":
+		push_warning("GameLoop: no video found for this round — funscript-only fallback")
+		_start_no_video_fallback()
+		return
+
+	var ext: String = path.get_extension().to_lower()
+
+	if ext == "ogv":
+		var stream: Resource = ResourceLoader.load(path)
+		if stream and stream is VideoStream:
+			_video.stream = stream as VideoStream
+			_video.play()
+			FunscriptPlayer.Play()
+			return
+		push_warning("GameLoop: could not load .ogv at %s" % path)
+		_start_no_video_fallback()
+		return
+
+	# MP4/MKV/WebM — requires EIRTeam.FFmpeg GDExtension.
+	# Install: https://github.com/EIRTeam/EIRTeam.FFmpeg/releases
+	# Drop the addons/ folder into the project root and reopen Godot.
+	if ClassDB.class_exists("FFmpegVideoStream"):
+		var stream: Resource = ClassDB.instantiate("FFmpegVideoStream")
+		stream.set("file", ProjectSettings.globalize_path(path))
+		_video.stream = stream as VideoStream
+		_video.play()
+		FunscriptPlayer.Play()
+	else:
+		push_warning("GameLoop: FFmpegVideoStream not found — install EIRTeam.FFmpeg for MP4 support. Running funscript-only.")
+		_start_no_video_fallback()
+
+
+func _start_no_video_fallback() -> void:
+	# No video: use funscript length to drive a timer so the round still advances.
+	FunscriptPlayer.Play()
+	var dur_ms: int = GameState.CurrentRound().get("length_ms", 0)
+	if dur_ms > 0:
+		_end_timer.wait_time = dur_ms / 1000.0
+		_end_timer.start()
+	else:
+		# Unknown length — let the player advance manually (pause button becomes skip)
+		_pause_btn.text = "> SKIP"
+
+
+# ---------------------------------------------------------------------------
+# Round / scene transitions
+# ---------------------------------------------------------------------------
+
+func _on_round_ended() -> void:
+	FunscriptPlayer.Stop()
+
+	if GameState.ShopAfterCurrent():
+		# TODO: transition to Shop scene when ready
+		push_warning("GameLoop: shop transition not yet implemented — skipping shop")
+
+	if GameState.IsLastRound():
+		Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
+	else:
+		GameState.Advance()
+		_load_current_round()
+
+
+func _go_to_menu() -> void:
+	_video.stop()
+	FunscriptPlayer.Stop()
+	Transition.change_scene("res://scenes/main/Main.tscn")
+
+
+func _on_options_pressed() -> void:
+	_video.paused = true
+	FunscriptPlayer.Pause()
+	var opts: Control = OptionsScene.instantiate()
+	opts.overlay_mode = true
+	opts.tree_exiting.connect(_on_options_closed)
+	add_child(opts)
+
+
+func _on_options_closed() -> void:
+	if not _paused:
+		_video.paused = false
+		FunscriptPlayer.Resume()
+
+
+# ---------------------------------------------------------------------------
+# Pause / HUD
+# ---------------------------------------------------------------------------
+
+func _toggle_pause() -> void:
+	_paused = not _paused
+	_video.paused = _paused
+	if _paused:
+		FunscriptPlayer.Pause()
+		_pause_btn.text = "> RESUME"
+	else:
+		FunscriptPlayer.Resume()
+		_pause_btn.text = "|| PAUSE"
+
+
+func _show_hud() -> void:
+	_hud.modulate = Color(1, 1, 1, 1)
+	_hud.visible  = true
+	_hide_timer.start(HUD_HIDE_DELAY)
+
+
+func _on_hide_timer_timeout() -> void:
+	_hud.visible = false
+
+
+# ---------------------------------------------------------------------------
+# Input
+# ---------------------------------------------------------------------------
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion or event is InputEventMouseButton \
+			or event is InputEventKey:
+		_show_hud()
+	if event.is_action_pressed("ui_cancel"):
+		_go_to_menu()
+		get_viewport().set_input_as_handled()
+
+
+# ---------------------------------------------------------------------------
+# Signals
+# ---------------------------------------------------------------------------
+
+func _connect_signals() -> void:
+	_video.finished.connect(_on_round_ended)
+	_end_timer.timeout.connect(_on_round_ended)
+	_pause_btn.pressed.connect(_toggle_pause)
+	_menu_btn.pressed.connect(_go_to_menu)
+	_hide_timer.timeout.connect(_on_hide_timer_timeout)
+	_pause_btn.mouse_entered.connect(_show_hud)
+	_menu_btn.mouse_entered.connect(_show_hud)
+	_options_btn.pressed.connect(_on_options_pressed)
+	_options_btn.mouse_entered.connect(_show_hud)
+
+
+# ---------------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------------
+
+func _apply_layout() -> void:
+	anchor_right  = 1.0
+	anchor_bottom = 1.0
+
+	_bg.anchor_right  = 1.0
+	_bg.anchor_bottom = 1.0
+	_bg.offset_left   = 0
+	_bg.offset_top    = 0
+	_bg.offset_right  = 0
+	_bg.offset_bottom = 0
+
+	_video.anchor_right  = 1.0
+	_video.anchor_bottom = 1.0
+	_video.offset_left   = 0
+	_video.offset_top    = 0
+	_video.offset_right  = 0
+	_video.offset_bottom = 0
+
+	_hud.anchor_right  = 1.0
+	_hud.anchor_bottom = 1.0
+
+	_hud_bar.anchor_left   = 0.0
+	_hud_bar.anchor_right  = 1.0
+	_hud_bar.anchor_top    = 1.0
+	_hud_bar.anchor_bottom = 1.0
+	_hud_bar.offset_top    = -HUD_BAR_HEIGHT
+	_hud_bar.offset_bottom = 0
+
+	_hud_layout.add_theme_constant_override("separation", 16)
+	_round_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_progress.custom_minimum_size    = Vector2(0, 8)
+
+
+# ---------------------------------------------------------------------------
+# Theme
+# ---------------------------------------------------------------------------
+
+func _apply_theme() -> void:
+	_bg.color = COLOR_BG
+
+	var bar_style: StyleBoxFlat = StyleBoxFlat.new()
+	bar_style.bg_color            = COLOR_PANEL_BG
+	bar_style.border_color        = COLOR_PURPLE_BRIGHT
+	bar_style.border_width_top    = 1
+	bar_style.content_margin_left  = 20
+	bar_style.content_margin_right = 20
+	bar_style.content_margin_top   = 14
+	bar_style.content_margin_bottom = 14
+	_hud_bar.add_theme_stylebox_override("panel", bar_style)
+
+	_round_lbl.add_theme_color_override("font_color",    COLOR_WHITE_SOFT)
+	_round_lbl.add_theme_font_size_override("font_size", 13)
+	_round_lbl.uppercase = true
+
+	_style_progress()
+	_style_button(_pause_btn,   COLOR_PURPLE_BRIGHT)
+	_style_button(_menu_btn,    COLOR_MAGENTA)
+	_style_button(_options_btn, COLOR_PURPLE_MID)
+
+
+func _style_button(btn: Button, accent: Color) -> void:
+	btn.add_theme_color_override("font_color",         accent)
+	btn.add_theme_color_override("font_hover_color",   COLOR_WHITE_SOFT)
+	btn.add_theme_color_override("font_pressed_color", COLOR_BG)
+	btn.add_theme_font_size_override("font_size", 13)
+	btn.text = btn.text.to_upper()
+
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color            = Color(accent.r, accent.g, accent.b, 0.12)
+	s.border_color        = accent
+	s.border_width_left   = 1
+	s.border_width_right  = 1
+	s.border_width_top    = 1
+	s.border_width_bottom = 1
+	s.content_margin_left   = 14
+	s.content_margin_right  = 14
+	s.content_margin_top    = 8
+	s.content_margin_bottom = 8
+	btn.add_theme_stylebox_override("normal", s)
+
+	var s_hover: StyleBoxFlat = s.duplicate()
+	s_hover.bg_color = Color(accent.r, accent.g, accent.b, 0.32)
+	btn.add_theme_stylebox_override("hover", s_hover)
+
+	var s_pressed: StyleBoxFlat = s.duplicate()
+	s_pressed.bg_color = accent
+	btn.add_theme_stylebox_override("pressed", s_pressed)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+
+
+func _style_progress() -> void:
+	var bg: StyleBoxFlat = StyleBoxFlat.new()
+	bg.bg_color                  = Color(0.08, 0.0, 0.12, 0.8)
+	bg.corner_radius_top_left    = 4
+	bg.corner_radius_top_right   = 4
+	bg.corner_radius_bottom_left = 4
+	bg.corner_radius_bottom_right = 4
+
+	var fill: StyleBoxFlat = StyleBoxFlat.new()
+	fill.bg_color                  = COLOR_PURPLE_BRIGHT
+	fill.corner_radius_top_left    = 4
+	fill.corner_radius_top_right   = 4
+	fill.corner_radius_bottom_left = 4
+	fill.corner_radius_bottom_right = 4
+
+	_progress.add_theme_stylebox_override("background", bg)
+	_progress.add_theme_stylebox_override("fill", fill)
+	_progress.min_value      = 0.0
+	_progress.max_value      = 1.0
+	_progress.show_percentage = false

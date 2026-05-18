@@ -1,0 +1,152 @@
+[gd_scene format=3 uid="uid://borpa6qo26geo"]
+
+[ext_resource type="Script" uid="uid://886lbtll1qkr" path="res://scripts/journey_select/JourneySelect.gd" id="1_jsel"]
+[ext_resource type="Script" uid="uid://dscg7dyswe1h7" path="res://scripts/main/AnimatedBackground.gd" id="2_abg"]
+
+[node name="root" type="Control" unique_id=261649514]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_jsel")
+
+[node name="Background" type="ColorRect" parent="." unique_id=744543218]
+layout_mode = 0
+color = Color(0, 0, 0, 1)
+
+[node name="AnimatedBackground" type="Control" parent="." unique_id=1577566533]
+anchors_preset = 0
+script = ExtResource("2_abg")
+
+[node name="TopBar" type="HBoxContainer" parent="." unique_id=2122763902]
+layout_mode = 0
+
+[node name="BackButton" type="Button" parent="TopBar" unique_id=305315822]
+layout_mode = 2
+text = "< BACK"
+
+[node name="TitleLabel" type="Label" parent="TopBar" unique_id=1336843015]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "SELECT JOURNEY"
+horizontal_alignment = 1
+
+[node name="SortContainer" type="HBoxContainer" parent="TopBar" unique_id=1806383860]
+layout_mode = 2
+
+[node name="SortLabel" type="Label" parent="TopBar/SortContainer" unique_id=2043804583]
+layout_mode = 2
+text = "SORT:"
+
+[node name="SortNameBtn" type="Button" parent="TopBar/SortContainer" unique_id=2109000964]
+layout_mode = 2
+text = "NAME ▲"
+
+[node name="SortDurationBtn" type="Button" parent="TopBar/SortContainer" unique_id=1369415173]
+layout_mode = 2
+text = "DURATION"
+
+[node name="SortActionsBtn" type="Button" parent="TopBar/SortContainer" unique_id=1045823711]
+layout_mode = 2
+text = "ACTIONS"
+
+[node name="ScrollContainer" type="ScrollContainer" parent="." unique_id=1889195361]
+layout_mode = 0
+
+[node name="Grid" type="GridContainer" parent="ScrollContainer" unique_id=144870130]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="EmptyLabel" type="Label" parent="." unique_id=1091445135]
+visible = false
+layout_mode = 0
+text = "NO JOURNEYS FOUND
+Drop a journey folder into your journeys directory to get started."
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="DetailModal" type="Control" parent="." unique_id=1352392677]
+visible = false
+anchors_preset = 0
+
+[node name="Backdrop" type="ColorRect" parent="DetailModal" unique_id=1159284983]
+layout_mode = 0
+color = Color(0, 0, 0, 0.85)
+
+[node name="ModalPanel" type="PanelContainer" parent="DetailModal" unique_id=1722092656]
+layout_mode = 0
+
+[node name="ModalLayout" type="HBoxContainer" parent="DetailModal/ModalPanel" unique_id=574345327]
+layout_mode = 2
+
+[node name="CoverImage" type="TextureRect" parent="DetailModal/ModalPanel/ModalLayout" unique_id=2068707350]
+layout_mode = 2
+clip_contents = true
+expand_mode = 1
+stretch_mode = 5
+
+[node name="DetailsColumn" type="VBoxContainer" parent="DetailModal/ModalPanel/ModalLayout" unique_id=54859932]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="ModalTitle" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=36367279]
+layout_mode = 2
+text = "JOURNEY TITLE"
+
+[node name="ModalAuthor" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=569034464]
+layout_mode = 2
+text = "by Unknown"
+
+[node name="ModalDifficulty" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=328598112]
+layout_mode = 2
+text = "◆ DIFFICULTY"
+
+[node name="ModalDescription" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=731028456]
+layout_mode = 2
+autowrap_mode = 3
+
+[node name="StatsDivider" type="HSeparator" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=520288684]
+layout_mode = 2
+
+[node name="StatsRow" type="HBoxContainer" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=205652998]
+layout_mode = 2
+
+[node name="StatRounds" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn/StatsRow" unique_id=976256150]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "- ROUNDS"
+
+[node name="StatActions" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn/StatsRow" unique_id=119712001]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "- ACTIONS"
+
+[node name="StatLength" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn/StatsRow" unique_id=23515318]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "-:--"
+
+[node name="RoundsDivider" type="HSeparator" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=1351880780]
+layout_mode = 2
+
+[node name="RoundsHeader" type="Label" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=1945365250]
+layout_mode = 2
+text = "ROUNDS"
+
+[node name="RoundListScroll" type="ScrollContainer" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=1488890046]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="RoundList" type="VBoxContainer" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn/RoundListScroll" unique_id=642006535]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="ActionDivider" type="HSeparator" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=1371586860]
+layout_mode = 2
+
+[node name="PlayButton" type="Button" parent="DetailModal/ModalPanel/ModalLayout/DetailsColumn" unique_id=1269778352]
+layout_mode = 2
+text = "> PLAY JOURNEY"
