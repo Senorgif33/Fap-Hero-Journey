@@ -138,9 +138,16 @@ layout_mode = 2
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="AddRoundButton" type="Button" parent="Scroll/Content/RoundsSection"]
+[node name="AddButtonsRow" type="HBoxContainer" parent="Scroll/Content/RoundsSection"]
+layout_mode = 2
+
+[node name="AddRoundButton" type="Button" parent="Scroll/Content/RoundsSection/AddButtonsRow"]
 layout_mode = 2
 text = "+ ADD ROUND"
+
+[node name="AddForkButton" type="Button" parent="Scroll/Content/RoundsSection/AddButtonsRow"]
+layout_mode = 2
+text = "⑂ ADD FORK"
 
 [node name="BottomSection" type="VBoxContainer" parent="Scroll/Content"]
 layout_mode = 2

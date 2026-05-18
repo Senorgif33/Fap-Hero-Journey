@@ -1,0 +1,261 @@
+extends Control
+
+signal path_chosen(index: int)
+
+const COLOR_BG:            Color = Color(0.0,   0.0,   0.0,   0.0)
+const COLOR_PANEL_BG:      Color = Color(0.055, 0.008, 0.086, 0.92)
+const COLOR_PURPLE_BRIGHT: Color = Color(0.698, 0.118, 1.0,   1.0)
+const COLOR_PURPLE_MID:    Color = Color(0.408, 0.063, 0.627, 1.0)
+const COLOR_MAGENTA:       Color = Color(0.878, 0.0,   0.878, 1.0)
+const COLOR_WHITE_SOFT:    Color = Color(0.878, 0.780, 1.0,   1.0)
+const COLOR_DARK_TEXT:     Color = Color(0.55,  0.47,  0.72,  1.0)
+
+@onready var _backdrop:   ColorRect    = $Backdrop
+@onready var _center_box: VBoxContainer = $CenterBox
+@onready var _fork_title: Label        = $CenterBox/ForkTitle
+@onready var _fork_sub:   Label        = $CenterBox/ForkSubtitle
+@onready var _cards_row:  HBoxContainer = $CenterBox/CardsRow
+
+
+func _ready() -> void:
+	_apply_layout()
+	_apply_base_theme()
+
+
+func setup(fork_data: Dictionary) -> void:
+	var title: String = fork_data.get("title", "")
+	if title != "":
+		_fork_title.text = title.to_upper()
+
+	var desc: String = fork_data.get("description", "")
+	_fork_sub.text    = desc if desc != "" else "Choose your path"
+	_fork_sub.visible = true
+
+	var paths: Array = fork_data.get("paths", [])
+	for i in paths.size():
+		var path_data: Dictionary = paths[i]
+		var card: Control = _make_card(i, path_data)
+		_cards_row.add_child(card)
+
+
+func _make_card(index: int, path_data: Dictionary) -> Control:
+	var card: Control = Control.new()
+	card.custom_minimum_size   = Vector2(220, 360)
+	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	card.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	card.clip_contents         = true
+
+	# Layer 1 — solid bg (always present; shows through when no image)
+	var bg: ColorRect = ColorRect.new()
+	bg.color = Color(0.055, 0.008, 0.086, 1.0)
+	_fill(bg)
+	card.add_child(bg)
+
+	# Layer 2 — poster image (only when available)
+	var image_path: String = path_data.get("image_path", "")
+	if image_path != "":
+		var img: Image = _load_image(image_path)
+		if img:
+			var img_rect: TextureRect = TextureRect.new()
+			img_rect.texture      = ImageTexture.create_from_image(img)
+			img_rect.expand_mode  = TextureRect.EXPAND_IGNORE_SIZE
+			img_rect.stretch_mode = TextureRect.STRETCH_SCALE
+			_fill(img_rect)
+			card.add_child(img_rect)
+
+	# Layer 3 — gradient: transparent at top, dark at bottom (always, for readability)
+	var grad: Gradient = Gradient.new()
+	grad.set_color(0, Color(0.0, 0.0, 0.0, 0.0))
+	grad.set_color(1, Color(0.0, 0.0, 0.0, 0.90))
+	var grad_tex: GradientTexture2D = GradientTexture2D.new()
+	grad_tex.gradient  = grad
+	grad_tex.fill_from = Vector2(0.0, 0.0)
+	grad_tex.fill_to   = Vector2(0.0, 1.0)
+	var grad_rect: TextureRect = TextureRect.new()
+	grad_rect.texture     = grad_tex
+	grad_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_fill(grad_rect)
+	card.add_child(grad_rect)
+
+	# Layer 4 — border (transparent fill, just the outline on top of everything)
+	var border: Panel = Panel.new()
+	var border_style: StyleBoxFlat = StyleBoxFlat.new()
+	border_style.bg_color            = Color(0, 0, 0, 0)
+	border_style.border_color        = COLOR_PURPLE_MID
+	border_style.border_width_left   = 1
+	border_style.border_width_right  = 1
+	border_style.border_width_top    = 1
+	border_style.border_width_bottom = 1
+	border.add_theme_stylebox_override("panel", border_style)
+	_fill(border)
+	card.add_child(border)
+
+	# Layer 5 — content pinned to the bottom
+	var margin: MarginContainer = MarginContainer.new()
+	margin.add_theme_constant_override("margin_left",   20)
+	margin.add_theme_constant_override("margin_right",  20)
+	margin.add_theme_constant_override("margin_top",    20)
+	margin.add_theme_constant_override("margin_bottom", 20)
+	_fill(margin)
+	card.add_child(margin)
+
+	var col: VBoxContainer = VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 10)
+	margin.add_child(col)
+
+	# Spacer pushes all content to the bottom
+	var spacer: Control = Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(spacer)
+
+	var path_name: String = path_data.get("name", "PATH %d" % (index + 1))
+	var name_lbl: Label = Label.new()
+	name_lbl.text                 = path_name.to_upper()
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+	name_lbl.add_theme_color_override("font_color",    COLOR_WHITE_SOFT)
+	name_lbl.add_theme_font_size_override("font_size", 22)
+	col.add_child(name_lbl)
+
+	var desc: String = path_data.get("description", "")
+	if desc != "":
+		var desc_lbl: Label = Label.new()
+		desc_lbl.text                 = desc
+		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		desc_lbl.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+		desc_lbl.add_theme_color_override("font_color",    COLOR_DARK_TEXT)
+		desc_lbl.add_theme_font_size_override("font_size", 13)
+		col.add_child(desc_lbl)
+
+	var rounds: Array = path_data.get("rounds", [])
+	var rounds_lbl: Label = Label.new()
+	rounds_lbl.text                 = "%d ROUND%s" % [rounds.size(), "S" if rounds.size() != 1 else ""]
+	rounds_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rounds_lbl.add_theme_color_override("font_color",    COLOR_PURPLE_BRIGHT)
+	rounds_lbl.add_theme_font_size_override("font_size", 13)
+	col.add_child(rounds_lbl)
+
+	var btn: Button = Button.new()
+	btn.text = "> CHOOSE"
+	_style_button(btn, COLOR_PURPLE_BRIGHT)
+	btn.pressed.connect(_on_path_chosen.bind(index))
+	col.add_child(btn)
+
+	return card
+
+
+# Anchors a control to fill its parent completely.
+func _fill(c: Control) -> void:
+	c.anchor_right  = 1.0
+	c.anchor_bottom = 1.0
+	c.offset_left   = 0
+	c.offset_top    = 0
+	c.offset_right  = 0
+	c.offset_bottom = 0
+
+
+static func _load_image(path: String) -> Image:
+	if path == "":
+		return null
+	var abs_path: String = ProjectSettings.globalize_path(path) \
+		if (path.begins_with("user://") or path.begins_with("res://")) else path
+	if not FileAccess.file_exists(abs_path):
+		return null
+	var f: FileAccess = FileAccess.open(abs_path, FileAccess.READ)
+	if f == null:
+		return null
+	var bytes: PackedByteArray = f.get_buffer(f.get_length())
+	f.close()
+	if bytes.is_empty():
+		return null
+	var img: Image = Image.new()
+	var err: Error
+	if bytes.size() >= 4 and bytes[0] == 0x89 and bytes[1] == 0x50:
+		err = img.load_png_from_buffer(bytes)
+	elif bytes.size() >= 3 and bytes[0] == 0xFF and bytes[1] == 0xD8:
+		err = img.load_jpg_from_buffer(bytes)
+	elif bytes.size() >= 12 and bytes[8] == 0x57 and bytes[9] == 0x45 and bytes[10] == 0x42 and bytes[11] == 0x50:
+		err = img.load_webp_from_buffer(bytes)
+	else:
+		err = img.load_jpg_from_buffer(bytes)
+		if err != OK:
+			err = img.load_png_from_buffer(bytes)
+		if err != OK:
+			err = img.load_webp_from_buffer(bytes)
+	return img if err == OK else null
+
+
+func _on_path_chosen(index: int) -> void:
+	emit_signal("path_chosen", index)
+	queue_free()
+
+
+func _apply_layout() -> void:
+	anchor_right  = 1.0
+	anchor_bottom = 1.0
+
+	_backdrop.anchor_right  = 1.0
+	_backdrop.anchor_bottom = 1.0
+	_backdrop.offset_left   = 0
+	_backdrop.offset_top    = 0
+	_backdrop.offset_right  = 0
+	_backdrop.offset_bottom = 0
+
+	_center_box.anchor_left   = 0.1
+	_center_box.anchor_right  = 0.9
+	_center_box.anchor_top    = 0.1
+	_center_box.anchor_bottom = 0.9
+	_center_box.offset_left   = 0
+	_center_box.offset_top    = 0
+	_center_box.offset_right  = 0
+	_center_box.offset_bottom = 0
+	_center_box.add_theme_constant_override("separation", 24)
+
+	_cards_row.add_theme_constant_override("separation", 20)
+	_cards_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+
+func _apply_base_theme() -> void:
+	_fork_title.add_theme_color_override("font_color",    COLOR_WHITE_SOFT)
+	_fork_title.add_theme_font_size_override("font_size", 32)
+	_fork_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_fork_title.uppercase = true
+
+	_fork_sub.add_theme_color_override("font_color",    COLOR_DARK_TEXT)
+	_fork_sub.add_theme_font_size_override("font_size", 15)
+	_fork_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+
+
+func _style_button(btn: Button, accent: Color) -> void:
+	btn.add_theme_color_override("font_color",         accent)
+	btn.add_theme_color_override("font_hover_color",   COLOR_WHITE_SOFT)
+	btn.add_theme_color_override("font_pressed_color", COLOR_BG)
+	btn.add_theme_font_size_override("font_size", 14)
+
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color              = Color(accent.r, accent.g, accent.b, 0.12)
+	s.border_color          = accent
+	s.border_width_left     = 1
+	s.border_width_right    = 1
+	s.border_width_top      = 1
+	s.border_width_bottom   = 1
+	s.content_margin_left   = 14
+	s.content_margin_right  = 14
+	s.content_margin_top    = 10
+	s.content_margin_bottom = 10
+	s.corner_radius_top_left     = 4
+	s.corner_radius_top_right    = 4
+	s.corner_radius_bottom_left  = 4
+	s.corner_radius_bottom_right = 4
+	btn.add_theme_stylebox_override("normal", s)
+
+	var s_hover: StyleBoxFlat = s.duplicate()
+	s_hover.bg_color = Color(accent.r, accent.g, accent.b, 0.32)
+	btn.add_theme_stylebox_override("hover", s_hover)
+
+	var s_pressed: StyleBoxFlat = s.duplicate()
+	s_pressed.bg_color = accent
+	btn.add_theme_stylebox_override("pressed", s_pressed)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())

@@ -1,0 +1,32 @@
+[gd_scene format=3 uid="uid://fork_screen_001"]
+
+[ext_resource type="Script" uid="uid://fork_screen_gd01" path="res://scripts/fork_screen/ForkScreen.gd" id="1_fscr"]
+
+[node name="root" type="Control" unique_id=1000000001]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_fscr")
+
+[node name="Backdrop" type="ColorRect" parent="." unique_id=1000000002]
+layout_mode = 0
+color = Color(0, 0, 0, 0.92)
+
+[node name="CenterBox" type="VBoxContainer" parent="." unique_id=1000000003]
+layout_mode = 0
+
+[node name="ForkTitle" type="Label" parent="CenterBox" unique_id=1000000004]
+layout_mode = 2
+text = "FORK IN THE ROAD"
+horizontal_alignment = 1
+
+[node name="ForkSubtitle" type="Label" parent="CenterBox" unique_id=1000000005]
+layout_mode = 2
+text = "Choose your path"
+horizontal_alignment = 1
+
+[node name="CardsRow" type="HBoxContainer" parent="CenterBox" unique_id=1000000006]
+layout_mode = 2

@@ -33,12 +33,6 @@ layout_mode = 2
 layout_mode = 2
 text = "ROUND 1 / 1"
 
-[node name="ProgressBar" type="ProgressBar" parent="HUD/HUDBar/HUDLayout"]
-layout_mode = 2
-size_flags_horizontal = 3
-show_percentage = false
-value = 0.0
-
 [node name="ScoreLabel" type="Label" parent="HUD/HUDBar/HUDLayout"]
 layout_mode = 2
 text = "0 PTS"
@@ -54,6 +48,11 @@ text = "< MENU"
 [node name="OptionsBtn" type="Button" parent="HUD/HUDBar/HUDLayout"]
 layout_mode = 2
 text = "⚙ OPTIONS"
+
+[node name="ProgressBar" type="ProgressBar" parent="HUD"]
+layout_mode = 0
+show_percentage = false
+value = 0.0
 
 [node name="HideTimer" type="Timer" parent="HUD"]
 wait_time = 3.0

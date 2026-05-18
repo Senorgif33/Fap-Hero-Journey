@@ -1,6 +1,7 @@
 extends Control
 
-const OptionsScene = preload("res://scenes/options/Options.tscn")
+const OptionsScene  = preload("res://scenes/options/Options.tscn")
+const ForkScene     = preload("res://scenes/fork_screen/ForkScreen.tscn")
 
 # ---------------------------------------------------------------------------
 # GameLoop.gd  –  Round controller and video player
@@ -30,7 +31,7 @@ const VIDEO_EXTS:      Array = ["mp4", "mkv", "webm", "avi", "mov", "ogv"]
 @onready var _hud_bar:     PanelContainer    = $HUD/HUDBar
 @onready var _hud_layout:  HBoxContainer     = $HUD/HUDBar/HUDLayout
 @onready var _round_lbl:   Label             = $HUD/HUDBar/HUDLayout/RoundLabel
-@onready var _progress:    ProgressBar       = $HUD/HUDBar/HUDLayout/ProgressBar
+@onready var _progress:    ProgressBar       = $HUD/ProgressBar
 @onready var _score_lbl:   Label             = $HUD/HUDBar/HUDLayout/ScoreLabel
 @onready var _pause_btn:   Button            = $HUD/HUDBar/HUDLayout/PauseBtn
 @onready var _menu_btn:    Button            = $HUD/HUDBar/HUDLayout/MenuBtn
@@ -46,7 +47,7 @@ func _ready() -> void:
 	_apply_theme()
 	_connect_signals()
 	ScoreService.Reset()
-	_load_current_round()
+	_load_current_item()
 	_show_hud()
 
 
@@ -60,8 +61,32 @@ func _process(_delta: float) -> void:
 
 
 # ---------------------------------------------------------------------------
-# Round loading
+# Item loading (round or fork)
 # ---------------------------------------------------------------------------
+
+func _load_current_item() -> void:
+	match GameState.CurrentItemType():
+		"fork":
+			_show_fork_screen(GameState.CurrentFork())
+		_:
+			_load_current_round()
+
+
+func _show_fork_screen(fork_data: Dictionary) -> void:
+	_video.paused = true
+	FunscriptPlayer.Pause()
+	var fork_screen = ForkScene.instantiate()
+	fork_screen.path_chosen.connect(_on_fork_path_chosen)
+	add_child(fork_screen)
+	fork_screen.setup(fork_data)
+
+
+func _on_fork_path_chosen(path_index: int) -> void:
+	GameState.ResolveFork(path_index)
+	_video.paused = false
+	FunscriptPlayer.Resume()
+	_load_current_round()
+
 
 func _load_current_round() -> void:
 	var round: Dictionary = GameState.CurrentRound()
@@ -71,8 +96,8 @@ func _load_current_round() -> void:
 		return
 
 	var total: int = GameState.TotalRounds()
-	var idx:   int = GameState.RoundIndex + 1
-	_round_lbl.text = "ROUND %d / %d  —  %s" % [idx, total,
+	var num:   int = GameState.RoundNumber
+	_round_lbl.text = "ROUND %d / %d  —  %s" % [num, total,
 		(round.get("name", "") as String).to_upper()]
 
 	_progress.value = 0.0
@@ -169,7 +194,7 @@ func _on_round_ended() -> void:
 		Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
 	else:
 		GameState.Advance()
-		_load_current_round()
+		_load_current_item()
 
 
 func _go_to_menu() -> void:
@@ -286,7 +311,16 @@ func _apply_layout() -> void:
 
 	_hud_layout.add_theme_constant_override("separation", 16)
 	_round_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_progress.custom_minimum_size    = Vector2(0, 8)
+
+	# Progress bar — centered thin strip at the very bottom of the screen
+	_progress.anchor_left   = 0.1
+	_progress.anchor_right  = 0.9
+	_progress.anchor_top    = 1.0
+	_progress.anchor_bottom = 1.0
+	_progress.offset_left   = 0
+	_progress.offset_right  = 0
+	_progress.offset_top    = -7
+	_progress.offset_bottom = -1
 
 
 # ---------------------------------------------------------------------------

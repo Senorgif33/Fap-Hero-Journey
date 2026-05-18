@@ -54,14 +54,15 @@ const DropZoneScript = preload("res://scripts/journey_builder/DropZone.gd")
 @onready var _desc_field:    TextEdit        = $Scroll/Content/InfoSection/InfoLayout/FieldsColumn/DescRow/DescField
 @onready var _round_header:  HBoxContainer   = $Scroll/Content/RoundsSection/RoundListHeader
 @onready var _round_list:    VBoxContainer   = $Scroll/Content/RoundsSection/RoundList
-@onready var _add_round_btn: Button          = $Scroll/Content/RoundsSection/AddRoundButton
+@onready var _add_round_btn: Button          = $Scroll/Content/RoundsSection/AddButtonsRow/AddRoundButton
+@onready var _add_fork_btn:  Button          = $Scroll/Content/RoundsSection/AddButtonsRow/AddForkButton
 @onready var _status_lbl:    Label           = $Scroll/Content/BottomSection/StatusLabel
 @onready var _save_btn:      Button          = $Scroll/Content/BottomSection/SaveButton
 
 static var edit_journey: Dictionary = {}
 
 var _cover_path: String = ""
-var _rounds:     Array  = []  # Array[Dictionary] — {name, funscript_path, video_path, coins}
+var _items:      Array  = []  # Array[Dictionary] — {type:"round"|"fork", ...}
 
 var _transcode_cancel: bool = false
 var _transcode_pid:    int  = -1
@@ -71,7 +72,7 @@ func _ready() -> void:
 	_apply_layout()
 	_apply_theme()
 	_connect_signals()
-	_refresh_rounds()
+	_refresh_items()
 	if not edit_journey.is_empty():
 		_load_journey(edit_journey)
 		edit_journey = {}
@@ -154,6 +155,9 @@ func _apply_layout() -> void:
 	_round_list.add_theme_constant_override("separation", 6)
 	_round_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
+	var add_btns_row: HBoxContainer = $Scroll/Content/RoundsSection/AddButtonsRow
+	add_btns_row.add_theme_constant_override("separation", 12)
+
 	(get_node("Scroll/Content/BottomSection") as VBoxContainer).add_theme_constant_override("separation", 12)
 
 
@@ -218,6 +222,7 @@ func _apply_theme() -> void:
 	_build_round_header()
 
 	_style_button(_add_round_btn, COLOR_PURPLE_MID)
+	_style_button(_add_fork_btn,  COLOR_MAGENTA)
 
 	_status_lbl.add_theme_font_size_override("font_size", 13)
 	_status_lbl.visible = false
@@ -350,6 +355,7 @@ func _connect_signals() -> void:
 	_back_btn.pressed.connect(_on_back_pressed)
 	_cover_btn.pressed.connect(_on_cover_pressed)
 	_add_round_btn.pressed.connect(_on_add_round_pressed)
+	_add_fork_btn.pressed.connect(_on_add_fork_pressed)
 	_save_btn.pressed.connect(_on_save_pressed)
 	get_viewport().files_dropped.connect(_on_viewport_files_dropped)
 
@@ -371,8 +377,21 @@ func _on_viewport_files_dropped(files: PackedStringArray) -> void:
 
 
 func _on_add_round_pressed() -> void:
-	_rounds.append({"name": "", "funscript_path": "", "video_path": "", "coins": 0})
-	_refresh_rounds()
+	_items.append({"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0})
+	_refresh_items()
+
+
+func _on_add_fork_pressed() -> void:
+	_items.append({
+		"type":        "fork",
+		"title":       "",
+		"description": "",
+		"paths": [
+			{"name": "Path A", "description": "", "image_path": "", "rounds": []},
+			{"name": "Path B", "description": "", "image_path": "", "rounds": []},
+		],
+	})
+	_refresh_items()
 
 
 # ---------------------------------------------------------------------------
@@ -440,19 +459,53 @@ func _load_journey(journey: Dictionary) -> void:
 		_cover_path = cover
 		_update_cover_preview()
 
-	_rounds.clear()
+	_items.clear()
+
 	var rounds: Array = journey.get("rounds", []).duplicate()
 	rounds.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return (a.get("order", 0) as int) < (b.get("order", 0) as int)
 	)
+	var forks: Array = journey.get("forks", []).duplicate()
+
+	# Interleave rounds and forks by sort key (same logic as GameState.BuildSequence)
+	var seq: Array = []
 	for r: Dictionary in rounds:
-		_rounds.append({
-			"name":           r.get("name", ""),
-			"funscript_path": r.get("funscript_path", ""),
-			"video_path":     _find_video_in_round(r.get("folder", "")),
-			"coins":          r.get("coins", 0),
+		seq.append({
+			"key": (r.get("order", 0) as int) * 2,
+			"data": {
+				"type":           "round",
+				"name":           r.get("name", ""),
+				"funscript_path": r.get("funscript_path", ""),
+				"video_path":     _find_video_in_round(r.get("folder", "")),
+				"coins":          r.get("coins", 0),
+			},
 		})
-	_refresh_rounds()
+	for f: Dictionary in forks:
+		var paths_out: Array = []
+		for p: Dictionary in f.get("paths", []):
+			var pr_out: Array = []
+			for pr: Dictionary in p.get("rounds", []):
+				pr_out.append({
+					"name":           pr.get("name", ""),
+					"funscript_path": pr.get("funscript_path", ""),
+					"video_path":     _find_video_in_round(pr.get("folder", "")),
+					"coins":          pr.get("coins", 0),
+				})
+			paths_out.append({"name": p.get("name",""), "description": p.get("description",""), "image_path": p.get("image_path",""), "rounds": pr_out})
+		seq.append({
+			"key": (f.get("after_order", 0) as int) * 2 + 1,
+			"data": {
+				"type":        "fork",
+				"title":       f.get("title", ""),
+				"description": f.get("description", ""),
+				"paths":       paths_out,
+			},
+		})
+	seq.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return (a["key"] as int) < (b["key"] as int))
+	for s in seq:
+		_items.append(s["data"])
+
+	_refresh_items()
 
 
 func _find_video_in_round(folder: String) -> String:
@@ -476,11 +529,14 @@ func _find_video_in_round(folder: String) -> String:
 # Round list
 # ---------------------------------------------------------------------------
 
-func _refresh_rounds() -> void:
+func _refresh_items() -> void:
 	for child in _round_list.get_children():
 		child.queue_free()
-	for i in _rounds.size():
-		_round_list.add_child(_make_round_row(i))
+	for i in _items.size():
+		if _items[i].get("type", "round") == "round":
+			_round_list.add_child(_make_round_row(i))
+		else:
+			_round_list.add_child(_make_fork_block(i))
 
 
 func _make_round_row(idx: int) -> Control:
@@ -499,84 +555,344 @@ func _make_round_row(idx: int) -> Control:
 	hbox.add_theme_constant_override("separation", ROW_SEP)
 	panel.add_child(hbox)
 
-	# Order number — fixed 30px, matches header "#"
+	# Count only round-type items up to this idx for the displayed number
+	var round_num: int = 0
+	for i in idx + 1:
+		if _items[i].get("type", "round") == "round":
+			round_num += 1
+
 	var order_lbl: Label = Label.new()
-	order_lbl.text = "%02d." % (idx + 1)
+	order_lbl.text = "%02d." % round_num
 	order_lbl.custom_minimum_size = Vector2(30, 0)
 	order_lbl.add_theme_color_override("font_color", COLOR_PURPLE_MID)
 	order_lbl.add_theme_font_size_override("font_size", 13)
 	hbox.add_child(order_lbl)
 
-	# Round name — expands, matches header "ROUND NAME"
 	var name_edit: LineEdit = LineEdit.new()
 	name_edit.placeholder_text      = "Round name..."
-	name_edit.text                   = _rounds[idx].get("name", "")
+	name_edit.text                   = _items[idx].get("name", "")
 	name_edit.size_flags_horizontal  = Control.SIZE_EXPAND_FILL
 	_style_line_edit(name_edit)
 	name_edit.text_changed.connect(func(val: String) -> void:
-		_rounds[idx]["name"] = val
+		_items[idx]["name"] = val
 	)
 	hbox.add_child(name_edit)
 
-	# Video drop zone — expands, matches header "VIDEO FILE"
 	var video_zone: PanelContainer = DropZoneScript.new()
 	video_zone.accepted_extensions = VIDEO_EXTENSIONS.duplicate()
-	video_zone.picker_title        = "Select Video for Round %d" % (idx + 1)
+	video_zone.picker_title        = "Select Video for Round %d" % round_num
 	video_zone.picker_filters      = ["*.mp4,*.m4v,*.mkv,*.avi,*.mov,*.wmv,*.webm ; Video Files", "*.* ; All Files"]
 	video_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hbox.add_child(video_zone)
-	if _rounds[idx].get("video_path", "") != "":
-		video_zone.call_deferred("set_file", _rounds[idx]["video_path"])
+	if _items[idx].get("video_path", "") != "":
+		video_zone.call_deferred("set_file", _items[idx]["video_path"])
 	video_zone.file_dropped.connect(func(path: String) -> void:
-		_rounds[idx]["video_path"] = path
-		if (_rounds[idx].get("name", "") as String).strip_edges() == "":
+		_items[idx]["video_path"] = path
+		if (_items[idx].get("name", "") as String).strip_edges() == "":
 			var auto: String = path.get_file().get_basename()
-			_rounds[idx]["name"] = auto
+			_items[idx]["name"] = auto
 			name_edit.text = auto
 	)
 
-	# Funscript drop zone — expands, matches header "FUNSCRIPT"
 	var fs_zone: PanelContainer = DropZoneScript.new()
 	fs_zone.accepted_extensions  = FUNSCRIPT_EXTENSIONS.duplicate()
-	fs_zone.picker_title         = "Select Funscript for Round %d" % (idx + 1)
+	fs_zone.picker_title         = "Select Funscript for Round %d" % round_num
 	fs_zone.picker_filters       = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
 	fs_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hbox.add_child(fs_zone)
-	if _rounds[idx].get("funscript_path", "") != "":
-		fs_zone.call_deferred("set_file", _rounds[idx]["funscript_path"])
+	if _items[idx].get("funscript_path", "") != "":
+		fs_zone.call_deferred("set_file", _items[idx]["funscript_path"])
 	fs_zone.file_dropped.connect(func(path: String) -> void:
-		_rounds[idx]["funscript_path"] = path
-		if (_rounds[idx].get("name", "") as String).strip_edges() == "":
+		_items[idx]["funscript_path"] = path
+		if (_items[idx].get("name", "") as String).strip_edges() == "":
 			var auto: String = path.get_file().get_basename()
-			_rounds[idx]["name"] = auto
+			_items[idx]["name"] = auto
 			name_edit.text = auto
 	)
 
-	# Coins — fixed 70px, matches header "COINS"
 	var coins_edit: LineEdit = LineEdit.new()
-	coins_edit.text              = str(_rounds[idx].get("coins", 0))
+	coins_edit.text              = str(_items[idx].get("coins", 0))
 	coins_edit.custom_minimum_size = Vector2(70, 0)
 	coins_edit.max_length        = 6
 	coins_edit.placeholder_text  = "0"
 	_style_line_edit(coins_edit)
 	coins_edit.text_changed.connect(func(val: String) -> void:
-		_rounds[idx]["coins"] = val.to_int()
+		_items[idx]["coins"] = val.to_int()
 	)
 	hbox.add_child(coins_edit)
 
-	# Action buttons — 3 × 32px = 96px total, matches header spacer
 	var up_btn: Button = _make_icon_btn("↑", idx == 0, COLOR_PURPLE_MID)
-	up_btn.pressed.connect(func() -> void: _move_round(idx, -1))
+	up_btn.pressed.connect(func() -> void: _move_item(idx, -1))
 	hbox.add_child(up_btn)
 
-	var dn_btn: Button = _make_icon_btn("↓", idx == _rounds.size() - 1, COLOR_PURPLE_MID)
-	dn_btn.pressed.connect(func() -> void: _move_round(idx, 1))
+	var dn_btn: Button = _make_icon_btn("↓", idx == _items.size() - 1, COLOR_PURPLE_MID)
+	dn_btn.pressed.connect(func() -> void: _move_item(idx, 1))
 	hbox.add_child(dn_btn)
 
 	var rm_btn: Button = _make_icon_btn("✕", false, COLOR_MAGENTA)
 	rm_btn.pressed.connect(func() -> void:
-		_rounds.remove_at(idx)
-		_refresh_rounds()
+		_items.remove_at(idx)
+		_refresh_items()
+	)
+	hbox.add_child(rm_btn)
+
+	return panel
+
+
+func _make_fork_block(idx: int) -> Control:
+	var item: Dictionary = _items[idx]
+
+	var outer: PanelContainer = PanelContainer.new()
+	var os: StyleBoxFlat = StyleBoxFlat.new()
+	os.bg_color              = Color(COLOR_MAGENTA.r, COLOR_MAGENTA.g, COLOR_MAGENTA.b, 0.06)
+	os.border_color          = COLOR_MAGENTA
+	os.border_width_left     = 2; os.border_width_right  = 2
+	os.border_width_top      = 2; os.border_width_bottom = 2
+	os.content_margin_left   = 12; os.content_margin_right  = 12
+	os.content_margin_top    = 10; os.content_margin_bottom = 10
+	outer.add_theme_stylebox_override("panel", os)
+	outer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+	outer.add_child(col)
+
+	# Header row
+	var header_row: HBoxContainer = HBoxContainer.new()
+	header_row.add_theme_constant_override("separation", ROW_SEP)
+	col.add_child(header_row)
+
+	var fork_lbl: Label = Label.new()
+	fork_lbl.text = "⑂ FORK"
+	fork_lbl.add_theme_color_override("font_color", COLOR_MAGENTA)
+	fork_lbl.add_theme_font_size_override("font_size", 13)
+	fork_lbl.custom_minimum_size = Vector2(72, 0)
+	header_row.add_child(fork_lbl)
+
+	var title_edit: LineEdit = LineEdit.new()
+	title_edit.placeholder_text     = "Fork title (optional)..."
+	title_edit.text                  = item.get("title", "")
+	title_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_line_edit(title_edit)
+	title_edit.text_changed.connect(func(val: String) -> void: _items[idx]["title"] = val)
+	header_row.add_child(title_edit)
+
+	var up_btn: Button = _make_icon_btn("↑", idx == 0, COLOR_PURPLE_MID)
+	up_btn.pressed.connect(func() -> void: _move_item(idx, -1))
+	header_row.add_child(up_btn)
+
+	var dn_btn: Button = _make_icon_btn("↓", idx == _items.size() - 1, COLOR_PURPLE_MID)
+	dn_btn.pressed.connect(func() -> void: _move_item(idx, 1))
+	header_row.add_child(dn_btn)
+
+	var rm_btn: Button = _make_icon_btn("✕", false, COLOR_MAGENTA)
+	rm_btn.pressed.connect(func() -> void:
+		_items.remove_at(idx)
+		_refresh_items()
+	)
+	header_row.add_child(rm_btn)
+
+	# Description row
+	var desc_edit: LineEdit = LineEdit.new()
+	desc_edit.placeholder_text     = "Fork description (optional)..."
+	desc_edit.text                  = item.get("description", "")
+	desc_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_line_edit(desc_edit)
+	desc_edit.text_changed.connect(func(val: String) -> void: _items[idx]["description"] = val)
+	col.add_child(desc_edit)
+
+	# Paths
+	var paths_col: VBoxContainer = VBoxContainer.new()
+	paths_col.add_theme_constant_override("separation", 6)
+	col.add_child(paths_col)
+
+	var paths: Array = item.get("paths", [])
+	for pi in paths.size():
+		paths_col.add_child(_make_fork_path_block(idx, pi))
+
+	if paths.size() < 4:
+		var add_path_btn: Button = Button.new()
+		add_path_btn.text = "+ ADD PATH"
+		_style_button(add_path_btn, COLOR_PURPLE_MID)
+		add_path_btn.pressed.connect(func() -> void:
+			_items[idx]["paths"].append({"name": "Path %s" % (char(65 + _items[idx]["paths"].size())), "description": "", "image_path": "", "rounds": []})
+			_refresh_items()
+		)
+		col.add_child(add_path_btn)
+
+	return outer
+
+
+func _make_fork_path_block(fork_idx: int, path_idx: int) -> Control:
+	var path_data: Dictionary = _items[fork_idx]["paths"][path_idx]
+
+	var panel: PanelContainer = PanelContainer.new()
+	var ps: StyleBoxFlat = StyleBoxFlat.new()
+	ps.bg_color            = Color(COLOR_PURPLE_MID.r, COLOR_PURPLE_MID.g, COLOR_PURPLE_MID.b, 0.10)
+	ps.border_color        = COLOR_PURPLE_MID
+	ps.border_width_left   = 1; ps.border_width_right  = 1
+	ps.border_width_top    = 1; ps.border_width_bottom = 1
+	ps.content_margin_left = 10; ps.content_margin_right  = 10
+	ps.content_margin_top  = 8;  ps.content_margin_bottom = 8
+	panel.add_theme_stylebox_override("panel", ps)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 6)
+	panel.add_child(col)
+
+	# Path header
+	var hdr: HBoxContainer = HBoxContainer.new()
+	hdr.add_theme_constant_override("separation", ROW_SEP)
+	col.add_child(hdr)
+
+	var path_lbl: Label = Label.new()
+	path_lbl.text = "PATH %d" % (path_idx + 1)
+	path_lbl.add_theme_color_override("font_color", COLOR_PURPLE_BRIGHT)
+	path_lbl.add_theme_font_size_override("font_size", 11)
+	path_lbl.custom_minimum_size = Vector2(60, 0)
+	hdr.add_child(path_lbl)
+
+	var name_edit: LineEdit = LineEdit.new()
+	name_edit.placeholder_text     = "Path name..."
+	name_edit.text                  = path_data.get("name", "")
+	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_line_edit(name_edit)
+	name_edit.text_changed.connect(func(val: String) -> void:
+		_items[fork_idx]["paths"][path_idx]["name"] = val
+	)
+	hdr.add_child(name_edit)
+
+	var desc_edit: LineEdit = LineEdit.new()
+	desc_edit.placeholder_text     = "Description (optional)..."
+	desc_edit.text                  = path_data.get("description", "")
+	desc_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_line_edit(desc_edit)
+	desc_edit.text_changed.connect(func(val: String) -> void:
+		_items[fork_idx]["paths"][path_idx]["description"] = val
+	)
+	hdr.add_child(desc_edit)
+
+	if _items[fork_idx]["paths"].size() > 2:
+		var rm_path_btn: Button = _make_icon_btn("✕", false, COLOR_MAGENTA)
+		rm_path_btn.pressed.connect(func() -> void:
+			_items[fork_idx]["paths"].remove_at(path_idx)
+			_refresh_items()
+		)
+		hdr.add_child(rm_path_btn)
+
+	# Card image
+	var img_lbl: Label = Label.new()
+	img_lbl.text = "CARD IMAGE"
+	img_lbl.add_theme_color_override("font_color", COLOR_PURPLE_MID)
+	img_lbl.add_theme_font_size_override("font_size", 10)
+	img_lbl.uppercase = true
+	col.add_child(img_lbl)
+
+	var img_zone: PanelContainer = DropZoneScript.new()
+	img_zone.accepted_extensions   = IMAGE_EXTENSIONS.duplicate()
+	img_zone.picker_title          = "Select Card Image for Path %d" % (path_idx + 1)
+	img_zone.picker_filters        = ["*.png,*.jpg,*.jpeg,*.webp ; Image Files"]
+	img_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(img_zone)
+	if path_data.get("image_path", "") != "":
+		img_zone.call_deferred("set_file", path_data["image_path"])
+	img_zone.file_dropped.connect(func(path: String) -> void:
+		_items[fork_idx]["paths"][path_idx]["image_path"] = path
+	)
+
+	# Round list for this path
+	var round_list: VBoxContainer = VBoxContainer.new()
+	round_list.add_theme_constant_override("separation", 4)
+	col.add_child(round_list)
+
+	var pr_rounds: Array = path_data.get("rounds", [])
+	for ri in pr_rounds.size():
+		round_list.add_child(_make_fork_round_row(fork_idx, path_idx, ri))
+
+	var add_round_btn: Button = Button.new()
+	add_round_btn.text = "+ ADD ROUND TO PATH"
+	_style_button(add_round_btn, COLOR_PURPLE_MID)
+	add_round_btn.pressed.connect(func() -> void:
+		_items[fork_idx]["paths"][path_idx]["rounds"].append({"name": "", "funscript_path": "", "video_path": "", "coins": 0})
+		_refresh_items()
+	)
+	col.add_child(add_round_btn)
+
+	return panel
+
+
+func _make_fork_round_row(fork_idx: int, path_idx: int, round_idx: int) -> Control:
+	var round_data: Dictionary = _items[fork_idx]["paths"][path_idx]["rounds"][round_idx]
+
+	var panel: PanelContainer = PanelContainer.new()
+	var ps: StyleBoxFlat = StyleBoxFlat.new()
+	ps.bg_color            = COLOR_PANEL_BG
+	ps.border_color        = COLOR_PURPLE_DARK
+	ps.border_width_left   = 1; ps.border_width_right  = 1
+	ps.border_width_top    = 1; ps.border_width_bottom = 1
+	ps.content_margin_left = 8; ps.content_margin_right  = 8
+	ps.content_margin_top  = 6; ps.content_margin_bottom = 6
+	panel.add_theme_stylebox_override("panel", ps)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var hbox: HBoxContainer = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", ROW_SEP)
+	panel.add_child(hbox)
+
+	var order_lbl: Label = Label.new()
+	order_lbl.text = "%d." % (round_idx + 1)
+	order_lbl.custom_minimum_size = Vector2(24, 0)
+	order_lbl.add_theme_color_override("font_color", COLOR_PURPLE_MID)
+	order_lbl.add_theme_font_size_override("font_size", 12)
+	hbox.add_child(order_lbl)
+
+	var name_edit: LineEdit = LineEdit.new()
+	name_edit.placeholder_text     = "Round name..."
+	name_edit.text                  = round_data.get("name", "")
+	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_line_edit(name_edit)
+	name_edit.text_changed.connect(func(val: String) -> void:
+		_items[fork_idx]["paths"][path_idx]["rounds"][round_idx]["name"] = val
+	)
+	hbox.add_child(name_edit)
+
+	var video_zone: PanelContainer = DropZoneScript.new()
+	video_zone.accepted_extensions   = VIDEO_EXTENSIONS.duplicate()
+	video_zone.picker_title          = "Select Video"
+	video_zone.picker_filters        = ["*.mp4,*.m4v,*.mkv,*.avi,*.mov,*.wmv,*.webm ; Video Files", "*.* ; All Files"]
+	video_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hbox.add_child(video_zone)
+	if round_data.get("video_path", "") != "":
+		video_zone.call_deferred("set_file", round_data["video_path"])
+	video_zone.file_dropped.connect(func(path: String) -> void:
+		_items[fork_idx]["paths"][path_idx]["rounds"][round_idx]["video_path"] = path
+		if (_items[fork_idx]["paths"][path_idx]["rounds"][round_idx].get("name","") as String).strip_edges() == "":
+			var auto: String = path.get_file().get_basename()
+			_items[fork_idx]["paths"][path_idx]["rounds"][round_idx]["name"] = auto
+			name_edit.text = auto
+	)
+
+	var fs_zone: PanelContainer = DropZoneScript.new()
+	fs_zone.accepted_extensions    = FUNSCRIPT_EXTENSIONS.duplicate()
+	fs_zone.picker_title           = "Select Funscript"
+	fs_zone.picker_filters         = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
+	fs_zone.size_flags_horizontal  = Control.SIZE_EXPAND_FILL
+	hbox.add_child(fs_zone)
+	if round_data.get("funscript_path", "") != "":
+		fs_zone.call_deferred("set_file", round_data["funscript_path"])
+	fs_zone.file_dropped.connect(func(path: String) -> void:
+		_items[fork_idx]["paths"][path_idx]["rounds"][round_idx]["funscript_path"] = path
+		if (_items[fork_idx]["paths"][path_idx]["rounds"][round_idx].get("name","") as String).strip_edges() == "":
+			var auto: String = path.get_file().get_basename()
+			_items[fork_idx]["paths"][path_idx]["rounds"][round_idx]["name"] = auto
+			name_edit.text = auto
+	)
+
+	var rm_btn: Button = _make_icon_btn("✕", false, COLOR_MAGENTA)
+	rm_btn.pressed.connect(func() -> void:
+		_items[fork_idx]["paths"][path_idx]["rounds"].remove_at(round_idx)
+		_refresh_items()
 	)
 	hbox.add_child(rm_btn)
 
@@ -599,14 +915,14 @@ func _make_icon_btn(icon: String, disabled: bool, accent: Color) -> Button:
 	return btn
 
 
-func _move_round(idx: int, direction: int) -> void:
+func _move_item(idx: int, direction: int) -> void:
 	var new_idx: int = idx + direction
-	if new_idx < 0 or new_idx >= _rounds.size():
+	if new_idx < 0 or new_idx >= _items.size():
 		return
-	var tmp: Dictionary  = _rounds[idx]
-	_rounds[idx]         = _rounds[new_idx]
-	_rounds[new_idx]     = tmp
-	_refresh_rounds()
+	var tmp: Dictionary = _items[idx]
+	_items[idx]         = _items[new_idx]
+	_items[new_idx]     = tmp
+	_refresh_items()
 
 
 # ---------------------------------------------------------------------------
@@ -628,45 +944,86 @@ func _on_save_pressed() -> void:
 		_show_status("Journey name is required.", true)
 		_save_btn.disabled = false
 		return
-	if _rounds.is_empty():
+
+	var has_any_round: bool = _items.any(func(it: Dictionary) -> bool: return it.get("type","round") == "round")
+	if not has_any_round:
 		_show_status("Add at least one round before saving.", true)
 		_save_btn.disabled = false
 		return
-	for i in _rounds.size():
-		var r: Dictionary = _rounds[i]
-		if (r.get("name", "") as String).strip_edges() == "":
-			_show_status("Round %d needs a name." % (i + 1), true)
-			_save_btn.disabled = false
-			return
-		if r.get("funscript_path", "") == "":
-			_show_status("Round %d needs a funscript file." % (i + 1), true)
-			_save_btn.disabled = false
-			return
 
-	# Check ffmpeg availability up-front if any round has a video, so we don't
-	# spew ERR_CANT_FORK from ffprobe before we've had a chance to error cleanly.
+	var round_count: int = 0
+	for i in _items.size():
+		var it: Dictionary = _items[i]
+		if it.get("type", "round") == "round":
+			round_count += 1
+			if (it.get("name","") as String).strip_edges() == "":
+				_show_status("Round %d needs a name." % round_count, true)
+				_save_btn.disabled = false
+				return
+			if it.get("funscript_path","") == "":
+				_show_status("Round %d needs a funscript file." % round_count, true)
+				_save_btn.disabled = false
+				return
+		else:
+			var paths: Array = it.get("paths", [])
+			if paths.size() < 2:
+				_show_status("Fork after round %d needs at least 2 paths." % round_count, true)
+				_save_btn.disabled = false
+				return
+			for pi in paths.size():
+				var ppath: Dictionary = paths[pi]
+				if (ppath.get("name","") as String).strip_edges() == "":
+					_show_status("Fork path %d needs a name." % (pi + 1), true)
+					_save_btn.disabled = false
+					return
+				var pr_list: Array = ppath.get("rounds", [])
+				if pr_list.is_empty():
+					_show_status("Fork path \"%s\" needs at least one round." % ppath.get("name","?"), true)
+					_save_btn.disabled = false
+					return
+				for ri in pr_list.size():
+					var pr: Dictionary = pr_list[ri]
+					if (pr.get("name","") as String).strip_edges() == "":
+						_show_status("A round in fork path \"%s\" needs a name." % ppath.get("name","?"), true)
+						_save_btn.disabled = false
+						return
+					if pr.get("funscript_path","") == "":
+						_show_status("Round \"%s\" in fork path \"%s\" needs a funscript." % [pr.get("name","?"), ppath.get("name","?")], true)
+						_save_btn.disabled = false
+						return
+
+	# Collect all round dicts (main + fork path) for video check
 	var any_video: bool = false
-	for r: Dictionary in _rounds:
-		if r.get("video_path", "") != "":
-			any_video = true
+	for it: Dictionary in _items:
+		if any_video:
 			break
+		if it.get("type","round") == "round":
+			if it.get("video_path","") != "":
+				any_video = true
+		else:
+			for p: Dictionary in it.get("paths",[]):
+				if any_video:
+					break
+				for pr: Dictionary in p.get("rounds",[]):
+					if pr.get("video_path","") != "":
+						any_video = true
+						break
 
 	var ffmpeg_ok: bool = _ffmpeg_available() if any_video else false
 
-	# Pre-scan: identify which videos need transcoding to H.264.
-	var transcode_plan: Dictionary = {}  # round_idx -> { codec: String, duration: float }
+	# Transcode plan only for main rounds (fork path rounds are copied as-is)
+	var transcode_plan: Dictionary = {}
+	var main_round_idx: int = 0
 	if ffmpeg_ok:
-		for i in _rounds.size():
-			var vid: String = _rounds[i].get("video_path", "")
-			if vid == "":
+		for i in _items.size():
+			if _items[i].get("type","round") != "round":
 				continue
-			var codec: String = _get_video_codec(vid)
-			if codec == "" or codec in H264_NAMES:
-				continue
-			transcode_plan[i] = {
-				"codec":    codec,
-				"duration": _video_duration_seconds(vid),
-			}
+			var vid: String = _items[i].get("video_path", "")
+			if vid != "":
+				var codec: String = _get_video_codec(vid)
+				if codec != "" and not (codec in H264_NAMES):
+					transcode_plan[i] = {"codec": codec, "duration": _video_duration_seconds(vid)}
+			main_round_idx += 1
 
 	if not transcode_plan.is_empty() and not ffmpeg_ok:
 		_show_status("Videos need transcoding (non-H.264) but ffmpeg is not on PATH. Install ffmpeg and restart Godot.", true)
@@ -688,38 +1045,85 @@ func _on_save_pressed() -> void:
 		add_child(modal)
 
 	var rounds_json: Array = []
-	for i in _rounds.size():
-		var r: Dictionary    = _rounds[i]
-		var round_name: String = (r.get("name", "") as String).strip_edges()
-		var round_dir: String  = abs_dir + "/" + round_name
-		DirAccess.make_dir_recursive_absolute(round_dir)
+	var forks_json: Array  = []
+	var rorder: int = 0
+	var last_rorder: int = 0
+	var total_main_rounds: int = _items.count(func(it: Dictionary) -> bool: return it.get("type","round") == "round")
 
-		var fs_src: String = r.get("funscript_path", "")
-		var fs_ext: String = fs_src.get_extension()
-		_copy_file(fs_src, round_dir + "/" + round_name + "." + fs_ext)
+	for i in _items.size():
+		var it: Dictionary = _items[i]
+		if it.get("type","round") == "round":
+			rorder += 1
+			last_rorder = rorder
 
-		var vid_src: String = r.get("video_path", "")
-		if vid_src != "":
-			if i in transcode_plan:
-				var info: Dictionary = transcode_plan[i]
-				var vid_dst: String  = round_dir + "/" + vid_src.get_file().get_basename() + ".mp4"
-				_update_modal_round(modal, i + 1, _rounds.size(), round_name, info["codec"])
-				var ok: bool = await _transcode_video(vid_src, vid_dst, info["duration"], modal)
-				if not ok:
-					if modal:
-						modal.queue_free()
-					_show_status("Transcoding cancelled. Journey not saved.", true)
-					_save_btn.disabled = false
-					return
-			else:
-				_copy_file(vid_src, round_dir + "/" + vid_src.get_file())
+			var round_name: String = (it.get("name","") as String).strip_edges()
+			var round_dir: String  = abs_dir + "/" + round_name
+			DirAccess.make_dir_recursive_absolute(round_dir)
 
-		rounds_json.append({
-			"Name":         round_name,
-			"Order":        i + 1,
-			"CoinsAwarded": r.get("coins", 0) as int,
-			"RoundType":    "Normal",
-		})
+			var fs_src: String = it.get("funscript_path","")
+			_copy_file(fs_src, round_dir + "/" + round_name + "." + fs_src.get_extension())
+
+			var vid_src: String = it.get("video_path","")
+			if vid_src != "":
+				if i in transcode_plan:
+					var info: Dictionary = transcode_plan[i]
+					var vid_dst: String  = round_dir + "/" + vid_src.get_file().get_basename() + ".mp4"
+					_update_modal_round(modal, rorder, total_main_rounds, round_name, info["codec"])
+					var ok: bool = await _transcode_video(vid_src, vid_dst, info["duration"], modal)
+					if not ok:
+						if modal: modal.queue_free()
+						_show_status("Transcoding cancelled. Journey not saved.", true)
+						_save_btn.disabled = false
+						return
+				else:
+					_copy_file(vid_src, round_dir + "/" + vid_src.get_file())
+
+			rounds_json.append({
+				"Name":         round_name,
+				"Order":        rorder,
+				"CoinsAwarded": it.get("coins",0) as int,
+				"RoundType":    "Normal",
+			})
+		else:
+			# Fork — copy all path round files, build fork JSON
+			var fork_entry: Dictionary = {
+				"AfterOrder":  last_rorder,
+				"Title":       it.get("title",""),
+				"Description": it.get("description",""),
+				"Paths":       [],
+			}
+			for path_data: Dictionary in it.get("paths",[]):
+				var img_src: String  = path_data.get("image_path", "")
+				var img_fname: String = ""
+				if img_src != "":
+					var safe_name: String = _sanitize_folder_name(path_data.get("name","path%d" % (forks_json.size() * 10 + fork_entry["Paths"].size())))
+					img_fname = safe_name + "_cover." + img_src.get_extension().to_lower()
+					_copy_file(img_src, abs_dir + "/" + img_fname)
+				var path_entry: Dictionary = {
+					"Name":        path_data.get("name",""),
+					"Description": path_data.get("description",""),
+					"Image":       img_fname,
+					"Rounds":      [],
+				}
+				var pr_order: int = 0
+				for pr: Dictionary in path_data.get("rounds",[]):
+					pr_order += 1
+					var pr_name: String = (pr.get("name","") as String).strip_edges()
+					var pr_dir: String  = abs_dir + "/" + pr_name
+					DirAccess.make_dir_recursive_absolute(pr_dir)
+					var pr_fs: String = pr.get("funscript_path","")
+					if pr_fs != "":
+						_copy_file(pr_fs, pr_dir + "/" + pr_name + "." + pr_fs.get_extension())
+					var pr_vid: String = pr.get("video_path","")
+					if pr_vid != "":
+						_copy_file(pr_vid, pr_dir + "/" + pr_vid.get_file())
+					path_entry["Rounds"].append({
+						"Name":         pr_name,
+						"Order":        pr_order,
+						"CoinsAwarded": pr.get("coins",0) as int,
+					})
+				fork_entry["Paths"].append(path_entry)
+			forks_json.append(fork_entry)
 
 	if modal:
 		modal.queue_free()
@@ -730,6 +1134,7 @@ func _on_save_pressed() -> void:
 		"Description": _desc_field.text.strip_edges(),
 		"Difficulty":  DIFFICULTIES[_diff_option.selected],
 		"Rounds":      rounds_json,
+		"Forks":       forks_json,
 		"Shops":       [],
 	}
 

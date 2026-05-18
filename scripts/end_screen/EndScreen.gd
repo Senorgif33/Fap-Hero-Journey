@@ -55,7 +55,7 @@ func _populate() -> void:
 
 func _populate_score() -> void:
 	var breakdowns: Array = ScoreService.GetRoundBreakdowns()
-	var rounds: Array = GameState.Journey.get("rounds", [])
+	var rounds: Array = GameState.GetPlayedRounds()
 	_total_score_val.text = str(ScoreService.TotalScore) + " PTS"
 
 	for i: int in breakdowns.size():

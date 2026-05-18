@@ -424,6 +424,7 @@ func _parse_journey(path: String, folder: String) -> Dictionary:
 		"difficulty":      data.get("Difficulty", "Unknown"),
 		"author":          data.get("Author", "Unknown"),
 		"rounds":          [],
+		"forks":           [],
 		"shops":           data.get("Shops", []),
 		"cover_path":      "",
 		"total_actions":   0,
@@ -458,6 +459,42 @@ func _parse_journey(path: String, folder: String) -> Dictionary:
 		journey["total_actions"]   = (journey["total_actions"] as int) + (fs["count"] as int)
 		journey["total_length_ms"] = (journey["total_length_ms"] as int) + (fs["length_ms"] as int)
 		journey["rounds"].append(round_data)
+
+	var raw_forks: Array = data.get("Forks", [])
+	var parsed_forks: Array = []
+	for raw_fork: Dictionary in raw_forks:
+		var fork_entry: Dictionary = {
+			"after_order": raw_fork.get("AfterOrder", raw_fork.get("after_order", 0)),
+			"title":       raw_fork.get("Title",       raw_fork.get("title",       "")),
+			"description": raw_fork.get("Description", raw_fork.get("description", "")),
+			"paths":       [],
+		}
+		var raw_paths: Array = raw_fork.get("Paths", raw_fork.get("paths", []))
+		for raw_path: Dictionary in raw_paths:
+			var img_file: String = raw_path.get("Image", raw_path.get("image", ""))
+			var path_entry: Dictionary = {
+				"name":        raw_path.get("Name",        raw_path.get("name",        "Path")),
+				"description": raw_path.get("Description", raw_path.get("description", "")),
+				"image_path":  (path + "/" + img_file) if img_file != "" else "",
+				"rounds":      [],
+			}
+			var raw_pr_rounds: Array = raw_path.get("Rounds", raw_path.get("rounds", []))
+			for raw_pr: Dictionary in raw_pr_rounds:
+				var pr_name: String   = raw_pr.get("Name", raw_pr.get("name", "Round"))
+				var pr_folder: String = path + "/" + pr_name
+				var pr_fs: Dictionary = _read_funscript_stats(pr_folder)
+				path_entry["rounds"].append({
+					"name":           pr_name,
+					"folder":         pr_folder,
+					"funscript_path": pr_fs["path"],
+					"coins":          raw_pr.get("CoinsAwarded", raw_pr.get("coins", 0)),
+					"order":          raw_pr.get("Order",        raw_pr.get("order", 0)),
+					"action_count":   pr_fs["count"],
+					"length_ms":      pr_fs["length_ms"],
+				})
+			fork_entry["paths"].append(path_entry)
+		parsed_forks.append(fork_entry)
+	journey["forks"] = parsed_forks
 
 	return journey
 
@@ -640,7 +677,34 @@ func _populate_modal(journey: Dictionary) -> void:
 	hdr_line.add_theme_stylebox_override("separator", hdr_style)
 	_round_list.add_child(hdr_line)
 
-	for round_data: Dictionary in rounds:
+	var forks_data: Array = journey.get("forks", [])
+	var seq: Array = []
+	for rd: Dictionary in rounds:
+		seq.append({"type": "round", "data": rd, "key": (rd.get("order", 0) as int) * 2})
+	for fk: Dictionary in forks_data:
+		seq.append({"type": "fork", "data": fk, "key": (fk.get("after_order", 0) as int) * 2 + 1})
+	seq.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return (a["key"] as int) < (b["key"] as int))
+
+	for item: Dictionary in seq:
+		if item["type"] == "fork":
+			var fork: Dictionary = item["data"]
+			var fork_row: HBoxContainer = HBoxContainer.new()
+			fork_row.add_theme_constant_override("separation", 8)
+			_round_list.add_child(fork_row)
+			var fork_lbl: Label = Label.new()
+			var paths: Array = fork.get("paths", [])
+			var fork_title: String = fork.get("title", "")
+			if fork_title != "":
+				fork_lbl.text = "  ⑂  FORK: %s  (%d PATHS)" % [fork_title.to_upper(), paths.size()]
+			else:
+				fork_lbl.text = "  ⑂  FORK  (%d PATHS)" % paths.size()
+			fork_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			fork_lbl.add_theme_color_override("font_color", COLOR_PURPLE_BRIGHT)
+			fork_lbl.add_theme_font_size_override("font_size", 11)
+			fork_row.add_child(fork_lbl)
+			continue
+
+		var round_data: Dictionary = item["data"]
 		var order: int = round_data.get("order", 0)
 
 		var row: HBoxContainer = HBoxContainer.new()
