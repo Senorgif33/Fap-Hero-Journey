@@ -125,6 +125,7 @@ func _apply_layout() -> void:
 	_empty_lbl.offset_top    = TOP_BAR_HEIGHT + GRID_TOP_MARGIN
 
 	_scroll.resized.connect(_update_grid_columns)
+	get_viewport().size_changed.connect(_update_grid_columns)
 	_update_grid_columns.call_deferred()
 
 	_modal.anchor_right  = 1.0
