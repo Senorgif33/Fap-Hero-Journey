@@ -7,13 +7,63 @@ public partial class InventoryService : Node
 	[Signal] public delegate void InventoryChangedEventHandler();
 	[Signal] public delegate void ActiveEffectsChangedEventHandler();
 
-	// Central item registry. The "kind" field drives FunscriptPlayer's modifier pipeline:
-	//   "block"  – drop actions entirely while active
-	//   "scale"  – multiply stroke amplitude around centre (factor)
-	//   "clamp"  – compress 0–100 position range into [min, max]
-	private static readonly Dictionary _registry = new Dictionary
+	// ---------------------------------------------------------------------------
+	// Item registry
+	// Loaded from res://data/shop_items.json on startup. Edit that file to tune
+	// balance without touching C#. Falls back to hardcoded defaults if the file
+	// is missing or malformed.
+	// ---------------------------------------------------------------------------
+
+	// Non-static so it is populated once the node is ready (autoload order is safe).
+	private Dictionary _registry = new Dictionary();
+
+	// Path of the JSON data file inside the project.
+	private const string RegistryPath = "res://data/shop_items.json";
+
+	public override void _Ready()
 	{
-		["long_game"] = new Dictionary
+		_LoadRegistry();
+	}
+
+	private void _LoadRegistry()
+	{
+		_registry.Clear();
+
+		if (FileAccess.FileExists(RegistryPath))
+		{
+			using var f = FileAccess.Open(RegistryPath, FileAccess.ModeFlags.Read);
+			if (f != null)
+			{
+				var json = new Json();
+				if (json.Parse(f.GetAsText()) == Error.Ok &&
+				    json.Data.VariantType == Variant.Type.Array)
+				{
+					foreach (var item in json.Data.AsGodotArray())
+					{
+						if (item.VariantType != Variant.Type.Dictionary)
+							continue;
+						var d  = item.AsGodotDictionary();
+						var id = d.ContainsKey("id") ? d["id"].AsString() : "";
+						if (id != "")
+							_registry[id] = d;
+					}
+					GD.Print($"InventoryService: loaded {_registry.Count} items from {RegistryPath}");
+					return;
+				}
+				GD.PrintErr($"InventoryService: failed to parse {RegistryPath} — using hardcoded defaults.");
+			}
+		}
+		else
+		{
+			GD.PrintErr($"InventoryService: {RegistryPath} not found — using hardcoded defaults.");
+		}
+
+		_LoadHardcodedDefaults();
+	}
+
+	private void _LoadHardcodedDefaults()
+	{
+		_registry["long_game"] = new Dictionary
 		{
 			["id"]          = "long_game",
 			["name"]        = "The Long Game",
@@ -23,9 +73,8 @@ public partial class InventoryService : Node
 			["duration_ms"] = 30000,
 			["kind"]        = "scale",
 			["factor"]      = 1.2f,
-			["icon_path"]   = "",
-		},
-		["cock_lock"] = new Dictionary
+		};
+		_registry["cock_lock"] = new Dictionary
 		{
 			["id"]          = "cock_lock",
 			["name"]        = "Cock Lock",
@@ -34,9 +83,8 @@ public partial class InventoryService : Node
 			["price"]       = 25,
 			["duration_ms"] = 10000,
 			["kind"]        = "block",
-			["icon_path"]   = "",
-		},
-		["shrink_ray"] = new Dictionary
+		};
+		_registry["shrink_ray"] = new Dictionary
 		{
 			["id"]          = "shrink_ray",
 			["name"]        = "Shrink Ray",
@@ -46,9 +94,8 @@ public partial class InventoryService : Node
 			["duration_ms"] = 30000,
 			["kind"]        = "scale",
 			["factor"]      = 0.8f,
-			["icon_path"]   = "",
-		},
-		["final_inch"] = new Dictionary
+		};
+		_registry["final_inch"] = new Dictionary
 		{
 			["id"]          = "final_inch",
 			["name"]        = "The Final Inch",
@@ -59,9 +106,8 @@ public partial class InventoryService : Node
 			["kind"]        = "clamp",
 			["min"]         = 50,
 			["max"]         = 100,
-			["icon_path"]   = "",
-		},
-		["low_tide"] = new Dictionary
+		};
+		_registry["low_tide"] = new Dictionary
 		{
 			["id"]          = "low_tide",
 			["name"]        = "Low Tide",
@@ -72,11 +118,32 @@ public partial class InventoryService : Node
 			["kind"]        = "clamp",
 			["min"]         = 0,
 			["max"]         = 50,
-			["icon_path"]   = "",
-		},
-	};
+		};
+	}
 
-	// Owned but not-yet-activated items (one dict per slot — duplicates allowed).
+	// --- Registry access -------------------------------------------------------
+
+	// Returns all registered item IDs in insertion order.
+	public Array GetAllItemIds()
+	{
+		var ids = new Array();
+		foreach (var key in _registry.Keys)
+			ids.Add(key);
+		return ids;
+	}
+
+	// Returns the data dictionary for the given item ID, or an empty dict if unknown.
+	public Dictionary GetItemData(string id)
+	{
+		if (id != null && _registry.ContainsKey(id))
+			return _registry[id].AsGodotDictionary();
+		return new Dictionary();
+	}
+
+	// ---------------------------------------------------------------------------
+	// Inventory (owned, not-yet-activated items)
+	// ---------------------------------------------------------------------------
+
 	private readonly List<Dictionary> _items = new();
 
 	// Active effects: one entry per activation, with absolute end time on engine clock (ms).
@@ -109,23 +176,6 @@ public partial class InventoryService : Node
 		EmitSignal(SignalName.ActiveEffectsChanged);
 	}
 
-	// --- Registry access -----------------------------------------------------
-
-	public static Array GetAllItemIds()
-	{
-		var ids = new Array();
-		foreach (var key in _registry.Keys)
-			ids.Add(key);
-		return ids;
-	}
-
-	public static Dictionary GetItemData(string id)
-	{
-		if (id != null && _registry.ContainsKey(id))
-			return _registry[id].AsGodotDictionary();
-		return new Dictionary();
-	}
-
 	// --- Inventory ----------------------------------------------------------
 
 	public Array GetItems()
@@ -147,7 +197,7 @@ public partial class InventoryService : Node
 	// Removes the item at slotIndex and starts its effect timer immediately.
 	public bool ActivateItem(int slotIndex)
 	{
-		if (slotIndex < 0 || slotIndex >= _items.Count) 
+		if (slotIndex < 0 || slotIndex >= _items.Count)
 			return false;
 
 		var item = _items[slotIndex];
@@ -156,11 +206,11 @@ public partial class InventoryService : Node
 		int duration = item.ContainsKey("duration_ms") ? item["duration_ms"].AsInt32() : 0;
 		var effect = new Dictionary
 		{
-			["id"]          = item.ContainsKey("id") ? item["id"] : "",
-			["name"]        = item.ContainsKey("name") ? item["name"] : "",
-			["kind"]        = item.ContainsKey("kind") ? item["kind"] : "",
-			["duration_ms"] = duration,
-			["end_time_ms"] = _nowMs + duration,
+			["id"]            = item.ContainsKey("id")   ? item["id"]   : "",
+			["name"]          = item.ContainsKey("name") ? item["name"] : "",
+			["kind"]          = item.ContainsKey("kind") ? item["kind"] : "",
+			["duration_ms"]   = duration,
+			["end_time_ms"]   = _nowMs + duration,
 			["start_time_ms"] = _nowMs,
 		};
 		// Copy effect params used by FunscriptPlayer.
@@ -174,7 +224,7 @@ public partial class InventoryService : Node
 		return true;
 	}
 
-	// --- Active effects ------------------------------------------------------
+	// --- Active effects -------------------------------------------------------
 
 	public Array GetActiveEffects()
 	{

@@ -204,6 +204,15 @@ func _connect_signals() -> void:
 	get_viewport().files_dropped.connect(_on_viewport_files_dropped)
 
 
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey:
+		var k := event as InputEventKey
+		if k.pressed and not k.echo and k.ctrl_pressed and k.keycode == KEY_S:
+			if not _save_btn.disabled:
+				_on_save_pressed()
+			get_viewport().set_input_as_handled()
+
+
 func _on_back_pressed() -> void:
 	Transition.change_scene("res://scenes/main/Main.tscn")
 

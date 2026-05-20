@@ -206,6 +206,13 @@ func _refresh_coins() -> void:
 	_coin_lbl.text = "♦ %d" % CoinService.Balance
 
 
+func _input(event: InputEvent) -> void:
+	# Esc: dismiss the shop (same as pressing the Continue button).
+	if event.is_action_pressed("ui_cancel") and not _continue.disabled:
+		_on_continue_pressed()
+		get_viewport().set_input_as_handled()
+
+
 func _on_continue_pressed() -> void:
 	_continue.disabled = true
 	_panel.pivot_offset = _panel.size / 2.0

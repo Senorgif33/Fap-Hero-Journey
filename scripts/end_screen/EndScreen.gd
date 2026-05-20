@@ -6,8 +6,9 @@ extends Control
 # the player to the Journey Select catalogue.
 # ---------------------------------------------------------------------------
 
-const PANEL_HALF_W: int = 440
-const BORDER_WIDTH: int = 3
+const PANEL_HALF_W: int  = 440
+const BORDER_WIDTH: int  = 3
+const LOG_INDENT_PX: int = 14  # pixels of left indent per fork-nesting depth
 
 @onready var _bg:           ColorRect     = $Background
 @onready var _panel:        PanelContainer = $Panel
@@ -46,7 +47,7 @@ func _populate() -> void:
 		func(acc: int, b: Dictionary) -> int: return acc + b.get("actions", 0), 0)
 	var total_ms: int = played_rounds.reduce(
 		func(acc: int, e: Dictionary) -> int:
-			return acc + (e.get("data", {}) as Dictionary).get("length_ms", 0) as int, 0)
+			return acc + e.get("length_ms", 0) as int, 0)
 
 	_stat_rounds.text  = str(played_rounds.size()) + " ROUNDS"
 	_stat_actions.text = str(total_actions) + " ACTIONS"
@@ -54,9 +55,25 @@ func _populate() -> void:
 	_populate_score()
 
 
+# Wraps `row` in a MarginContainer with `depth * LOG_INDENT_PX` of left padding.
+# Returns `row` unchanged when depth is 0 to avoid an extra node allocation.
+func _indent_row(row: Control, depth: int) -> Control:
+	if depth == 0:
+		return row
+	var mc: MarginContainer = MarginContainer.new()
+	mc.add_theme_constant_override("margin_left", depth * LOG_INDENT_PX)
+	mc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mc.add_child(row)
+	return mc
+
+
 func _populate_score() -> void:
 	var breakdowns: Array  = ScoreService.GetRoundBreakdowns()
 	var play_log:   Array  = GameState.GetPlayLog()
+	# GDScript-side round names, populated by GameLoop._on_round_ended.
+	# Used as the authoritative source for round names — bypasses any C# Dict
+	# marshalling issues. See GameLoop._on_round_ended.
+	var round_names: PackedStringArray = GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray
 	_total_score_val.text  = str(ScoreService.TotalScore) + " PTS"
 
 	var round_num: int = 0  # 1-based counter across all played rounds
@@ -67,6 +84,7 @@ func _populate_score() -> void:
 
 			# ── Fork-choice header ────────────────────────────────────────────
 			"fork_choice":
+				var depth: int      = entry.get("depth", 0) as int
 				var fork_title: String = entry.get("fork_title", "")
 				var path_name:  String = entry.get("path_name",  "")
 
@@ -76,7 +94,7 @@ func _populate_score() -> void:
 				sep_s.content_margin_top    = 1
 				sep_s.content_margin_bottom = 1
 				sep.add_theme_stylebox_override("separator", sep_s)
-				_round_breakdown.add_child(sep)
+				_round_breakdown.add_child(_indent_row(sep, depth))
 
 				var hdr: HBoxContainer = HBoxContainer.new()
 				hdr.add_theme_constant_override("separation", 8)
@@ -95,28 +113,39 @@ func _populate_score() -> void:
 				hdr_lbl.add_theme_font_size_override("font_size", 11)
 				hdr_lbl.uppercase = true
 				hdr.add_child(hdr_lbl)
-				_round_breakdown.add_child(hdr)
+				_round_breakdown.add_child(_indent_row(hdr, depth))
 
 			# ── Round row ─────────────────────────────────────────────────────
 			"round":
+				var depth: int = entry.get("depth", 0) as int
 				round_num += 1
-				var rd: Dictionary = entry.get("data", {})
-				var r:  Dictionary = breakdowns[bd_idx] if bd_idx < breakdowns.size() else {}
+				var r: Dictionary = breakdowns[bd_idx] if bd_idx < breakdowns.size() else {}
 				bd_idx += 1
 
 				var row: HBoxContainer = HBoxContainer.new()
 				row.add_theme_constant_override("separation", 16)
 
 				var name_lbl: Label = Label.new()
-				var rname: String = (rd.get("name", "Round %d" % round_num) as String).to_upper()
-				name_lbl.text = "R%d  %s" % [round_num, rname]
+				# Round name comes from the GDScript-side log (set in GameLoop). Falls back
+				# to the C# play-log entry, then to a numeric placeholder.
+				var rname: String = ""
+				if (round_num - 1) < round_names.size():
+					rname = round_names[round_num - 1]
+				if rname == "":
+					rname = entry.get("name", "") as String
+				if rname == "":
+					rname = "Round %d" % round_num
+				name_lbl.text = "R%d  %s" % [round_num, rname.to_upper()]
 				name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 				name_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+				# Guaranteed minimum width — without this, OVERRUN_TRIM_ELLIPSIS lets
+				# the HBoxContainer collapse the label to zero width and it disappears.
+				name_lbl.custom_minimum_size = Vector2(160, 0)
 				name_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 				name_lbl.add_theme_font_size_override("font_size", 13)
 
 				var time_lbl: Label = Label.new()
-				var secs: int = (rd.get("length_ms", 0) as int) / 1000
+				var secs: int = (entry.get("length_ms", 0) as int) / 1000
 				time_lbl.text = _fmt(secs)
 				time_lbl.add_theme_color_override("font_color", UITheme.PURPLE_MID)
 				time_lbl.add_theme_font_size_override("font_size", 12)
@@ -141,7 +170,7 @@ func _populate_score() -> void:
 				row.add_child(act_lbl)
 				row.add_child(detail_lbl)
 				row.add_child(pts_lbl)
-				_round_breakdown.add_child(row)
+				_round_breakdown.add_child(_indent_row(row, depth))
 
 
 func _fmt(total_seconds: int) -> String:
@@ -192,6 +221,9 @@ func _apply_layout() -> void:
 
 	var score_section: VBoxContainer = $Panel/VBox/ScoreSection
 	score_section.add_theme_constant_override("separation", 12)
+	# Let the score section expand to fill all space the panel gives it so the
+	# breakdown scroll area uses as much vertical room as possible.
+	score_section.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	$Panel/VBox/ScoreSection/TotalScoreRow.add_theme_constant_override("separation", 16)
 	_round_breakdown.add_theme_constant_override("separation", 6)
 
@@ -200,7 +232,9 @@ func _apply_layout() -> void:
 	var breakdown_scroll: ScrollContainer = ScrollContainer.new()
 	breakdown_scroll.size_flags_vertical         = Control.SIZE_EXPAND_FILL
 	breakdown_scroll.horizontal_scroll_mode      = ScrollContainer.SCROLL_MODE_DISABLED
-	breakdown_scroll.custom_minimum_size         = Vector2(0, 80)
+	# Generous minimum so a short journey still looks balanced; SIZE_EXPAND_FILL
+	# above means it grows to use the full available height on larger panels.
+	breakdown_scroll.custom_minimum_size         = Vector2(0, 220)
 	score_section.remove_child(_round_breakdown)
 	breakdown_scroll.add_child(_round_breakdown)
 	score_section.add_child(breakdown_scroll)

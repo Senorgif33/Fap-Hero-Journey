@@ -1,0 +1,53 @@
+[
+	{
+		"id":           "long_game",
+		"name":         "The Long Game",
+		"description":  "Expands the funscript stroke length by 20%.",
+		"category":     "modifier",
+		"price":        30,
+		"duration_ms":  30000,
+		"kind":         "scale",
+		"factor":       1.2
+	},
+	{
+		"id":           "cock_lock",
+		"name":         "Cock Lock",
+		"description":  "Ignores funscript playback for 10 seconds.",
+		"category":     "modifier",
+		"price":        25,
+		"duration_ms":  10000,
+		"kind":         "block"
+	},
+	{
+		"id":           "shrink_ray",
+		"name":         "Shrink Ray",
+		"description":  "Reduces the funscript stroke length by 20%.",
+		"category":     "modifier",
+		"price":        40,
+		"duration_ms":  30000,
+		"kind":         "scale",
+		"factor":       0.8
+	},
+	{
+		"id":           "final_inch",
+		"name":         "The Final Inch",
+		"description":  "Confines the script to only the top 50% of the stroke range.",
+		"category":     "modifier",
+		"price":        35,
+		"duration_ms":  25000,
+		"kind":         "clamp",
+		"min":          50,
+		"max":          100
+	},
+	{
+		"id":           "low_tide",
+		"name":         "Low Tide",
+		"description":  "Confines the script to only the bottom 50% of the stroke range.",
+		"category":     "modifier",
+		"price":        35,
+		"duration_ms":  25000,
+		"kind":         "clamp",
+		"min":          0,
+		"max":          50
+	}
+]

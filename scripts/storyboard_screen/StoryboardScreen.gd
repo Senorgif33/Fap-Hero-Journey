@@ -17,6 +17,8 @@ var _coins:       int    = 0
 var _def_image:   String = ""
 var _can_advance: bool   = false
 
+var _skip_btn: Button = null
+
 
 func _ready() -> void:
 	_apply_layout()
@@ -26,7 +28,10 @@ func _ready() -> void:
 	await get_tree().process_frame
 	var tween: Tween = create_tween()
 	tween.tween_property(_fade, "modulate:a", 0.0, 0.35).set_ease(Tween.EASE_OUT)
-	tween.tween_callback(func() -> void: _can_advance = true)
+	tween.tween_callback(func() -> void:
+		_can_advance = true
+		_skip_btn.visible = true
+	)
 
 
 func setup(data: Dictionary) -> void:
@@ -53,7 +58,7 @@ func _show_line() -> void:
 	_dialogue.text   = line.get("text", "")
 
 	var is_last: bool = _line_idx >= _lines.size() - 1
-	_hint.text = "▶ CLICK OR PRESS SPACE TO COMPLETE" if is_last else "▶ CLICK OR PRESS SPACE TO CONTINUE"
+	_hint.text = "▶ CLICK, SPACE OR ESC TO COMPLETE" if is_last else "▶ CLICK, SPACE OR ESC TO CONTINUE"
 
 
 func _load_bg_image(path: String) -> void:
@@ -88,9 +93,12 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			# Let the skip button handle clicks that land on it.
+			if _skip_btn.visible and _skip_btn.get_global_rect().has_point(mb.global_position):
+				return
 			_advance()
 			get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("ui_accept"):
+	elif event.is_action_pressed("ui_accept") or event.is_action_pressed("ui_cancel"):
 		_advance()
 		get_viewport().set_input_as_handled()
 
@@ -105,6 +113,7 @@ func _advance() -> void:
 
 func _finish() -> void:
 	_can_advance = false
+	_skip_btn.visible = false
 	var tween: Tween = create_tween()
 	tween.tween_property(_fade, "modulate:a", 1.0, 0.4).set_ease(Tween.EASE_IN)
 	tween.tween_callback(func() -> void:
@@ -151,6 +160,39 @@ func _apply_layout() -> void:
 	var vbox: VBoxContainer = $VNBar/Inner/VBox
 	vbox.add_theme_constant_override("separation", 12)
 
+	# Detach hint from the VBox so it no longer participates in the text flow.
+	# Re-parent it directly onto the root Control as an absolutely-positioned
+	# overlay pinned to the bottom-right corner — it will never move regardless
+	# of speaker visibility or dialogue line wrapping.
+	vbox.remove_child(_hint)
+	add_child(_hint)
+	_hint.anchor_left   = 0.0
+	_hint.anchor_right  = 1.0
+	_hint.anchor_top    = 1.0
+	_hint.anchor_bottom = 1.0
+	_hint.offset_left   = 0
+	_hint.offset_right  = -48   # match inner right margin
+	_hint.offset_top    = -44   # inner bottom margin (22) + label height (~22)
+	_hint.offset_bottom = -22   # inner bottom margin
+	_hint.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_hint.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+
+	# Skip button — top-right corner, hidden until the opening fade completes.
+	_skip_btn = Button.new()
+	_skip_btn.text = "SKIP  ▶▶"
+	_skip_btn.anchor_left   = 1.0
+	_skip_btn.anchor_right  = 1.0
+	_skip_btn.anchor_top    = 0.0
+	_skip_btn.anchor_bottom = 0.0
+	_skip_btn.offset_left   = -110
+	_skip_btn.offset_right  = -16
+	_skip_btn.offset_top    = 16
+	_skip_btn.offset_bottom = 46
+	_skip_btn.focus_mode    = Control.FOCUS_NONE
+	_skip_btn.visible       = false
+	_skip_btn.pressed.connect(_finish)
+	add_child(_skip_btn)
+
 
 func _apply_theme() -> void:
 	var bar_style: StyleBoxFlat = StyleBoxFlat.new()
@@ -174,3 +216,31 @@ func _apply_theme() -> void:
 	_hint.add_theme_color_override("font_color",    UITheme.DARK_TEXT)
 	_hint.add_theme_font_size_override("font_size", 11)
 	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+
+	# Skip button — subtle but readable; uses DARK_TEXT so it doesn't compete
+	# with the dialogue, but brightens on hover.
+	_skip_btn.add_theme_color_override("font_color",         UITheme.DARK_TEXT)
+	_skip_btn.add_theme_color_override("font_hover_color",   UITheme.WHITE_SOFT)
+	_skip_btn.add_theme_color_override("font_pressed_color", UITheme.BG)
+	_skip_btn.add_theme_font_size_override("font_size", 11)
+
+	var sk_n: StyleBoxFlat = StyleBoxFlat.new()
+	sk_n.bg_color = Color(UITheme.DARK_TEXT.r, UITheme.DARK_TEXT.g, UITheme.DARK_TEXT.b, 0.08)
+	sk_n.border_color = UITheme.DARK_TEXT
+	sk_n.border_width_left   = 1; sk_n.border_width_right  = 1
+	sk_n.border_width_top    = 1; sk_n.border_width_bottom = 1
+	sk_n.corner_radius_top_left     = 4; sk_n.corner_radius_top_right    = 4
+	sk_n.corner_radius_bottom_left  = 4; sk_n.corner_radius_bottom_right = 4
+	sk_n.content_margin_left  = 10; sk_n.content_margin_right  = 10
+	sk_n.content_margin_top   = 4;  sk_n.content_margin_bottom = 4
+	_skip_btn.add_theme_stylebox_override("normal", sk_n)
+
+	var sk_h: StyleBoxFlat = sk_n.duplicate()
+	sk_h.bg_color     = Color(UITheme.WHITE_SOFT.r, UITheme.WHITE_SOFT.g, UITheme.WHITE_SOFT.b, 0.15)
+	sk_h.border_color = UITheme.WHITE_SOFT
+	_skip_btn.add_theme_stylebox_override("hover", sk_h)
+
+	var sk_p: StyleBoxFlat = sk_n.duplicate()
+	sk_p.bg_color = UITheme.DARK_TEXT
+	_skip_btn.add_theme_stylebox_override("pressed", sk_p)
+	_skip_btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())

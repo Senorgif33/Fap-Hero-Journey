@@ -29,6 +29,9 @@ const ZOOM_STEP:   float = 0.1
 
 var _items:           Array      = []
 var _selected_data:   Dictionary = {}
+# Items that end the run (no items follow them anywhere in the flow).
+# Rebuilt on every refresh() so the set is always current.
+var _terminal_items:  Array      = []
 
 # Pan / zoom state
 var _pan_offset: Vector2 = Vector2(40, 40)
@@ -68,6 +71,10 @@ func refresh() -> void:
 		c.queue_free()
 	_edges.clear()
 
+	# Recompute which items end the run before laying out so _make_node can
+	# query the set during layout.
+	_terminal_items = _collect_terminal_items(_items, false)
+
 	# Apply pan/zoom transform to the canvas.
 	_apply_transform()
 
@@ -77,7 +84,7 @@ func refresh() -> void:
 
 
 func _do_layout() -> void:
-	_layout_items(_items, 0.0, 0.0)
+	_layout_items(_items, 0.0, 0.0)  # return value not used at top level
 	_canvas.set_edges(_edges)
 	if not _has_initial_center:
 		_has_initial_center = true
@@ -95,30 +102,39 @@ func _center_initial_view() -> void:
 
 
 # Recursively lays out an items[] array as a vertical column centered on x_center.
-# Returns the (total width, bottom y) consumed by this subtree.
-func _layout_items(items: Array, x_center: float, y: float) -> Vector2:
+# Returns { "size": Vector2(max_w, cur_y), "last_nodes": Array[Control] }
+# where last_nodes are the Controls at the open ends of this subtree (can be
+# multiple after an unresolved fork — used by the caller to draw merge arrows).
+func _layout_items(items: Array, x_center: float, y: float) -> Dictionary:
 	var cur_y: float = y
 	var max_w: float = NODE_WIDTH
-	var prev_node: Control = null
+	# open_ends: Controls whose bottom port awaits an outgoing edge.
+	# After a fork, this holds the last node of each path so merge arrows can
+	# be drawn to whatever comes next at this level.
+	var open_ends: Array  = []
+	# Whether open_ends came from fork paths (drives edge colour for merges).
+	var from_fork: bool   = false
 
 	# Insert button before the first item (idx=0). Sits in the gap above y.
 	_place_insert_btn(items, 0, x_center, y - V_GAP * 0.5)
 
 	# Empty branch: just show the single insert button.
 	if items.is_empty():
-		return Vector2(NODE_WIDTH, y)
+		return {"size": Vector2(NODE_WIDTH, y), "last_nodes": []}
 
 	for i in items.size():
 		var item: Dictionary = items[i]
 		var t: String = item.get("type", "round")
 
 		if t == "fork":
-			# Place fork node at center.
+			# ── Fork node ────────────────────────────────────────────────────
 			var fork_node: Control = _make_node(item, items, i)
 			fork_node.position = Vector2(x_center - NODE_WIDTH * 0.5, cur_y)
 			_canvas.add_child(fork_node)
-			if prev_node != null:
-				_add_edge(_node_bottom(prev_node), _node_top(fork_node), UITheme.EDGE)
+			# Connect whatever preceded this fork to the fork node.
+			for oe in open_ends:
+				_add_edge(_node_bottom(oe), _node_top(fork_node),
+					UITheme.FORK_EDGE if from_fork else UITheme.EDGE)
 			cur_y += NODE_HEIGHT + V_GAP
 
 			# Compute path widths (recursive measure).
@@ -127,57 +143,91 @@ func _layout_items(items: Array, x_center: float, y: float) -> Vector2:
 			for path in paths:
 				path_widths.append(max(_measure_items_width(path.get("items", [])), NODE_WIDTH))
 
-			# Total width = sum(path_widths) + (n-1)*H_GAP
 			var total_w: float = 0.0
 			for w in path_widths:
 				total_w += w
 			if paths.size() > 1:
 				total_w += (paths.size() - 1) * H_GAP
-
 			max_w = max(max_w, total_w)
 
-			# Place each path column.
-			var col_x: float = x_center - total_w * 0.5
+			# Place each path column, collecting each path's final nodes.
+			var col_x: float  = x_center - total_w * 0.5
 			var max_branch_y: float = cur_y
-			for pi in paths.size():
-				var path: Dictionary = paths[pi]
-				var pw: float = path_widths[pi]
-				var path_center_x: float = col_x + pw * 0.5
+			var all_path_ends: Array = []
 
-				# Path label at top of column.
+			for pi in paths.size():
+				var path: Dictionary     = paths[pi]
+				var pw: float            = path_widths[pi]
+				var path_cx: float       = col_x + pw * 0.5
+
 				var label_node: Control = _make_path_label(path, paths, pi)
-				label_node.position = Vector2(path_center_x - NODE_WIDTH * 0.5, cur_y)
+				label_node.position = Vector2(path_cx - NODE_WIDTH * 0.5, cur_y)
 				_canvas.add_child(label_node)
 				_add_edge(_node_bottom(fork_node), _node_top(label_node), UITheme.FORK_EDGE)
 
-				# Recurse into path items below the label.
-				var path_items_arr: Array = path.get("items", [])
-				var sub_end: Vector2 = _layout_items(path_items_arr, path_center_x, cur_y + PATH_LABEL_HEIGHT + V_GAP)
-				# Edge from label to first item, if any.
-				if path_items_arr.size() > 0:
-					var first_item_node: Control = _find_first_node_at_x(path_center_x, cur_y + PATH_LABEL_HEIGHT + V_GAP)
+				var path_items: Array = path.get("items", [])
+				var sub: Dictionary   = _layout_items(path_items, path_cx, cur_y + PATH_LABEL_HEIGHT + V_GAP)
+
+				if not path_items.is_empty():
+					var first_item_node: Control = _find_first_node_at_x(path_cx, cur_y + PATH_LABEL_HEIGHT + V_GAP)
 					if first_item_node != null:
 						_add_edge(_node_bottom(label_node), _node_top(first_item_node), UITheme.EDGE)
 
-				max_branch_y = max(max_branch_y, sub_end.y)
+				max_branch_y = max(max_branch_y, sub["size"].y)
+				all_path_ends.append_array(sub["last_nodes"])
 				col_x += pw + H_GAP
 
-			cur_y = max_branch_y
-			# Branches are terminal — don't connect any subsequent item to this fork.
-			prev_node = null
+			cur_y     = max_branch_y
+			# Path ends become the new open ends — the next item at this level
+			# receives merge arrows from all of them.
+			open_ends = all_path_ends
+			from_fork = true
+
 		else:
-			var node: Control = _make_node(item, items, i)
+			# ── Non-fork node ────────────────────────────────────────────────
+			var is_term: bool  = _terminal_items.any(func(ti: Dictionary) -> bool: return is_same(item, ti))
+			var node: Control  = _make_node(item, items, i, is_term)
 			node.position = Vector2(x_center - NODE_WIDTH * 0.5, cur_y)
 			_canvas.add_child(node)
-			if prev_node != null:
-				_add_edge(_node_bottom(prev_node), _node_top(node), UITheme.EDGE)
-			prev_node = node
+			# Draw edge(s) from all open ends into this node.
+			for oe in open_ends:
+				_add_edge(_node_bottom(oe), _node_top(node),
+					UITheme.FORK_EDGE if from_fork else UITheme.EDGE)
+			open_ends = [node]
+			from_fork = false
 			cur_y += NODE_HEIGHT + V_GAP
 
 		# Insert button in the gap AFTER this item (idx = i+1).
 		_place_insert_btn(items, i + 1, x_center, cur_y - V_GAP * 0.5)
 
-	return Vector2(max_w, cur_y)
+	return {"size": Vector2(max_w, cur_y), "last_nodes": open_ends}
+
+
+# Returns all items (by reference) that would end the run — i.e., no item in
+# the journey flow comes after them. Called once per refresh().
+#
+# has_successor_after: true when the caller knows something follows this items[]
+# array in the parent scope (e.g. the fork that contains this path has a sibling
+# item after it at the outer level).
+func _collect_terminal_items(items: Array, has_successor_after: bool) -> Array:
+	if items.is_empty():
+		return []
+	var last: Dictionary = items[-1]
+	var t: String = last.get("type", "round")
+	if t == "fork":
+		if has_successor_after:
+			# Fork converges into a successor — the fork's paths are not terminal.
+			return []
+		# Fork is the last item with nothing after it: recurse into each path.
+		var result: Array = []
+		for path: Dictionary in last.get("paths", []):
+			result.append_array(_collect_terminal_items(path.get("items", []), false))
+		return result
+	else:
+		# Non-fork last item.
+		if has_successor_after:
+			return []
+		return [last]
 
 
 # Recursively measures the width an items[] array will consume at layout time.
@@ -254,12 +304,16 @@ func _place_insert_btn(arr: Array, idx: int, x_center: float, mid_y: float) -> v
 # Node makers
 # ---------------------------------------------------------------------------
 
-func _make_node(item: Dictionary, arr: Array, idx: int) -> Control:
+# is_terminal: true when this node ends the run (no path leads beyond it).
+func _make_node(item: Dictionary, arr: Array, idx: int, is_terminal: bool = false) -> Control:
 	var t: String = item.get("type", "round")
-	var accent: Color = _type_color(t)
+	# Terminal nodes use AMBER as their accent to stand out clearly.
+	var accent: Color = UITheme.AMBER if is_terminal else _type_color(t)
 	var icon: String = _type_icon(t)
 	var primary: String = _type_label(item)
 	var secondary: String = _type_sublabel(item)
+	if is_terminal:
+		secondary = secondary + ("  ·  " if secondary != "" else "") + "END OF RUN"
 
 	var panel: PanelContainer = PanelContainer.new()
 	panel.size = Vector2(NODE_WIDTH, NODE_HEIGHT)
@@ -270,7 +324,7 @@ func _make_node(item: Dictionary, arr: Array, idx: int) -> Control:
 	# so two newly-created nodes with identical default fields would compare
 	# equal and both light up as "selected".
 	var is_selected: bool = is_same(item, _selected_data)
-	panel.add_theme_stylebox_override("panel", _node_stylebox(accent, is_selected))
+	panel.add_theme_stylebox_override("panel", _node_stylebox(accent, is_selected, is_terminal))
 
 	var margin: MarginContainer = MarginContainer.new()
 	margin.add_theme_constant_override("margin_left",   10)
@@ -368,11 +422,12 @@ func _make_path_label(path: Dictionary, paths_arr: Array, path_idx: int) -> Cont
 	return panel
 
 
-func _node_stylebox(accent: Color, selected: bool) -> StyleBoxFlat:
+func _node_stylebox(accent: Color, selected: bool, terminal: bool = false) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(0.04, 0.0, 0.06, 0.96)
 	s.border_color = accent
-	var w: int = 3 if selected else 1
+	# Border: thicker when selected; slightly heavier than default when terminal.
+	var w: int = 3 if selected else (2 if terminal else 1)
 	s.border_width_left   = w
 	s.border_width_right  = w
 	s.border_width_top    = w
@@ -382,8 +437,12 @@ func _node_stylebox(accent: Color, selected: bool) -> StyleBoxFlat:
 	s.corner_radius_bottom_left  = 6
 	s.corner_radius_bottom_right = 6
 	if selected:
-		s.shadow_color = Color(accent.r, accent.g, accent.b, 0.45)
+		s.shadow_color = Color(accent.r, accent.g, accent.b, 0.50)
 		s.shadow_size  = 8
+	elif terminal:
+		# Warm amber glow to signal "this is where the run ends".
+		s.shadow_color = Color(accent.r, accent.g, accent.b, 0.55)
+		s.shadow_size  = 14
 	return s
 
 

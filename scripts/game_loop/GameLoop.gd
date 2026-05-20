@@ -45,6 +45,10 @@ const TRANSITION_HOLD_TIME: float = 0.30
 var _paused: bool = false
 var _inventory_panel: Control = null
 
+# True while a full-screen overlay (shop / fork / storyboard) is active.
+# Used to suppress gameplay hotkeys that should not fire through an overlay.
+var _is_overlay_open: bool = false
+
 
 func _ready() -> void:
 	_apply_layout()
@@ -53,6 +57,10 @@ func _ready() -> void:
 	ScoreService.Reset()
 	CoinService.Reset()
 	InventoryService.Reset()
+	# Pure-GDScript round-name log, read by EndScreen. Stored as meta on
+	# GameState so it survives the scene change. Cleared here so a new
+	# journey starts fresh.
+	GameState.set_meta("_round_names", PackedStringArray())
 	_refresh_coin_label()
 	_load_current_item()
 	_show_hud()
@@ -85,6 +93,7 @@ func _load_current_item() -> void:
 
 
 func _show_storyboard_screen(sb_data: Dictionary) -> void:
+	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
 	var sb: Control = StoryboardScene.instantiate()
@@ -94,6 +103,7 @@ func _show_storyboard_screen(sb_data: Dictionary) -> void:
 
 
 func _on_storyboard_completed(coins: int) -> void:
+	_is_overlay_open = false
 	if coins > 0:
 		CoinService.AddCoins(coins)
 	GameState.Advance()
@@ -108,6 +118,7 @@ func _on_storyboard_completed(coins: int) -> void:
 
 
 func _show_shop_screen(shop_data: Dictionary) -> void:
+	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
 	var shop: Control = ShopScene.instantiate()
@@ -117,6 +128,7 @@ func _show_shop_screen(shop_data: Dictionary) -> void:
 
 
 func _on_shop_closed() -> void:
+	_is_overlay_open = false
 	GameState.Advance()
 	if GameState.IsSequenceDone():
 		Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
@@ -129,6 +141,7 @@ func _on_shop_closed() -> void:
 
 
 func _show_fork_screen(fork_data: Dictionary) -> void:
+	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
 	var fork_screen = ForkScene.instantiate()
@@ -138,6 +151,7 @@ func _show_fork_screen(fork_data: Dictionary) -> void:
 
 
 func _on_fork_path_chosen(path_index: int) -> void:
+	_is_overlay_open = false
 	GameState.ResolveFork(path_index)
 	await _transition_swap(func() -> void:
 		_video.paused = false
@@ -241,7 +255,19 @@ func _start_no_video_fallback() -> void:
 # ---------------------------------------------------------------------------
 
 func _on_round_ended() -> void:
-	GameState.LogRound(GameState.CurrentRound())
+	# Extract the name here in GDScript where Dictionary access is reliable,
+	# then pass it explicitly so C# never needs to look up the key itself.
+	var _cur: Dictionary = GameState.CurrentRound()
+	var _cur_name: String = _cur.get("name", "") as String
+	var _cur_ms: int      = _cur.get("length_ms", 0) as int
+	GameState.LogRound(_cur, _cur_name, _cur_ms)
+
+	# Append to the GDScript-side round-name log (see _ready). EndScreen reads
+	# this directly, avoiding any potential C#→GDScript Dictionary marshalling
+	# quirks for the name string.
+	var _names: PackedStringArray = GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray
+	_names.append(_cur_name)
+	GameState.set_meta("_round_names", _names)
 	ScoreService.EndRound()
 	FunscriptPlayer.Stop()
 
@@ -330,12 +356,37 @@ func _on_hide_timer_timeout() -> void:
 # ---------------------------------------------------------------------------
 
 func _input(event: InputEvent) -> void:
+	# Any activity shows the HUD.
 	if event is InputEventMouseMotion or event is InputEventMouseButton \
 			or event is InputEventKey:
 		_show_hud()
-	if event.is_action_pressed("ui_cancel"):
-		_go_to_menu()
-		get_viewport().set_input_as_handled()
+
+	# Keyboard hotkeys — evaluated in order of specificity.
+	if event is InputEventKey:
+		var k := event as InputEventKey
+		if k.pressed and not k.echo:
+			match k.keycode:
+				KEY_SPACE:
+					# Space: pause / resume — blocked while a full-screen overlay is open
+					# (shop / fork / storyboard handles its own input first).
+					if not _is_overlay_open:
+						_toggle_pause()
+						get_viewport().set_input_as_handled()
+				KEY_TAB:
+					# Tab: toggle inventory panel at any time during a round.
+					if not _is_overlay_open:
+						_on_inventory_pressed()
+						get_viewport().set_input_as_handled()
+				KEY_ESCAPE:
+					# Esc: close inventory if open, otherwise leave to menu.
+					# Overlay screens (shop/storyboard) capture Esc themselves before
+					# it reaches here; the fork screen intentionally does not (no escape).
+					if not _is_overlay_open:
+						if is_instance_valid(_inventory_panel):
+							_inventory_panel.close()
+						else:
+							_go_to_menu()
+						get_viewport().set_input_as_handled()
 
 
 # ---------------------------------------------------------------------------

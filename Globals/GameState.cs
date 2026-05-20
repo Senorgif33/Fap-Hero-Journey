@@ -11,9 +11,14 @@ public partial class GameState : Node
 	private int _seqIndex = 0;
 
 	// Chronological play log — entries are either:
-	//   { "type": "fork_choice", "fork_title": string, "path_name": string, "path_index": int }
-	//   { "type": "round",       "data": Dictionary }
+	//   { "type": "fork_choice", "fork_title": string, "path_name": string, "path_index": int, "depth": int }
+	//   { "type": "round",       "data": Dictionary, "depth": int }
 	private List<Dictionary> _playLog = new();
+
+	// Nesting depth of the currently-active fork path. 0 = top-level sequence.
+	// Incremented each time a fork is resolved; decremented when the sequence
+	// passes a fork_end sentinel (inserted at the tail of each spliced path).
+	private int _forkDepth = 0;
 
 	// Current position in the sequence (includes fork markers before resolution).
 	public int RoundIndex => _seqIndex;
@@ -25,9 +30,10 @@ public partial class GameState : Node
 
 	public void StartJourney(Dictionary data)
 	{
-		Journey   = data;
-		_seqIndex = 0;
-		_sequence = BuildSequence(data);
+		Journey    = data;
+		_seqIndex  = 0;
+		_forkDepth = 0;
+		_sequence  = BuildSequence(data);
 		_playLog.Clear();
 	}
 
@@ -149,11 +155,14 @@ public partial class GameState : Node
 		var chosen       = paths[pathIndex].AsGodotDictionary();
 
 		// Record this choice in the play log so the end screen can show the path taken.
+		// Depth is captured BEFORE incrementing so the header aligns with where the fork
+		// appeared (e.g. depth 0 = top-level, depth 1 = inside another fork's path).
 		_playLog.Add(new Dictionary {
 			["type"]       = "fork_choice",
 			["fork_title"] = forkData.ContainsKey("title") ? forkData["title"].AsString() : "",
 			["path_name"]  = chosen.ContainsKey("name") ? chosen["name"].AsString() : "Path " + (pathIndex + 1),
 			["path_index"] = pathIndex,
+			["depth"]      = _forkDepth,
 		});
 
 		var chosenRounds      = chosen.ContainsKey("rounds")      ? chosen["rounds"].AsGodotArray()      : new Array();
@@ -195,15 +204,41 @@ public partial class GameState : Node
 		{
 			_sequence.Insert(_seqIndex, subItems[i].Data);
 		}
+		// Insert a fork_end sentinel right after the last item of the spliced path.
+		// Advance() skips these sentinels automatically and decrements _forkDepth.
+		_sequence.Insert(_seqIndex + subItems.Count, new Dictionary { ["type"] = "fork_end" });
+		_forkDepth++;
 		// _seqIndex now points at the first item of the chosen path.
 	}
 
-	public void Advance() => _seqIndex++;
+	public void Advance()
+	{
+		_seqIndex++;
+		// Consume any fork_end sentinels, decrementing depth for each one.
+		// This correctly handles back-to-back sentinel runs when nested forks end together.
+		while (_seqIndex < _sequence.Count &&
+		       _sequence[_seqIndex].ContainsKey("type") &&
+		       _sequence[_seqIndex]["type"].AsString() == "fork_end")
+		{
+			_forkDepth = _forkDepth > 0 ? _forkDepth - 1 : 0;
+			_seqIndex++;
+		}
+	}
 
 	public bool IsSequenceDone() => _seqIndex >= _sequence.Count;
 
-	// Legacy alias — GameLoop checks this before advancing.
-	public bool IsLastRound() => _seqIndex >= _sequence.Count - 1;
+	// True when there are no more non-sentinel items after the current position.
+	// fork_end entries are internal bookkeeping and must not be counted as real items.
+	public bool IsLastRound()
+	{
+		for (int i = _seqIndex + 1; i < _sequence.Count; i++)
+		{
+			string t = _sequence[i].ContainsKey("type") ? _sequence[i]["type"].AsString() : "";
+			if (t != "fork_end")
+				return false;
+		}
+		return true;
+	}
 
 	// Count of round-type items currently in the sequence (grows after fork resolution).
 	public int TotalRounds() => _sequence.Count(item => item["type"].AsString() == "round");
@@ -220,11 +255,16 @@ public partial class GameState : Node
 	}
 
 	// Called by GameLoop after each round ends (before ScoreService.EndRound).
-	public void LogRound(Dictionary roundData)
+	// roundName and lengthMs are passed explicitly from GDScript (where Dictionary
+	// access is known to work) to avoid C# String/StringName key-lookup mismatches.
+	public void LogRound(Dictionary roundData, string roundName, int lengthMs)
 	{
 		_playLog.Add(new Dictionary {
-			["type"] = "round",
-			["data"] = roundData,
+			["type"]      = "round",
+			["name"]      = roundName,
+			["length_ms"] = lengthMs,
+			["data"]      = roundData,
+			["depth"]     = _forkDepth,
 		});
 	}
 

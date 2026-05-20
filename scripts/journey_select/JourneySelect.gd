@@ -19,6 +19,8 @@ const BORDER_WIDTH:     int = 3
 
 const JOURNEYS_DIR: String = "user://journeys"
 
+const DIFFICULTIES: Array[String] = ["Easy", "Medium", "Hard", "Very Hard", "Extreme", "Insane"]
+
 const DIFF_COLORS: Dictionary = {
 	"Easy":      Color(0.35, 0.95, 0.35),
 	"Medium":    Color(0.95, 0.95, 0.25),
@@ -66,6 +68,14 @@ var _sort_field:      String     = "name"
 var _sort_asc:        bool       = true
 var _current_journey: Dictionary = {}
 
+# Search / filter state
+var _search_text:    String = ""
+var _diff_filter_idx: int   = 0  # 0 = all, 1+ = DIFFICULTIES[idx-1]
+
+# Dynamically-created filter widgets (added to _top_bar in _apply_layout)
+var _search_field: LineEdit    = null
+var _diff_filter:  OptionButton = null
+
 
 func _ready() -> void:
 	_apply_layout()
@@ -97,7 +107,26 @@ func _apply_layout() -> void:
 	_top_bar.anchor_right  = 1.0
 	_top_bar.anchor_bottom = 0.0
 	_top_bar.offset_bottom = TOP_BAR_HEIGHT
-	_top_bar.add_theme_constant_override("separation", 0)
+	_top_bar.add_theme_constant_override("separation", 8)
+
+	# Search field — expands to fill space between the title and sort controls.
+	# We create it here so it's available for _apply_theme(); move_child positions
+	# it after BackButton(0) + TitleLabel(1), before SortContainer.
+	_search_field = LineEdit.new()
+	_search_field.placeholder_text      = "Search journeys…"
+	_search_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_search_field.custom_minimum_size   = Vector2(180, 0)
+	_top_bar.add_child(_search_field)
+	_top_bar.move_child(_search_field, 2)
+
+	# Difficulty filter dropdown
+	_diff_filter = OptionButton.new()
+	_diff_filter.custom_minimum_size = Vector2(172, 0)
+	_diff_filter.add_item("ALL DIFFICULTIES")
+	for d: String in DIFFICULTIES:
+		_diff_filter.add_item(d.to_upper())
+	_top_bar.add_child(_diff_filter)
+	_top_bar.move_child(_diff_filter, 3)
 
 	_scroll.anchor_right  = 1.0
 	_scroll.anchor_bottom = 1.0
@@ -143,6 +172,15 @@ func _apply_layout() -> void:
 	_round_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_round_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
+	# Wrap the round list in a MarginContainer so the rightmost column (coins)
+	# always has breathing room and is never crowded by the vertical scrollbar.
+	var round_list_mc: MarginContainer = MarginContainer.new()
+	round_list_mc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	round_list_mc.add_theme_constant_override("margin_right", 12)
+	_round_scroll.remove_child(_round_list)
+	round_list_mc.add_child(_round_list)
+	_round_scroll.add_child(round_list_mc)
+
 
 func _update_grid_columns() -> void:
 	var available: float = _scroll.size.x
@@ -162,8 +200,9 @@ func _apply_theme() -> void:
 	# TopBar background via a Panel behind the HBoxContainer would need an extra
 	# node; instead we apply a dark strip by styling the scroll container top offset.
 	_style_label(_title_lbl,  UITheme.PURPLE_BRIGHT, 18, true)
-	_title_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_title_lbl.horizontal_alignment  = HORIZONTAL_ALIGNMENT_CENTER
+	# Title no longer expands — the search field takes the flexible slot instead.
+	_title_lbl.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_title_lbl.horizontal_alignment  = HORIZONTAL_ALIGNMENT_LEFT
 
 	_style_label(_sort_lbl,   UITheme.PURPLE_MID,    13, true)
 	_style_label(_empty_lbl,  UITheme.PURPLE_MID,    15, true)
@@ -178,6 +217,9 @@ func _apply_theme() -> void:
 	_style_button(_play_btn,      UITheme.PURPLE_BRIGHT)
 	_style_button(_edit_btn,      UITheme.PURPLE_MID)
 	_style_button(_delete_btn,    UITheme.DANGER)
+
+	UITheme.style_line_edit(_search_field)
+	UITheme.style_option_button(_diff_filter)
 
 	_style_modal_panel()
 
@@ -290,6 +332,14 @@ func _connect_signals() -> void:
 	_play_btn.pressed.connect(_on_play_pressed)
 	_edit_btn.pressed.connect(_on_edit_pressed)
 	_delete_btn.pressed.connect(_on_delete_pressed)
+	_search_field.text_changed.connect(func(text: String) -> void:
+		_search_text = text.strip_edges()
+		_sort_and_populate()
+	)
+	_diff_filter.item_selected.connect(func(idx: int) -> void:
+		_diff_filter_idx = idx
+		_sort_and_populate()
+	)
 
 
 func _on_sort_pressed(field: String) -> void:
@@ -654,32 +704,51 @@ func _read_funscript_stats(folder: String) -> Dictionary:
 
 func _sort_and_populate() -> void:
 	_set_active_sort()
-	var sorted: Array = _journeys.duplicate()
+	# Apply search + difficulty filter first, then sort the surviving subset.
+	var filtered: Array = _journeys.filter(func(j: Dictionary) -> bool:
+		return _passes_filter(j)
+	)
 	var asc: bool = _sort_asc
 	match _sort_field:
 		"name":
-			sorted.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			filtered.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 				var cmp: int = (a["title"] as String).naturalnocasecmp_to(b["title"] as String)
 				return cmp < 0 if asc else cmp > 0
 			)
 		"duration":
-			sorted.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			filtered.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 				var va: int = a["total_length_ms"]
 				var vb: int = b["total_length_ms"]
 				return va < vb if asc else va > vb
 			)
 		"actions":
-			sorted.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			filtered.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 				var va: int = a["total_actions"]
 				var vb: int = b["total_actions"]
 				return va < vb if asc else va > vb
 			)
-	_populate_grid(sorted)
+	_populate_grid(filtered)
+
+
+# Returns true when journey `j` matches the current search text and difficulty filter.
+func _passes_filter(j: Dictionary) -> bool:
+	if _search_text != "":
+		var title: String = (j.get("title", "") as String).to_lower()
+		if not title.contains(_search_text.to_lower()):
+			return false
+	if _diff_filter_idx > 0:
+		var required: String = DIFFICULTIES[_diff_filter_idx - 1]
+		if j.get("difficulty", "") != required:
+			return false
+	return true
 
 
 func _populate_grid(journeys: Array) -> void:
 	for child in _grid.get_children():
 		child.queue_free()
+	if journeys.is_empty():
+		_empty_lbl.text = "No journeys match your filter." if not _journeys.is_empty() \
+			else "No journeys yet.\nCreate one in the builder!"
 	_empty_lbl.visible = journeys.is_empty()
 	for journey: Dictionary in journeys:
 		var card: PanelContainer = JourneyCardScene.instantiate()
