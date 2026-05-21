@@ -1,0 +1,15 @@
+[
+	{ "id": "straight",  "label": "Straight",  "color": "#4f8fff" },
+	{ "id": "gay",       "label": "Gay",       "color": "#ff5fa2" },
+	{ "id": "trans",     "label": "Trans",     "color": "#5fc8ff" },
+	{ "id": "futa",      "label": "Futa",      "color": "#b06fff" },
+	{ "id": "furry",     "label": "Furry",     "color": "#ff9b3f" },
+	{ "id": "real",      "label": "Real",      "color": "#e8c46a" },
+	{ "id": "animated",  "label": "Animated",  "color": "#6ae8c4" },
+	{ "id": "2d",        "label": "2D",        "color": "#e86a6a" },
+	{ "id": "3d",        "label": "3D",        "color": "#a0e86a" },
+	{ "id": "pmv",       "label": "PMV",       "color": "#e86ab0" },
+	{ "id": "hmv",        "label": "HMV",        "color": "#c46ae8" },
+	{ "id": "multi_axis", "label": "Multi-Axis", "color": "#6ab8e8" },
+	{ "id": "vibe",       "label": "Vibe",       "color": "#e8e86a" }
+]

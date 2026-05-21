@@ -70,6 +70,7 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		"shops":           [],
 		"storyboards":     [],
 		"cover_path":      "",
+		"tags":            TagRegistry.sanitize(data.get("Tags", [])),
 		"total_actions":   0,
 		"total_length_ms": 0,
 		"modified_time":   FileAccess.get_modified_time(json_path),

@@ -113,6 +113,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 		"description":    description,
 		"difficulty_idx": diff_idx,
 		"cover_path":     cover_path,
+		"tags":           journey.get("tags", []),
 		"items":          items,
 	}
 

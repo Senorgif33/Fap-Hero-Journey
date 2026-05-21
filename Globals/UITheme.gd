@@ -166,6 +166,29 @@ func style_option_button(ob: OptionButton) -> void:
 	ob.add_theme_stylebox_override("focus",   StyleBoxEmpty.new())
 
 
+# Read-only tag chip: a small rounded pill, `text` in `accent`, on a faint
+# tinted background with an `accent` border. Used for journey tag display.
+func make_tag_chip(text: String, accent: Color) -> Control:
+	var chip: PanelContainer = PanelContainer.new()
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color            = Color(accent.r, accent.g, accent.b, 0.14)
+	s.border_color        = accent
+	s.border_width_left   = 1; s.border_width_right  = 1
+	s.border_width_top    = 1; s.border_width_bottom = 1
+	s.corner_radius_top_left     = 6; s.corner_radius_top_right    = 6
+	s.corner_radius_bottom_left  = 6; s.corner_radius_bottom_right = 6
+	s.content_margin_left = 8; s.content_margin_right  = 8
+	s.content_margin_top  = 2; s.content_margin_bottom = 2
+	chip.add_theme_stylebox_override("panel", s)
+
+	var lbl: Label = Label.new()
+	lbl.text = text.to_upper()
+	lbl.add_theme_color_override("font_color", accent)
+	lbl.add_theme_font_size_override("font_size", 10)
+	chip.add_child(lbl)
+	return chip
+
+
 # Thin horizontal separator stylebox using the SEPARATOR color at given alpha.
 func make_separator_style(alpha: float = 1.0) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()

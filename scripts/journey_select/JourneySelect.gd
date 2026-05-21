@@ -71,10 +71,12 @@ var _current_journey: Dictionary = {}
 # Search / filter state
 var _search_text:    String = ""
 var _diff_filter_idx: int   = 0  # 0 = all, 1+ = DIFFICULTIES[idx-1]
+var _tag_filter_idx:  int   = 0  # 0 = all, 1+ = TagRegistry.all()[idx-1]
 
 # Dynamically-created filter widgets (added to _top_bar in _apply_layout)
 var _search_field: LineEdit    = null
 var _diff_filter:  OptionButton = null
+var _tag_filter:   OptionButton = null
 
 
 func _ready() -> void:
@@ -127,6 +129,15 @@ func _apply_layout() -> void:
 		_diff_filter.add_item(d.to_upper())
 	_top_bar.add_child(_diff_filter)
 	_top_bar.move_child(_diff_filter, 3)
+
+	# Tag filter dropdown
+	_tag_filter = OptionButton.new()
+	_tag_filter.custom_minimum_size = Vector2(150, 0)
+	_tag_filter.add_item("ALL TAGS")
+	for tag_def: Dictionary in TagRegistry.all():
+		_tag_filter.add_item((tag_def["label"] as String).to_upper())
+	_top_bar.add_child(_tag_filter)
+	_top_bar.move_child(_tag_filter, 4)
 
 	_scroll.anchor_right  = 1.0
 	_scroll.anchor_bottom = 1.0
@@ -220,6 +231,7 @@ func _apply_theme() -> void:
 
 	UITheme.style_line_edit(_search_field)
 	UITheme.style_option_button(_diff_filter)
+	UITheme.style_option_button(_tag_filter)
 
 	_style_modal_panel()
 
@@ -340,6 +352,10 @@ func _connect_signals() -> void:
 		_diff_filter_idx = idx
 		_sort_and_populate()
 	)
+	_tag_filter.item_selected.connect(func(idx: int) -> void:
+		_tag_filter_idx = idx
+		_sort_and_populate()
+	)
 
 
 func _on_sort_pressed(field: String) -> void:
@@ -445,7 +461,8 @@ func _sort_and_populate() -> void:
 	_populate_grid(filtered)
 
 
-# Returns true when journey `j` matches the current search text and difficulty filter.
+# Returns true when journey `j` matches the current search text, difficulty
+# filter, and tag filter.
 func _passes_filter(j: Dictionary) -> bool:
 	if _search_text != "":
 		var title: String = (j.get("title", "") as String).to_lower()
@@ -455,6 +472,12 @@ func _passes_filter(j: Dictionary) -> bool:
 		var required: String = JourneyData.DIFFICULTIES[_diff_filter_idx - 1]
 		if j.get("difficulty", "") != required:
 			return false
+	if _tag_filter_idx > 0:
+		var tags_all: Array = TagRegistry.all()
+		if _tag_filter_idx - 1 < tags_all.size():
+			var required_tag: String = tags_all[_tag_filter_idx - 1]["id"]
+			if required_tag not in (j.get("tags", []) as Array):
+				return false
 	return true
 
 
@@ -490,6 +513,22 @@ func _populate_modal(journey: Dictionary) -> void:
 	_modal_diff.text = "◆  " + diff.to_upper()
 	var diff_color: Color = DIFF_COLORS.get(diff, UITheme.WHITE_SOFT)
 	_modal_diff.add_theme_color_override("font_color", diff_color)
+
+	# Tag chips — rebuilt each time the modal opens (named so the prior row,
+	# if any, can be removed first).
+	var old_tag_row: Node = _details_col.get_node_or_null("ModalTagRow")
+	if old_tag_row:
+		old_tag_row.free()
+	var tag_ids: Array = journey.get("tags", [])
+	if not tag_ids.is_empty():
+		var tag_row: HFlowContainer = HFlowContainer.new()
+		tag_row.name = "ModalTagRow"
+		tag_row.add_theme_constant_override("h_separation", 6)
+		tag_row.add_theme_constant_override("v_separation", 6)
+		for id: String in tag_ids:
+			tag_row.add_child(UITheme.make_tag_chip(TagRegistry.label_of(id), TagRegistry.color_of(id)))
+		_details_col.add_child(tag_row)
+		_details_col.move_child(tag_row, _modal_diff.get_index() + 1)
 
 	var rounds: Array = journey.get("rounds", [])
 	_stat_rounds.text  = str(rounds.size()) + " ROUNDS"

@@ -9,6 +9,10 @@ const BORDER_WIDTH:    int = 2
 @onready var _cover: TextureRect = $VBox/CoverRect
 @onready var _title: Label       = $VBox/TitleLabel
 
+# Tag chip overlay, built in setup(); shown only while the card is hovered.
+var _tag_overlay: Control = null
+var _tag_scrim:   ColorRect = null
+
 
 func _ready() -> void:
 	custom_minimum_size = Vector2(CARD_MIN_WIDTH, CARD_MIN_HEIGHT)
@@ -36,6 +40,43 @@ func setup(journey: Dictionary) -> void:
 	var cover_path: String = journey.get("cover_path", "")
 	var img: Image = JourneyData.load_image_smart(cover_path)
 	_cover.texture = ImageTexture.create_from_image(img) if img else null
+	_build_tag_overlay(journey.get("tags", []))
+
+
+# Builds a hidden chip strip pinned to the bottom of the cover. Revealed on
+# hover. Skipped entirely when the journey has no tags.
+func _build_tag_overlay(tag_ids: Array) -> void:
+	if tag_ids.is_empty():
+		return
+	# Scrim: a gradient-style dark rect that sits behind the chips.
+	_tag_scrim = ColorRect.new()
+	_tag_scrim.color        = Color(0.0, 0.0, 0.0, 0.75)
+	_tag_scrim.anchor_left  = 0.0
+	_tag_scrim.anchor_right = 1.0
+	_tag_scrim.anchor_top   = 1.0
+	_tag_scrim.anchor_bottom = 1.0
+	_tag_scrim.offset_top    = -82
+	_tag_scrim.offset_bottom = 0
+	_tag_scrim.visible       = false
+	_tag_scrim.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	_cover.add_child(_tag_scrim)
+
+	_tag_overlay = HFlowContainer.new()
+	_tag_overlay.add_theme_constant_override("h_separation", 4)
+	_tag_overlay.add_theme_constant_override("v_separation", 4)
+	_tag_overlay.anchor_left   = 0.0
+	_tag_overlay.anchor_right  = 1.0
+	_tag_overlay.anchor_top    = 1.0
+	_tag_overlay.anchor_bottom = 1.0
+	_tag_overlay.offset_left   = 8
+	_tag_overlay.offset_right  = -8
+	_tag_overlay.offset_top    = -78
+	_tag_overlay.offset_bottom = -8
+	_tag_overlay.visible       = false
+	_tag_overlay.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	for id: String in tag_ids:
+		_tag_overlay.add_child(UITheme.make_tag_chip(TagRegistry.label_of(id), TagRegistry.color_of(id)))
+	_cover.add_child(_tag_overlay)
 
 
 func _set_style(hovered: bool) -> void:
@@ -59,11 +100,17 @@ func _set_style(hovered: bool) -> void:
 func _on_hover_enter() -> void:
 	_set_style(true)
 	_title.add_theme_color_override("font_color", UITheme.PURPLE_BRIGHT)
+	if _tag_overlay != null:
+		_tag_scrim.visible   = true
+		_tag_overlay.visible = true
 
 
 func _on_hover_exit() -> void:
 	_set_style(false)
 	_title.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	if _tag_overlay != null:
+		_tag_scrim.visible   = false
+		_tag_overlay.visible = false
 
 
 func _gui_input(event: InputEvent) -> void:

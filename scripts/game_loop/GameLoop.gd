@@ -251,15 +251,29 @@ func _load_video(path: String) -> void:
 	# MP4/MKV/WebM — requires EIRTeam.FFmpeg GDExtension.
 	# Install: https://github.com/EIRTeam/EIRTeam.FFmpeg/releases
 	# Drop the addons/ folder into the project root and reopen Godot.
-	if ClassDB.class_exists("FFmpegVideoStream"):
-		var stream: Resource = ClassDB.instantiate("FFmpegVideoStream")
-		stream.set("file", ProjectSettings.globalize_path(path))
-		_video.stream = stream as VideoStream
-		_video.play()
-		FunscriptPlayer.Play()
-	else:
+	if not ClassDB.class_exists("FFmpegVideoStream"):
 		push_warning("GameLoop: FFmpegVideoStream not found — install EIRTeam.FFmpeg for MP4 support. Running funscript-only.")
 		_start_no_video_fallback()
+		return
+
+	var abs_path: String = ProjectSettings.globalize_path(path)
+	var stream: Resource = ClassDB.instantiate("FFmpegVideoStream")
+	stream.set("file", abs_path)
+	_video.stream = stream as VideoStream
+	_video.play()
+
+	# EIRTeam.FFmpeg surfaces open/decode failures as C++-level push_errors
+	# rather than a catchable GDScript return value. Give the player one frame
+	# to settle: if the file couldn't be opened the player will have stopped
+	# itself, and is_playing() returns false. In that case wipe the stream and
+	# fall back to the funscript-only timer so the round still advances.
+	await get_tree().process_frame
+	if not _video.is_playing():
+		push_warning("GameLoop: video failed to open '%s' — funscript-only fallback." % abs_path)
+		_video.stream = null
+		_start_no_video_fallback()
+		return
+	FunscriptPlayer.Play()
 
 
 func _start_no_video_fallback() -> void:

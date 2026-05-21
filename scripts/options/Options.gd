@@ -596,7 +596,9 @@ func _load_settings() -> void:
 	var fullscreen: bool = SettingsService.get_fullscreen()
 	_fs_toggle.button_pressed = fullscreen
 	_style_toggle(_fs_toggle, fullscreen)
-	_apply_fullscreen(fullscreen)
+	# Do NOT call _apply_fullscreen() here — SettingsService._ready() already
+	# applied it at boot. Re-applying it every time Options opens would force
+	# the window out of maximized / windowed-fullscreen mode.
 
 	_address_input.text = SettingsService.get_intiface_address()
 

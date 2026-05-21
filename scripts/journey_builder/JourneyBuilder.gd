@@ -45,6 +45,11 @@ var _journey_name:           String = ""
 var _journey_author:         String = ""
 var _journey_desc:           String = ""
 var _journey_difficulty_idx: int    = 0
+var _journey_tags:           Array  = []  # Array[String] of tag ids (see TagRegistry)
+
+# Folder the journey was loaded from when editing. If the journey is renamed,
+# the save writes a new folder; this lets us delete the stale original.
+var _original_journey_folder: String = ""
 
 var _cover_path:    String       = ""
 var _cover_texture: ImageTexture = null  # cached so the journey-info view can re-show the preview without re-reading from disk
@@ -62,6 +67,18 @@ var _side_renderer: BuilderSidePanel = null
 var _transcode_cancel: bool = false
 var _transcode_pid:    int  = -1
 
+# Set true when a video copy/transcode is cancelled mid-save inside a fork path,
+# so the recursive _save_fork/_save_path chain can unwind and _on_save_pressed
+# can abort the whole save cleanly.
+var _save_aborted: bool = false
+
+# Streaming-copy tuning. Chunks are read/written 1 MB at a time; the main thread
+# yields one frame only after COPY_FRAME_BUDGET_MS of accumulated work — frequent
+# enough that the window stays responsive, rare enough that the frame-wait tax
+# stays under ~1 s even on multi-GB videos.
+const COPY_CHUNK_SIZE:       int = 1024 * 1024
+const COPY_FRAME_BUDGET_MS:  int = 100
+
 
 func _ready() -> void:
 	_side_renderer = BuilderSidePanel.new(self)
@@ -70,6 +87,7 @@ func _ready() -> void:
 	_connect_signals()
 	_setup_graph_view()
 	if not edit_journey.is_empty():
+		_original_journey_folder = edit_journey.get("folder", "")
 		_load_journey(edit_journey)
 		edit_journey = {}
 	_side_renderer.show_journey_info_panel()
@@ -331,6 +349,7 @@ func _load_journey(journey: Dictionary) -> void:
 	_journey_author         = d["author"]
 	_journey_desc           = d["description"]
 	_journey_difficulty_idx = d["difficulty_idx"]
+	_journey_tags           = (d.get("tags", []) as Array).duplicate()
 	if (d["cover_path"] as String) != "":
 		_cover_path = d["cover_path"]
 		_update_cover_preview()
@@ -367,6 +386,8 @@ func _show_status(msg: String, is_error: bool) -> void:
 func _on_save_pressed() -> void:
 	_save_btn.disabled  = true
 	_status_lbl.visible = false
+	_transcode_cancel   = false
+	_save_aborted       = false
 
 	var journey_name: String = _journey_name.strip_edges()
 	if journey_name == "":
@@ -448,8 +469,10 @@ func _on_save_pressed() -> void:
 		var ext: String = _cover_path.get_extension().to_lower()
 		_copy_image_deduped(_cover_path, abs_media_dir, "cover." + ext, copied_images)
 
+	# Show the progress modal whenever the save will copy or transcode video —
+	# large video copies are streamed and take visible time.
 	var modal: Control = null
-	if not transcode_plan.is_empty():
+	if any_video:
 		modal = _create_transcode_modal()
 		add_child(modal)
 
@@ -459,7 +482,7 @@ func _on_save_pressed() -> void:
 	var storyboards_json: Array = []
 	var rorder: int = 0
 	var last_rorder: int = 0
-	var total_main_rounds: int = _items.count(func(it: Dictionary) -> bool: return it.get("type","round") == "round")
+	var total_main_rounds: int = _items.filter(func(it: Dictionary) -> bool: return it.get("type","round") == "round").size()
 
 	for i in _items.size():
 		var it: Dictionary = _items[i]
@@ -545,7 +568,16 @@ func _on_save_pressed() -> void:
 					_delete_stale_files(round_dir, vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
 				else:
 					var vid_dst_name: String = vid_src.get_file()
-					_copy_file(vid_src, round_dir + "/" + vid_dst_name)
+					_update_modal_label(modal, "Round %d / %d — %s  (copying video)" % [rorder, total_main_rounds, round_name])
+					var copy_ok: bool = await _copy_file_chunked(
+						vid_src, round_dir + "/" + vid_dst_name,
+						func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot))
+					if not copy_ok:
+						if modal: modal.queue_free()
+						_show_status("Save cancelled. Journey not saved." if _transcode_cancel \
+							else "Failed to copy video for round \"%s\"." % round_name, true)
+						_save_btn.disabled = false
+						return
 					_delete_stale_files(round_dir, vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
 
 			# If this round was renamed, remove the old folder now that all files
@@ -569,7 +601,13 @@ func _on_save_pressed() -> void:
 		else:
 			# Fork — recursively save the fork and all nested forks.
 			var slug_prefix: String = "fork%d" % forks_json.size()
-			forks_json.append(_save_fork(it, abs_dir, abs_media_dir, last_rorder, slug_prefix, copied_images))
+			forks_json.append(await _save_fork(it, abs_dir, abs_media_dir, last_rorder, slug_prefix, copied_images, modal))
+			# A cancelled video copy deep inside a fork path unwinds to here.
+			if _save_aborted:
+				if modal: modal.queue_free()
+				_show_status("Save cancelled. Journey not saved.", true)
+				_save_btn.disabled = false
+				return
 
 	if modal:
 		modal.queue_free()
@@ -579,6 +617,7 @@ func _on_save_pressed() -> void:
 		"Author":      _journey_author.strip_edges(),
 		"Description": _journey_desc.strip_edges(),
 		"Difficulty":  JourneyData.DIFFICULTIES[_journey_difficulty_idx],
+		"Tags":        TagRegistry.sanitize(_journey_tags),
 		"Rounds":      rounds_json,
 		"Forks":       forks_json,
 		"Shops":       shops_json,
@@ -593,6 +632,13 @@ func _on_save_pressed() -> void:
 	f.store_string(JSON.stringify(data, "\t"))
 	f.close()
 
+	# If editing renamed the journey, the save wrote a new folder — remove the
+	# stale original (its old journey.json, media/, and any leftover subfolders).
+	if _original_journey_folder != "":
+		var old_abs: String = ProjectSettings.globalize_path(_original_journey_folder)
+		if old_abs != abs_dir and DirAccess.dir_exists_absolute(old_abs):
+			JourneyData.delete_dir_recursive(old_abs)
+
 	_show_status("Journey saved! Returning to catalogue...", false)
 	await get_tree().create_timer(1.5).timeout
 	Transition.change_scene("res://scenes/journey_select/JourneySelect.tscn")
@@ -600,7 +646,7 @@ func _on_save_pressed() -> void:
 
 # Recursively serializes a fork item to JSON. Calls _save_path for each path.
 # `slug_prefix` makes nested-storyboard filenames unique across the journey.
-func _save_fork(fork_item: Dictionary, abs_dir: String, abs_media_dir: String, after_order: int, slug_prefix: String, copied_images: Dictionary) -> Dictionary:
+func _save_fork(fork_item: Dictionary, abs_dir: String, abs_media_dir: String, after_order: int, slug_prefix: String, copied_images: Dictionary, modal: Control) -> Dictionary:
 	var fork_entry: Dictionary = {
 		"AfterOrder":  after_order,
 		"Title":       fork_item.get("title",""),
@@ -610,13 +656,15 @@ func _save_fork(fork_item: Dictionary, abs_dir: String, abs_media_dir: String, a
 	for pi in (fork_item.get("paths", []) as Array).size():
 		var path_data: Dictionary = fork_item["paths"][pi]
 		var path_slug: String = "%s_p%d" % [slug_prefix, pi]
-		fork_entry["Paths"].append(_save_path(path_data, abs_dir, abs_media_dir, path_slug, copied_images))
+		fork_entry["Paths"].append(await _save_path(path_data, abs_dir, abs_media_dir, path_slug, copied_images, modal))
+		if _save_aborted:
+			return fork_entry
 	return fork_entry
 
 
 # Recursively serializes a single fork path to JSON, splitting its items into
 # Rounds, Shops, Storyboards, and (nested) Forks arrays.
-func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, slug_prefix: String, copied_images: Dictionary) -> Dictionary:
+func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, slug_prefix: String, copied_images: Dictionary, modal: Control) -> Dictionary:
 	var img_src: String  = path_data.get("image_path", "")
 	var img_fname: String = ""
 	if img_src != "":
@@ -681,7 +729,9 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				# after the last round/storyboard authored before it in this path.
 				var nested_slug: String = "%s_f%d" % [slug_prefix, nested_fork_count]
 				nested_fork_count += 1
-				path_entry["Forks"].append(_save_fork(pi_item, abs_dir, abs_media_dir, pr_last_order, nested_slug, copied_images))
+				path_entry["Forks"].append(await _save_fork(pi_item, abs_dir, abs_media_dir, pr_last_order, nested_slug, copied_images, modal))
+				if _save_aborted:
+					return path_entry
 			_:
 				# Round
 				pr_order += 1
@@ -700,7 +750,14 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				var pr_vid: String = pi_item.get("video_path","")
 				if pr_vid != "":
 					var pr_vid_dst_name: String = pr_vid.get_file()
-					_copy_file(pr_vid, pr_dir + "/" + pr_vid_dst_name)
+					_update_modal_label(modal, "Fork round — %s  (copying video)" % pr_name)
+					var pr_copy_ok: bool = await _copy_file_chunked(
+						pr_vid, pr_dir + "/" + pr_vid_dst_name,
+						func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot))
+					if not pr_copy_ok:
+						# Cancelled / failed — unwind the recursive save.
+						_save_aborted = true
+						return path_entry
 					_delete_stale_files(pr_dir, pr_vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
 				var pr_axis_in: Dictionary = pi_item.get("axis_scripts", {})
 				var pr_axis_rel: Dictionary = {}
@@ -735,15 +792,47 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 # ---------------------------------------------------------------------------
 
 func _ffmpeg_binary(name: String) -> String:
-	# Try bundled binary first (works in both editor and exported builds), then PATH.
 	var exe: String = name + ".exe" if OS.get_name() == "Windows" else name
-	var bundled: String = ProjectSettings.globalize_path("res://bin/" + exe)
-	if FileAccess.file_exists(bundled):
-		return bundled
-	var next_to_app: String = OS.get_executable_path().get_base_dir() + "/bin/" + exe
-	if FileAccess.file_exists(next_to_app):
-		return next_to_app
-	return name  # fall back to PATH lookup
+
+	if OS.has_feature("editor"):
+		# Editor: res://bin/ is a real filesystem directory — execute directly.
+		var bundled: String = ProjectSettings.globalize_path("res://bin/" + exe)
+		if FileAccess.file_exists(bundled):
+			return bundled
+	else:
+		# Exported build: res://bin/ is inside the PCK and cannot be executed
+		# directly. Extract to user://bin/ on first use, then run from there.
+		var user_abs: String = ProjectSettings.globalize_path("user://bin/" + exe)
+		if not FileAccess.file_exists(user_abs):
+			_extract_ffmpeg_binary("res://bin/" + exe, user_abs)
+		if FileAccess.file_exists(user_abs):
+			return user_abs
+		# Fallback: bin/ folder placed alongside the exported executable.
+		var next_to_app: String = OS.get_executable_path().get_base_dir() + "/bin/" + exe
+		if FileAccess.file_exists(next_to_app):
+			return next_to_app
+
+	return name  # last resort: PATH lookup
+
+
+# Copies a binary from the PCK (res://) to an absolute filesystem path so it
+# can be executed. Called once per binary per user data directory.
+func _extract_ffmpeg_binary(src_res: String, dst_abs: String) -> void:
+	if not FileAccess.file_exists(src_res):
+		return
+	DirAccess.make_dir_recursive_absolute(dst_abs.get_base_dir())
+	var f_in: FileAccess = FileAccess.open(src_res, FileAccess.READ)
+	if f_in == null:
+		return
+	var bytes: PackedByteArray = f_in.get_buffer(f_in.get_length())
+	f_in.close()
+	var f_out: FileAccess = FileAccess.open(dst_abs, FileAccess.WRITE)
+	if f_out == null:
+		return
+	f_out.store_buffer(bytes)
+	f_out.close()
+	if OS.get_name() != "Windows":
+		OS.execute("chmod", ["+x", dst_abs], [], true)
 
 
 func _ffmpeg_available() -> bool:
@@ -890,7 +979,7 @@ func _create_transcode_modal() -> Control:
 
 	var title: Label = Label.new()
 	title.name = "Title"
-	title.text = "TRANSCODING VIDEO"
+	title.text = "SAVING JOURNEY"
 	UITheme.style_label(title, UITheme.PURPLE_BRIGHT, 16, true)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(title)
@@ -967,6 +1056,36 @@ func _format_time(seconds: float) -> String:
 	return "%02d:%02d" % [s / 60, s % 60]
 
 
+# Sets the modal's secondary label to a plain message (no codec suffix).
+func _update_modal_label(modal: Control, text: String) -> void:
+	if modal == null:
+		return
+	var lbl: Label = modal.find_child("RoundLabel", true, false) as Label
+	if lbl:
+		lbl.text = text
+
+
+# Updates the modal bar + status line for a byte-based file copy.
+func _update_modal_copy(modal: Control, copied: int, total: int) -> void:
+	if modal == null:
+		return
+	var frac: float = (float(copied) / float(total)) if total > 0 else 0.0
+	var bar: ProgressBar = modal.find_child("Bar", true, false) as ProgressBar
+	if bar:
+		bar.value = frac
+	var status: Label = modal.find_child("Status", true, false) as Label
+	if status:
+		status.text = "Copying… %d%%  (%s / %s)" % [
+			int(round(frac * 100.0)), _format_size(copied), _format_size(total)]
+
+
+func _format_size(bytes: int) -> String:
+	var mb: float = bytes / (1024.0 * 1024.0)
+	if mb >= 1024.0:
+		return "%.1f GB" % (mb / 1024.0)
+	return "%.0f MB" % mb
+
+
 # Returns the destination filename (relative to abs_dir) for an image. If the
 # same source path was already copied during this save, reuses the existing
 # destination file rather than copying again. `copied` maps src_path → fname.
@@ -980,6 +1099,8 @@ func _copy_image_deduped(src: String, abs_dir: String, candidate_fname: String, 
 	return candidate_fname
 
 
+# Synchronous whole-file copy. Use only for small files (funscripts, images) —
+# for video use _copy_file_chunked so the main thread doesn't freeze.
 func _copy_file(src: String, dst: String) -> void:
 	var src_file: FileAccess = FileAccess.open(src, FileAccess.READ)
 	if src_file == null:
@@ -993,6 +1114,48 @@ func _copy_file(src: String, dst: String) -> void:
 		return
 	dst_file.store_buffer(bytes)
 	dst_file.close()
+
+
+# Streaming file copy for large files (video). Reads/writes in COPY_CHUNK_SIZE
+# blocks and yields one frame whenever COPY_FRAME_BUDGET_MS of work has piled
+# up — so the window stays responsive and the modal can repaint, without paying
+# a full frame-wait per chunk. `progress` (optional) is called as
+# progress.call(copied_bytes, total_bytes). Honours the modal's cancel button
+# via _transcode_cancel. Returns false on I/O error or cancellation.
+func _copy_file_chunked(src: String, dst: String, progress: Callable = Callable()) -> bool:
+	var src_file: FileAccess = FileAccess.open(src, FileAccess.READ)
+	if src_file == null:
+		printerr("JourneyBuilder: cannot read: " + src)
+		return false
+	var dst_file: FileAccess = FileAccess.open(dst, FileAccess.WRITE)
+	if dst_file == null:
+		printerr("JourneyBuilder: cannot write: " + dst)
+		src_file.close()
+		return false
+
+	var total: int = src_file.get_length()
+	var copied: int = 0
+	var budget_start: int = Time.get_ticks_msec()
+
+	while copied < total:
+		if _transcode_cancel:
+			src_file.close()
+			dst_file.close()
+			return false
+		var chunk: PackedByteArray = src_file.get_buffer(COPY_CHUNK_SIZE)
+		if chunk.is_empty():
+			break
+		dst_file.store_buffer(chunk)
+		copied += chunk.size()
+		if progress.is_valid():
+			progress.call(copied, total)
+		if Time.get_ticks_msec() - budget_start >= COPY_FRAME_BUDGET_MS:
+			await get_tree().process_frame
+			budget_start = Time.get_ticks_msec()
+
+	src_file.close()
+	dst_file.close()
+	return true
 
 
 # Removes files inside `dir_path` whose extension is in `extensions` but whose

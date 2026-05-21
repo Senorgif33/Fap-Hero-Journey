@@ -182,6 +182,15 @@ func show_journey_info_panel() -> void:
 	desc_edit.text_changed.connect(func() -> void: _owner._journey_desc = desc_edit.text)
 	side_vbox.add_child(desc_edit)
 
+	# Tags — toggle chips, one per definition in tags.json.
+	side_vbox.add_child(_side_field_label("TAGS"))
+	var tag_flow: HFlowContainer = HFlowContainer.new()
+	tag_flow.add_theme_constant_override("h_separation", 6)
+	tag_flow.add_theme_constant_override("v_separation", 6)
+	side_vbox.add_child(tag_flow)
+	for tag_def: Dictionary in TagRegistry.all():
+		tag_flow.add_child(_make_tag_toggle(tag_def))
+
 	side_vbox.add_child(_side_section_separator())
 
 	# Quick-add buttons to top level
@@ -215,6 +224,53 @@ func show_journey_info_panel() -> void:
 			_owner._refresh_graph()
 		)
 		side_vbox.add_child(btn)
+
+
+# Toggle chip for one journey tag. Filled with the tag's colour when on,
+# faintly tinted when off. Mutates _owner._journey_tags directly.
+func _make_tag_toggle(tag_def: Dictionary) -> Button:
+	var id: String    = tag_def["id"]
+	var color: Color  = tag_def["color"]
+
+	var btn: Button = Button.new()
+	btn.text           = tag_def["label"]
+	btn.toggle_mode    = true
+	btn.button_pressed = id in _owner._journey_tags
+	btn.focus_mode     = Control.FOCUS_NONE
+	btn.add_theme_font_size_override("font_size", 11)
+
+	var off: StyleBoxFlat = StyleBoxFlat.new()
+	off.bg_color            = Color(color.r, color.g, color.b, 0.06)
+	off.border_color        = Color(color.r, color.g, color.b, 0.45)
+	off.border_width_left   = 1; off.border_width_right  = 1
+	off.border_width_top    = 1; off.border_width_bottom = 1
+	off.corner_radius_top_left    = 6; off.corner_radius_top_right    = 6
+	off.corner_radius_bottom_left = 6; off.corner_radius_bottom_right = 6
+	off.content_margin_left = 11; off.content_margin_right  = 11
+	off.content_margin_top  = 5;  off.content_margin_bottom = 5
+
+	var on: StyleBoxFlat = off.duplicate()
+	on.bg_color     = color
+	on.border_color = color
+
+	btn.add_theme_stylebox_override("normal",        off)
+	btn.add_theme_stylebox_override("hover",         off)
+	btn.add_theme_stylebox_override("pressed",       on)
+	btn.add_theme_stylebox_override("hover_pressed", on)
+	btn.add_theme_stylebox_override("focus",         StyleBoxEmpty.new())
+	btn.add_theme_color_override("font_color",               color)
+	btn.add_theme_color_override("font_hover_color",         color)
+	btn.add_theme_color_override("font_pressed_color",       UITheme.BG)
+	btn.add_theme_color_override("font_hover_pressed_color", UITheme.BG)
+
+	btn.toggled.connect(func(on_state: bool) -> void:
+		if on_state:
+			if id not in _owner._journey_tags:
+				_owner._journey_tags.append(id)
+		else:
+			_owner._journey_tags.erase(id)
+	)
+	return btn
 
 
 # Builds the editor for the currently selected node into the side panel.
