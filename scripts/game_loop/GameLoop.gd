@@ -54,6 +54,7 @@ var _is_overlay_open: bool = false
 
 
 func _ready() -> void:
+	MusicService.stop()
 	_apply_layout()
 	_apply_theme()
 	_connect_signals()

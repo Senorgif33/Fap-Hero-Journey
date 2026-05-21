@@ -21,6 +21,7 @@ const SETTINGS_PATH: String = "user://settings.cfg"
 
 # ── Canonical defaults ──────────────────────────────────────────────────────
 const DEFAULT_MASTER_VOLUME:     float  = 1.0
+const DEFAULT_MUSIC_VOLUME:      float  = 0.5
 const DEFAULT_FULLSCREEN:        bool   = false
 const DEFAULT_RESOLUTION_INDEX:  int    = 1
 const DEFAULT_INTIFACE_ADDRESS:  String = "ws://localhost:12345"
@@ -57,6 +58,9 @@ func _ready() -> void:
 
 func get_master_volume() -> float:
 	return float(_config.get_value("audio", "master_volume", DEFAULT_MASTER_VOLUME))
+
+func get_music_volume() -> float:
+	return float(_config.get_value("audio", "music_volume", DEFAULT_MUSIC_VOLUME))
 
 func get_fullscreen() -> bool:
 	return bool(_config.get_value("display", "fullscreen", DEFAULT_FULLSCREEN))
@@ -115,6 +119,9 @@ func get_filler_hi() -> int:
 
 func set_master_volume(v: float) -> void:
 	_config.set_value("audio", "master_volume", v)
+
+func set_music_volume(v: float) -> void:
+	_config.set_value("audio", "music_volume", v)
 
 func set_fullscreen(v: bool) -> void:
 	_config.set_value("display", "fullscreen", v)

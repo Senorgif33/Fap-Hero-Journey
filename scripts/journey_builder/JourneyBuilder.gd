@@ -81,6 +81,7 @@ const COPY_FRAME_BUDGET_MS:  int = 100
 
 
 func _ready() -> void:
+	MusicService.play()
 	_side_renderer = BuilderSidePanel.new(self)
 	_apply_layout()
 	_apply_theme()

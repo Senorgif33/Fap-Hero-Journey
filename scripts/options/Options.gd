@@ -58,6 +58,10 @@ const RESOLUTIONS: Array = [
 
 var _is_connected: bool = false
 var overlay_mode: bool = false
+var _loading: bool = false
+
+var _music_slider:    HSlider = null
+var _music_value_lbl: Label   = null
 
 var _range_slider:  RangeSlider = null
 var _range_min_lbl: Label       = null
@@ -159,6 +163,41 @@ func _apply_layout() -> void:
 	master_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
 	_master_slider.custom_minimum_size = Vector2(SLIDER_MIN_W, 0)
 	_master_value.custom_minimum_size  = Vector2(VALUE_LABEL_W, 0)
+
+	# ── Music Volume row (code-generated, appended to AudioSection) ───────────
+	var audio_section: VBoxContainer = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection
+	var music_row: HBoxContainer = HBoxContainer.new()
+	music_row.add_theme_constant_override("separation", 16)
+	audio_section.add_child(music_row)
+
+	var music_lbl: Label = Label.new()
+	music_lbl.text = "Music Volume"
+	music_lbl.text = music_lbl.text.to_upper()
+	music_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(music_lbl, UITheme.WHITE_SOFT, 14, false)
+	music_row.add_child(music_lbl)
+
+	_music_slider = HSlider.new()
+	_music_slider.min_value = 0.0
+	_music_slider.max_value = 1.0
+	_music_slider.step = 0.01
+	_music_slider.value = 0.5
+	_music_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_music_slider.custom_minimum_size = Vector2(SLIDER_MIN_W, 0)
+	_style_slider(_music_slider)
+	music_row.add_child(_music_slider)
+
+	_music_value_lbl = Label.new()
+	_music_value_lbl.text = "50%"
+	_music_value_lbl.custom_minimum_size = Vector2(VALUE_LABEL_W, 0)
+	_style_label(_music_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
+	music_row.add_child(_music_value_lbl)
+
+	_music_slider.value_changed.connect(func(v: float) -> void:
+		_music_value_lbl.text = "%d%%" % roundi(v * 100.0)
+		MusicService.set_volume(v)
+		_save_settings()
+	)
 
 	for label_path in [
 		"ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeLabel",
@@ -423,6 +462,29 @@ func _apply_layout() -> void:
 	_style_label(filler_hint, UITheme.SEPARATOR, 11, false)
 	filler_section.add_child(filler_hint)
 
+	# ── Credits section ───────────────────────────────────────────────────────
+	var credits_gap: Control = Control.new()
+	credits_gap.custom_minimum_size = Vector2(0, 24)
+	_content_vbox.add_child(credits_gap)
+
+	var credits_section: VBoxContainer = VBoxContainer.new()
+	credits_section.add_theme_constant_override("separation", 12)
+	_content_vbox.add_child(credits_section)
+
+	var credits_header: Label = Label.new()
+	credits_header.text = "CREDITS"
+	_style_label(credits_header, UITheme.PURPLE_BRIGHT, 13, true)
+	credits_section.add_child(credits_header)
+
+	var credits_divider: HSeparator = HSeparator.new()
+	credits_divider.add_theme_stylebox_override("separator", _make_separator_style())
+	credits_section.add_child(credits_divider)
+
+	var credits_music_lbl: Label = Label.new()
+	credits_music_lbl.text = "Music by Karl Casey @ White Bat Audio"
+	_style_label(credits_music_lbl, UITheme.WHITE_SOFT, 13, false)
+	credits_section.add_child(credits_music_lbl)
+
 
 # ---------------------------------------------------------------------------
 # Theme
@@ -658,12 +720,21 @@ func _refresh_serial_ports() -> void:
 
 
 func _load_settings() -> void:
+	# Guard against code-generated slider signals firing _save_settings() before
+	# all values have been populated — that would overwrite saved settings with
+	# the controls' initial/default values.
+	_loading = true
 	# All reads go through SettingsService, which returns canonical defaults for
 	# any key that has never been written — so this works on a fresh install too.
 	var vol: float = SettingsService.get_master_volume()
 	_master_slider.value = vol
 	_update_volume_label(vol)
 	AudioServer.set_bus_volume_db(0, linear_to_db(vol))
+
+	var music_vol: float = SettingsService.get_music_volume()
+	if _music_slider != null:
+		_music_slider.value = music_vol
+		_music_value_lbl.text = "%d%%" % roundi(music_vol * 100.0)
 
 	_res_dropdown.selected = clampi(SettingsService.get_resolution_index(), 0, RESOLUTIONS.size() - 1)
 
@@ -734,9 +805,15 @@ func _load_settings() -> void:
 	if _filler_speed_input != null:
 		_filler_speed_input.text = str(SettingsService.get_filler_half_cycle_ms())
 
+	_loading = false
+
 
 func _save_settings() -> void:
+	if _loading:
+		return
 	SettingsService.set_master_volume(_master_slider.value)
+	if _music_slider != null:
+		SettingsService.set_music_volume(_music_slider.value)
 	SettingsService.set_fullscreen(_fs_toggle.button_pressed)
 	SettingsService.set_resolution_index(_res_dropdown.selected)
 	SettingsService.set_intiface_address(_address_input.text)

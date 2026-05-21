@@ -50,6 +50,7 @@ var _border_alpha:    float = 1.0
 
 
 func _ready() -> void:
+	MusicService.play()
 	_flicker_next = randf_range(FLICKER_INTERVAL_MIN, FLICKER_INTERVAL_MAX)
 	_apply_layout()
 	_apply_theme()

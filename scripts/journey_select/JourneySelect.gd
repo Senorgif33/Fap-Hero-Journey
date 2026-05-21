@@ -80,6 +80,7 @@ var _tag_filter:   OptionButton = null
 
 
 func _ready() -> void:
+	MusicService.play()
 	_apply_layout()
 	_apply_theme()
 	_connect_signals()
