@@ -2,7 +2,6 @@ extends PanelContainer
 
 signal selected
 
-const JourneySelect    = preload("res://scripts/journey_select/JourneySelect.gd")
 const CARD_MIN_WIDTH:  int = 280
 const CARD_MIN_HEIGHT: int = 340
 const BORDER_WIDTH:    int = 2
@@ -35,7 +34,7 @@ func _ready() -> void:
 func setup(journey: Dictionary) -> void:
 	_title.text = journey.get("title", "Unknown")
 	var cover_path: String = journey.get("cover_path", "")
-	var img: Image = JourneySelect.load_image_smart(cover_path)
+	var img: Image = JourneyData.load_image_smart(cover_path)
 	_cover.texture = ImageTexture.create_from_image(img) if img else null
 
 

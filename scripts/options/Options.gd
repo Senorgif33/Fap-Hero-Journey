@@ -3,7 +3,7 @@ extends Control
 # ---------------------------------------------------------------------------
 # Options.gd
 # Purple matrix theme. Audio, display, and Intiface/Buttplug settings.
-# Settings are persisted to user://settings.cfg via ConfigFile.
+# Reads/writes all settings through the SettingsService autoload.
 # ---------------------------------------------------------------------------
 
 const TOP_BAR_HEIGHT:  int = 64
@@ -14,7 +14,6 @@ const ROW_LABEL_W:     int = 260
 const SLIDER_MIN_W:    int = 260
 const VALUE_LABEL_W:   int = 64
 
-const SETTINGS_PATH:       String = "user://settings.cfg"
 const DEFAULT_BP_ADDRESS:  String = "ws://localhost:12345"
 const DEFAULT_BAUD_RATE:   int    = 115200
 const OUTPUT_MODES:        Array  = ["Buttplug (Intiface)", "Serial T-code (SR6 / OSR2)"]
@@ -56,7 +55,6 @@ const RESOLUTIONS: Array = [
 @onready var _serial_test_btn:      Button       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialTestBtn
 @onready var _serial_status_lbl:    Label        = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialStatusLabel
 
-var _config: ConfigFile = ConfigFile.new()
 var _is_connected: bool = false
 var overlay_mode: bool = false
 
@@ -586,121 +584,103 @@ func _refresh_serial_ports() -> void:
 
 
 func _load_settings() -> void:
-	if _config.load(SETTINGS_PATH) != OK:
-		_apply_defaults()
-		return
-
-	var vol: float = _config.get_value("audio", "master_volume", 1.0)
+	# All reads go through SettingsService, which returns canonical defaults for
+	# any key that has never been written — so this works on a fresh install too.
+	var vol: float = SettingsService.get_master_volume()
 	_master_slider.value = vol
 	_update_volume_label(vol)
 	AudioServer.set_bus_volume_db(0, linear_to_db(vol))
 
-	var res_idx: int = _config.get_value("display", "resolution_index", 1)
-	_res_dropdown.selected = clampi(res_idx, 0, RESOLUTIONS.size() - 1)
+	_res_dropdown.selected = clampi(SettingsService.get_resolution_index(), 0, RESOLUTIONS.size() - 1)
 
-	var fullscreen: bool = _config.get_value("display", "fullscreen", false)
+	var fullscreen: bool = SettingsService.get_fullscreen()
 	_fs_toggle.button_pressed = fullscreen
 	_style_toggle(_fs_toggle, fullscreen)
 	_apply_fullscreen(fullscreen)
 
-	var address: String = _config.get_value("intiface", "address", DEFAULT_BP_ADDRESS)
-	_address_input.text = address
+	_address_input.text = SettingsService.get_intiface_address()
 
-	var auto_connect: bool = _config.get_value("intiface", "auto_connect", true)
+	var auto_connect: bool = SettingsService.get_intiface_auto_connect()
 	_auto_toggle.button_pressed = auto_connect
 	_style_toggle(_auto_toggle, auto_connect)
 
-	var saved_device: String = _config.get_value("intiface", "selected_device", "")
-	_restore_device_selection(saved_device)
+	_restore_device_selection(SettingsService.get_selected_device())
 
-	var mode_key: String = _config.get_value("output", "mode", "buttplug")
-	var mode_idx: int    = OUTPUT_MODE_KEYS.find(mode_key)
+	var mode_idx: int = OUTPUT_MODE_KEYS.find(SettingsService.get_output_mode())
 	if mode_idx < 0:
 		mode_idx = 0
 	_output_mode_dropdown.selected = mode_idx
 
-	var saved_port: String = _config.get_value("serial", "port", "")
+	var saved_port: String = SettingsService.get_serial_port()
 	if saved_port != "":
 		for i: int in _serial_port_dropdown.item_count:
 			if _serial_port_dropdown.get_item_text(i) == saved_port:
 				_serial_port_dropdown.selected = i
 				break
 
-	var saved_baud: int = _config.get_value("serial", "baud_rate", DEFAULT_BAUD_RATE)
-	_serial_baud_input.text = str(saved_baud)
+	_serial_baud_input.text = str(SettingsService.get_serial_baud())
 
-	var serial_auto: bool = _config.get_value("serial", "auto_connect", false)
+	var serial_auto: bool = SettingsService.get_serial_auto_connect()
 	_serial_auto_toggle.button_pressed = serial_auto
 	_style_toggle(_serial_auto_toggle, serial_auto)
 
-	var range_lo: float = (_config.get_value("device", "range_min", 0)   as float)
-	var range_hi: float = (_config.get_value("device", "range_max", 100) as float)
+	var range_lo: float = float(SettingsService.get_range_min())
+	var range_hi: float = float(SettingsService.get_range_max())
 	if _range_slider != null:
 		_range_slider.set_range_values(range_lo, range_hi)
 		_range_min_lbl.text = "MIN: %d" % roundi(range_lo)
 		_range_max_lbl.text = "MAX: %d" % roundi(range_hi)
 
-	var filler_enabled: bool = _config.get_value("storyboard_filler", "enabled", false)
+	var filler_enabled: bool = SettingsService.get_filler_enabled()
 	if _filler_toggle != null:
 		_filler_toggle.button_pressed = filler_enabled
 		_style_toggle(_filler_toggle, filler_enabled)
 
-	var filler_speed: int = _config.get_value("storyboard_filler", "half_cycle_ms", 2000)
 	if _filler_speed_input != null:
-		_filler_speed_input.text = str(filler_speed)
+		_filler_speed_input.text = str(SettingsService.get_filler_half_cycle_ms())
 
-	var filler_lo: float = float(_config.get_value("storyboard_filler", "lo",  0))
-	var filler_hi: float = float(_config.get_value("storyboard_filler", "hi",  100))
+	var filler_lo: float = float(SettingsService.get_filler_lo())
+	var filler_hi: float = float(SettingsService.get_filler_hi())
 	if _filler_range_slider != null:
 		_filler_range_slider.set_range_values(filler_lo, filler_hi)
 		_filler_range_min_lbl.text = "MIN: %d" % roundi(filler_lo)
 		_filler_range_max_lbl.text = "MAX: %d" % roundi(filler_hi)
 
 
-func _apply_defaults() -> void:
-	_master_slider.value = 1.0
-	_master_value.text   = "100%"
-	_res_dropdown.selected = 1
-	_address_input.text  = DEFAULT_BP_ADDRESS
-	_style_toggle(_fs_toggle,   false)
-	_style_toggle(_auto_toggle, true)
-	_auto_toggle.button_pressed = true
-
-
 func _save_settings() -> void:
-	_config.set_value("audio",    "master_volume",    _master_slider.value)
-	_config.set_value("display",  "fullscreen",       _fs_toggle.button_pressed)
-	_config.set_value("display",  "resolution_index", _res_dropdown.selected)
-	_config.set_value("intiface", "address",          _address_input.text)
-	_config.set_value("intiface", "auto_connect",     _auto_toggle.button_pressed)
+	SettingsService.set_master_volume(_master_slider.value)
+	SettingsService.set_fullscreen(_fs_toggle.button_pressed)
+	SettingsService.set_resolution_index(_res_dropdown.selected)
+	SettingsService.set_intiface_address(_address_input.text)
+	SettingsService.set_intiface_auto_connect(_auto_toggle.button_pressed)
 	if _device_dropdown.selected >= 0 and _device_dropdown.item_count > 0:
-		_config.set_value("intiface", "selected_device", _device_dropdown.get_item_text(_device_dropdown.selected))
+		SettingsService.set_selected_device(_device_dropdown.get_item_text(_device_dropdown.selected))
 
 	var mode_idx: int = clampi(_output_mode_dropdown.selected, 0, OUTPUT_MODE_KEYS.size() - 1)
-	_config.set_value("output", "mode", OUTPUT_MODE_KEYS[mode_idx])
+	SettingsService.set_output_mode(OUTPUT_MODE_KEYS[mode_idx])
 
 	if _serial_port_dropdown.selected >= 0 and _serial_port_dropdown.item_count > 0:
-		_config.set_value("serial", "port", _serial_port_dropdown.get_item_text(_serial_port_dropdown.selected))
+		SettingsService.set_serial_port(_serial_port_dropdown.get_item_text(_serial_port_dropdown.selected))
 	var baud: int = _serial_baud_input.text.to_int()
 	if baud <= 0:
 		baud = DEFAULT_BAUD_RATE
-	_config.set_value("serial", "baud_rate", baud)
-	_config.set_value("serial", "auto_connect", _serial_auto_toggle.button_pressed)
+	SettingsService.set_serial_baud(baud)
+	SettingsService.set_serial_auto_connect(_serial_auto_toggle.button_pressed)
 
 	if _range_slider != null:
-		_config.set_value("device", "range_min", _range_slider.lo)
-		_config.set_value("device", "range_max", _range_slider.hi)
+		SettingsService.set_range_min(roundi(_range_slider.lo))
+		SettingsService.set_range_max(roundi(_range_slider.hi))
 
 	if _filler_toggle != null:
-		_config.set_value("storyboard_filler", "enabled", _filler_toggle.button_pressed)
+		SettingsService.set_filler_enabled(_filler_toggle.button_pressed)
 		var filler_spd: int = _filler_speed_input.text.to_int()
 		if filler_spd <= 0:
 			filler_spd = 2000
-		_config.set_value("storyboard_filler", "half_cycle_ms", filler_spd)
-		_config.set_value("storyboard_filler", "lo", _filler_range_slider.lo)
-		_config.set_value("storyboard_filler", "hi", _filler_range_slider.hi)
+		SettingsService.set_filler_half_cycle_ms(filler_spd)
+		SettingsService.set_filler_lo(roundi(_filler_range_slider.lo))
+		SettingsService.set_filler_hi(roundi(_filler_range_slider.hi))
 
-	_config.save(SETTINGS_PATH)
+	SettingsService.save()
 
 
 func _sync_buttplug_state() -> void:
@@ -820,15 +800,14 @@ func _on_bp_disconnected() -> void:
 func _on_bp_device_added(name: String, _index: int) -> void:
 	_device_dropdown.add_item(name)
 	_device_dropdown.disabled = false
-	var saved: String = _config.get_value("intiface", "selected_device", "")
-	if name == saved:
+	if name == SettingsService.get_selected_device():
 		_device_dropdown.selected = _device_dropdown.item_count - 1
 
 
 func _on_device_selected(index: int) -> void:
 	var name: String = _device_dropdown.get_item_text(index)
-	_config.set_value("intiface", "selected_device", name)
-	_config.save(SETTINGS_PATH)
+	SettingsService.set_selected_device(name)
+	SettingsService.save()
 
 
 func _restore_device_selection(device_name: String) -> void:

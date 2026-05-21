@@ -17,17 +17,11 @@ public partial class ButtplugService : Node
 
 	public bool BpConnected => _client?.Connected ?? false;
 
-	public override async void _Ready()
+	public override void _Ready()
 	{
-		var config = new ConfigFile();
-		string address = DefaultAddress;
-		bool autoConnect = true;
-
-		if (config.Load("user://settings.cfg") == Error.Ok)
-		{
-			address = (string)config.GetValue("intiface", "address", DefaultAddress);
-			autoConnect = (bool)config.GetValue("intiface", "auto_connect", true);
-		}
+		var settings = GetNode("/root/SettingsService");
+		string address = settings.Call("get_intiface_address").AsString();
+		bool autoConnect = settings.Call("get_intiface_auto_connect").AsBool();
 
 		if (autoConnect)
 			ConnectToIntiface(address);
@@ -77,6 +71,26 @@ public partial class ButtplugService : Node
 		}
 	}
 
+	// On app quit, disconnect from Intiface. Intiface stops all devices
+	// server-side as soon as the controlling client drops, so this guarantees
+	// nothing keeps running after the app exits. Best-effort / fire-and-forget —
+	// if the process dies first, the closing socket triggers the same stop.
+	public override async void _Notification(int what)
+	{
+		if (what != NotificationWMCloseRequest && what != NotificationExitTree)
+			return;
+		if (_client?.Connected != true)
+			return;
+		try
+		{
+			await _client.DisconnectAsync();
+		}
+		catch (Exception e)
+		{
+			GD.PrintErr($"ButtplugService: shutdown disconnect failed: {e.Message}");
+		}
+	}
+
 	public async void StartScan()
 	{
 		if (_client?.Connected != true)
@@ -110,11 +124,7 @@ public partial class ButtplugService : Node
 		if (_client == null || !_client.Connected)
 			return -1;
 
-		var config = new ConfigFile();
-		string selectedName = "";
-
-		if (config.Load("user://settings.cfg") == Error.Ok)
-			selectedName = config.GetValue("intiface", "selected_device", Variant.From("")).AsString();
+		string selectedName = GetNode("/root/SettingsService").Call("get_selected_device").AsString();
 
 		if (!string.IsNullOrEmpty(selectedName))
 		{

@@ -18,6 +18,9 @@ const InventoryPanelScene  = preload("res://scenes/inventory/InventoryPanel.tscn
 
 const HUD_BAR_HEIGHT:  int   = 68
 const HUD_HIDE_DELAY:  float = 3.0
+# Playback-capable formats. Intentionally distinct from JourneyData.VIDEO_EXTENSIONS
+# (the import/transcode set): includes "ogv" (Godot-native, no FFmpeg needed) and
+# omits container types that only matter at import time.
 const VIDEO_EXTS:      Array = ["mp4", "mkv", "webm", "avi", "mov", "ogv"]
 
 # Sequence-boundary fade timings (~1.2s total).
@@ -104,15 +107,12 @@ func _show_storyboard_screen(sb_data: Dictionary) -> void:
 
 
 func _start_storyboard_filler() -> void:
-	var cfg: ConfigFile = ConfigFile.new()
-	if cfg.load("user://settings.cfg") != OK:
+	if not SettingsService.get_filler_enabled():
 		return
-	if not cfg.get_value("storyboard_filler", "enabled", false):
-		return
-	var lo:  int = roundi(float(cfg.get_value("storyboard_filler", "lo",  0)))
-	var hi:  int = roundi(float(cfg.get_value("storyboard_filler", "hi",  100)))
-	var spd: int = roundi(float(cfg.get_value("storyboard_filler", "half_cycle_ms", 2000)))
-	FunscriptPlayer.StartFiller(lo, hi, spd)
+	FunscriptPlayer.StartFiller(
+		SettingsService.get_filler_lo(),
+		SettingsService.get_filler_hi(),
+		SettingsService.get_filler_half_cycle_ms())
 
 
 func _on_storyboard_completed(coins: int) -> void:
@@ -196,6 +196,16 @@ func _load_current_round() -> void:
 	if fs_path != "":
 		FunscriptPlayer.LoadFunscript(fs_path)
 		ScoreService.SetRoundActions(FunscriptPlayer.ActionCount)
+
+	# Load secondary axis scripts (serial devices only; FunscriptPlayer ignores
+	# them if output mode is Buttplug). Clear first so stale axes from a prior
+	# round are never replayed.
+	FunscriptPlayer.ClearAxisScripts()
+	var axis_scripts: Dictionary = round.get("axis_scripts", {})
+	for axis: String in axis_scripts:
+		var ax_path: String = axis_scripts[axis]
+		if ax_path != "":
+			FunscriptPlayer.LoadAxisScript(axis, ax_path)
 
 	var folder: String = round.get("folder", "")
 	var video_path: String = _find_video(folder)

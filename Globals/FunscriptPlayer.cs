@@ -7,6 +7,21 @@ public partial class FunscriptPlayer : Node
 {
 	private struct Action { public float AtMs; public int Pos; }
 
+	// Per-axis state for secondary T-code channels (L1, L2, R0, R1, R2).
+	// Serial-only — Buttplug ignores these entirely.
+	private class AxisState
+	{
+		public List<Action> Actions = new List<Action>();
+		public int          Index   = 0;
+	}
+
+	// Maps T-code axis name → its loaded script state.
+	// Explicitly System.Collections.Generic — AxisState is a C# class, not a Godot Variant.
+	private readonly System.Collections.Generic.Dictionary<string, AxisState> _axes =
+		new System.Collections.Generic.Dictionary<string, AxisState>();
+
+	private static readonly string[] KnownAxes = { "L1", "L2", "R0", "R1", "R2" };
+
 	private enum OutputMode { Buttplug, Serial }
 
 	private List<Action> _actions = new List<Action>();
@@ -45,6 +60,24 @@ public partial class FunscriptPlayer : Node
 	public bool Playing     => _playing;
 	public int  ActionCount => _actions.Count;
 
+	// Cached autoload references — resolved once instead of looked up per-call
+	// (some were hit every frame, per axis, inside _Process). FunscriptPlayer is
+	// a late autoload, so all of these exist by the time _Ready runs.
+	private SerialDeviceService _serial;
+	private ButtplugService     _buttplug;
+	private InventoryService    _inventory;
+	private ScoreService        _score;
+	private Node                _settings;
+
+	public override void _Ready()
+	{
+		_serial    = GetNode<SerialDeviceService>("/root/SerialDeviceService");
+		_buttplug  = GetNode<ButtplugService>("/root/ButtplugService");
+		_inventory = GetNode<InventoryService>("/root/InventoryService");
+		_score     = GetNode<ScoreService>("/root/ScoreService");
+		_settings  = GetNode("/root/SettingsService");
+	}
+
 	/// Push updated range-clamp values directly into the player.
 	/// Called by the Options screen on every slider change so mid-playback
 	/// adjustments take effect on the very next SendCommand without needing
@@ -62,6 +95,9 @@ public partial class FunscriptPlayer : Node
 		_positionMs = 0.0;
 		_playing = false;
 		_isLinearDevice = null;
+
+		foreach (var kv in _axes) 
+			kv.Value.Index = 0;
 
 		string absPath = ProjectSettings.GlobalizePath(path);
 		using var f = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
@@ -94,9 +130,70 @@ public partial class FunscriptPlayer : Node
 	private const uint EaseDurationMs = 500;
 	private const double CenterPosition = 0.5;
 
+	// Load a secondary-axis funscript. Call before Play().
+	// axis: T-code name, e.g. "L1", "R0".
+	public void LoadAxisScript(string axis, string path)
+	{
+		var state = new AxisState();
+		string absPath = ProjectSettings.GlobalizePath(path);
+		using var f = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
+		if (f == null)
+		{
+			GD.PrintErr($"FunscriptPlayer: cannot open axis script {path}");
+			return;
+		}
+		var parser = new Json();
+		if (parser.Parse(f.GetAsText()) != Error.Ok)
+		{
+			GD.PrintErr($"FunscriptPlayer: JSON parse error in axis script {path}");
+			return;
+		}
+		var data = parser.Data.AsGodotDictionary();
+		var raw  = data.ContainsKey("actions") ? data["actions"].AsGodotArray() : new Godot.Collections.Array();
+		foreach (var item in raw)
+		{
+			var a = item.AsGodotDictionary();
+			state.Actions.Add(new Action
+			{
+				AtMs = a.ContainsKey("at")  ? a["at"].AsSingle()  : 0f,
+				Pos  = a.ContainsKey("pos") ? a["pos"].AsInt32()  : 0,
+			});
+		}
+		_axes[axis] = state;
+	}
+
+	// Remove all secondary axis scripts (call before loading a new round).
+	public void ClearAxisScripts()
+	{
+		_axes.Clear();
+	}
+
+	// Send all known axes that have NO loaded script to neutral (50 → 0.5) so the
+	// device doesn't stay wherever it was from a previous round.
+	// Only runs when at least one axis script is loaded — single-axis devices
+	// (which have no axis scripts) receive no unnecessary secondary-axis traffic.
+	private void _SendNeutralToUnloadedAxes()
+	{
+		if (_outputMode != OutputMode.Serial) return;
+		if (_axes.Count == 0) 
+			return; // no multi-axis scripts → nothing to park
+
+		var serial = _serial;
+		if (serial == null || !serial.SerialConnected) 
+			return;
+
+		foreach (var axis in KnownAxes)
+		{
+			if (!_axes.ContainsKey(axis))
+				serial.SendAxis(axis, EaseDurationMs, 0.5);
+		}
+	}
+
 	public void Play()
 	{
 		_playing = true;
+		ResolveOutput();
+		_SendNeutralToUnloadedAxes();
 		_StartEaseIn();
 	}
 
@@ -118,9 +215,14 @@ public partial class FunscriptPlayer : Node
 		_playing      = false;
 		_easing       = false;
 		_fillerActive = false; // cancel any storyboard filler that may still be running
+
 		EaseToNeutral();
 		_positionMs = 0.0;
 		_actionIndex = 0;
+
+		foreach (var kv in _axes) 
+			kv.Value.Index = 0;
+
 		_isLinearDevice = null;
 		_deviceIndex = -1;
 		_outputResolved = false;
@@ -177,13 +279,13 @@ public partial class FunscriptPlayer : Node
 
 		if (_outputMode == OutputMode.Serial)
 		{
-			var serial = GetNode<SerialDeviceService>("/root/SerialDeviceService");
+			var serial = _serial;
 			if (serial != null && serial.SerialConnected)
 				serial.SendLinear(EaseDurationMs, CenterPosition);
 			return;
 		}
 
-		var bp = GetNode<ButtplugService>("/root/ButtplugService");
+		var bp = _buttplug;
 		if (bp == null || !bp.BpConnected || _deviceIndex < 0)
 			return;
 
@@ -219,6 +321,51 @@ public partial class FunscriptPlayer : Node
 
 				SendCommand(_actionIndex);
 				_actionIndex++;
+			}
+
+			// Dispatch secondary axes (serial only). Applies the same smoothstep
+			// ease-in as L0 so all axes blend in together from neutral at round start.
+			if (_outputMode == OutputMode.Serial)
+			{
+				var serial = _serial;
+				if (serial != null && serial.SerialConnected)
+				{
+					// Compute ease blend factor once for this batch of axis commands.
+					// _easing may already be false (cleared by L0's SendCommand above),
+					// which is fine — both axes will stop easing at the same moment.
+					float easeSmooth = 1f;
+					if (_easing)
+					{
+						double elapsed  = _positionMs - _easeStartMs;
+						float  t        = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
+						easeSmooth      = t * t * (3f - 2f * t); // smoothstep
+					}
+
+					foreach (var kv in _axes)
+					{
+						string    axis  = kv.Key;
+						AxisState state = kv.Value;
+						while (state.Index < state.Actions.Count)
+						{
+							if (state.Actions[state.Index].AtMs > _positionMs)
+								break;
+
+							int idx = state.Index;
+							if (idx + 1 < state.Actions.Count)
+							{
+								int nextPos = state.Actions[idx + 1].Pos;
+								// Blend toward neutral (EaseFromPos = 50) during ease-in.
+								if (_easing || easeSmooth < 1f)
+									nextPos = (int)Math.Round(EaseFromPos + (nextPos - EaseFromPos) * easeSmooth);
+
+								double targetNorm = nextPos / 100.0;
+								uint   durMs      = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
+								serial.SendAxis(axis, durMs, targetNorm);
+							}
+							state.Index++;
+						}
+					}
+				}
 			}
 		}
 
@@ -256,13 +403,13 @@ public partial class FunscriptPlayer : Node
 
 		if (_outputMode == OutputMode.Serial)
 		{
-			var serial = GetNode<SerialDeviceService>("/root/SerialDeviceService");
+			var serial = _serial;
 			if (serial != null && serial.SerialConnected)
 				serial.SendLinear(dur, target / 100.0);
 			return;
 		}
 
-		var bp = GetNode<ButtplugService>("/root/ButtplugService");
+		var bp = _buttplug;
 		if (bp == null || !bp.BpConnected || _deviceIndex < 0) return;
 
 		if (_isLinearDevice == true)
@@ -279,7 +426,7 @@ public partial class FunscriptPlayer : Node
 		double pos     = fromPos + (toPos - fromPos) * t;
 		pos = Math.Clamp(pos, _rangeMin, _rangeMax);
 
-		var bp = GetNode<ButtplugService>("/root/ButtplugService");
+		var bp = _buttplug;
 		if (bp == null || !bp.BpConnected || _deviceIndex < 0) return;
 		bp.SendVibrate(_deviceIndex, pos / 100.0);
 	}
@@ -289,16 +436,12 @@ public partial class FunscriptPlayer : Node
 		if (_outputResolved) 
 			return;
 
-		var config = new ConfigFile();
-		if (config.Load("user://settings.cfg") == Error.Ok)
-		{
-			string mode = config.GetValue("output", "mode", Variant.From("buttplug")).AsString();
-			_outputMode = mode == "serial" ? OutputMode.Serial : OutputMode.Buttplug;
+		string mode = _settings.Call("get_output_mode").AsString();
+		_outputMode = mode == "serial" ? OutputMode.Serial : OutputMode.Buttplug;
 
-			// Cache device range limits so SendCommand doesn't hit disk per-action.
-			_rangeMin = (int)config.GetValue("device", "range_min", Variant.From(0)).AsSingle();
-			_rangeMax = (int)config.GetValue("device", "range_max", Variant.From(100)).AsSingle();
-		}
+		// Cache device range limits so SendCommand doesn't hit disk per-action.
+		_rangeMin = _settings.Call("get_range_min").AsInt32();
+		_rangeMax = _settings.Call("get_range_max").AsInt32();
 
 		if (_outputMode == OutputMode.Serial)
 		{
@@ -308,7 +451,7 @@ public partial class FunscriptPlayer : Node
 		}
 		else
 		{
-			var bp = GetNode<ButtplugService>("/root/ButtplugService");
+			var bp = _buttplug;
 			if (bp != null)
 			{
 				_deviceIndex = bp.GetSelectedDeviceIndex();
@@ -322,7 +465,7 @@ public partial class FunscriptPlayer : Node
 	{
 		ResolveOutput();
 
-		var inv = GetNodeOrNull<InventoryService>("/root/InventoryService");
+		var inv = _inventory;
 		var effects = inv?.GetActiveEffects();
 
 		if (effects != null && HasBlockEffect(effects))
@@ -354,12 +497,12 @@ public partial class FunscriptPlayer : Node
 		if (index + 1 < _actions.Count)
 		{
 			int amplitude = Math.Abs(nextPos - currentPos);
-			GetNode<ScoreService>("/root/ScoreService")?.AddStroke(amplitude);
+			_score?.AddStroke(amplitude);
 		}
 
 		if (_outputMode == OutputMode.Serial)
 		{
-			var serial = GetNode<SerialDeviceService>("/root/SerialDeviceService");
+			var serial = _serial;
 
 			if (serial == null || !serial.SerialConnected)
 				return;
@@ -374,7 +517,7 @@ public partial class FunscriptPlayer : Node
 			return;
 		}
 
-		var bp = GetNode<ButtplugService>("/root/ButtplugService");
+		var bp = _buttplug;
 		if (bp == null || !bp.BpConnected || _deviceIndex < 0)
 			return;
 

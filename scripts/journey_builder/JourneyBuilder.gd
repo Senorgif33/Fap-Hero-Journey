@@ -14,12 +14,8 @@ extends Control
 const TOP_BAR_HEIGHT:  int = 64
 const JOURNEYS_DIR:    String = "user://journeys"
 
-# Used by save logic for the journey.json "Difficulty" field — also declared
-# in BuilderSidePanel.gd for the difficulty dropdown.
-const DIFFICULTIES: Array = ["Easy", "Medium", "Hard", "Very Hard", "Extreme", "Insane"]
-
-# Used by _on_viewport_files_dropped to detect cover-image drops.
-const IMAGE_EXTENSIONS: Array[String] = ["png", "jpg", "jpeg", "webp"]
+# Difficulty list and file-extension sets live in JourneyData (canonical schema).
+# Referenced here as JourneyData.DIFFICULTIES / JourneyData.IMAGE_EXTENSIONS etc.
 
 # EIRTeam.FFmpeg only decodes H.264; everything else gets transcoded on save.
 const H264_NAMES: Array[String] = ["h264", "avc1", "avc"]
@@ -57,6 +53,8 @@ var _items:      Array  = []  # Array[Dictionary] — {type:"round"|"fork"|"shop
 
 var _graph: Control = null  # GraphView instance, host inside _graph_host
 var _selected_item: Dictionary = {}  # Mirror of GraphView's current selection.
+var _selected_arr:  Array      = []  # The array the selected item lives in.
+var _selected_idx:  int        = -1  # Index within that array.
 
 # Side panel renderer — owns no state of its own; reads/mutates this controller.
 var _side_renderer: BuilderSidePanel = null
@@ -92,6 +90,8 @@ func _setup_graph_view() -> void:
 
 func _on_graph_node_selected(item: Dictionary, arr: Array, idx: int) -> void:
 	_selected_item = item
+	_selected_arr  = arr
+	_selected_idx  = idx
 	if item.is_empty():
 		_side_renderer.show_journey_info_panel()
 	else:
@@ -218,18 +218,70 @@ func _on_back_pressed() -> void:
 
 
 func _on_viewport_files_dropped(files: PackedStringArray) -> void:
-	# Only treat a viewport-level image drop as the journey cover when the
-	# journey-info panel is visible (no node selected). When a node IS selected
-	# its own DropZone controls are connected to the same signal and handle the
-	# drop themselves — without this guard their drop would also overwrite the
-	# cover path.
+	# Multi-axis bulk drop: when a round is selected and multiple funscript files
+	# are dropped at once, auto-route each one by its filename suffix rather than
+	# requiring the user to drop them onto individual DropZones.
+	# Single-file drops still fall through to the DropZone controls as before.
+	if _selected_item.get("type", "") == "round" and _selected_idx >= 0:
+		var fs_files: Array = []
+		for f: String in files:
+			if f.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS:
+				fs_files.append(f)
+
+		if fs_files.size() > 1:
+			if not _selected_arr[_selected_idx].has("axis_scripts"):
+				_selected_arr[_selected_idx]["axis_scripts"] = {}
+			for f: String in fs_files:
+				var axis: String = _detect_funscript_axis(f)
+				if axis == "L0":
+					_selected_arr[_selected_idx]["funscript_path"] = f
+					if (_selected_arr[_selected_idx].get("name", "") as String).strip_edges() == "":
+						_selected_arr[_selected_idx]["name"] = f.get_file().get_basename()
+				else:
+					_selected_arr[_selected_idx]["axis_scripts"][axis] = f
+			# Refresh the side panel so the new paths show up in the DropZones.
+			_graph.call_deferred("select_item", _selected_arr, _selected_idx)
+			return
+
+	# No round selected (or single-file drop) — fall through to cover-image handling.
+	# DropZone controls on the side panel handle single-file drops themselves.
 	if not _selected_item.is_empty():
 		return
 	for f: String in files:
-		if f.get_extension().to_lower() in IMAGE_EXTENSIONS:
+		if f.get_extension().to_lower() in JourneyData.IMAGE_EXTENSIONS:
 			_cover_path = f
 			_update_cover_preview()
 			return
+
+
+# Infers the T-code axis from a funscript filename. Checks T-code axis-code
+# suffixes first (_L1, .L1) then human-readable names (_surge, .pitch, etc.).
+# Returns "L0" if no axis marker is found (main stroke script).
+func _detect_funscript_axis(path: String) -> String:
+	var stem: String = path.get_file().get_basename().to_lower()
+	# T-code axis code suffixes (underscore or dot separator).
+	var axis_codes: Dictionary = {
+		"_l1": "L1", ".l1": "L1",
+		"_l2": "L2", ".l2": "L2",
+		"_r0": "R0", ".r0": "R0",
+		"_r1": "R1", ".r1": "R1",
+		"_r2": "R2", ".r2": "R2",
+	}
+	for suffix: String in axis_codes:
+		if stem.ends_with(suffix):
+			return axis_codes[suffix]
+	# Human-readable axis name suffixes used by common multi-axis script authors.
+	var name_codes: Dictionary = {
+		"_surge": "L1", ".surge": "L1",
+		"_sway":  "L2", ".sway":  "L2",
+		"_twist": "R0", ".twist": "R0",
+		"_roll":  "R1", ".roll":  "R1",
+		"_pitch": "R2", ".pitch": "R2",
+	}
+	for suffix: String in name_codes:
+		if stem.ends_with(suffix):
+			return name_codes[suffix]
+	return "L0"
 
 
 # ---------------------------------------------------------------------------
@@ -257,27 +309,10 @@ func _on_cover_pressed() -> void:
 func _update_cover_preview() -> void:
 	if _cover_path == "":
 		_cover_texture = null
-		_side_renderer.show_journey_info_panel()  # refresh visible widgets
-		return
-	var f: FileAccess = FileAccess.open(_cover_path, FileAccess.READ)
-	if f == null:
-		return
-	var bytes: PackedByteArray = f.get_buffer(f.get_length())
-	f.close()
-	var img: Image = Image.new()
-	var err: Error
-	if bytes.size() >= 4 and bytes[0] == 0x89 and bytes[1] == 0x50:
-		err = img.load_png_from_buffer(bytes)
-	elif bytes.size() >= 3 and bytes[0] == 0xFF and bytes[1] == 0xD8:
-		err = img.load_jpg_from_buffer(bytes)
 	else:
-		err = img.load_webp_from_buffer(bytes)
-		if err != OK:
-			err = img.load_jpg_from_buffer(bytes)
-		if err != OK:
-			err = img.load_png_from_buffer(bytes)
-	if err == OK:
-		_cover_texture = ImageTexture.create_from_image(img)
+		var img: Image = JourneyData.load_image_smart(_cover_path)
+		if img != null:
+			_cover_texture = ImageTexture.create_from_image(img)
 	# Rebuild journey-info panel so the preview widget picks up the new texture
 	# (only if no node is currently selected).
 	if _selected_item.is_empty():
@@ -477,7 +512,22 @@ func _on_save_pressed() -> void:
 			var fs_src: String = it.get("funscript_path","")
 			var fs_dst_name: String = round_name + "." + fs_src.get_extension()
 			_copy_file(fs_src, round_dir + "/" + fs_dst_name)
-			_delete_stale_files(round_dir, fs_dst_name, JourneyData.FUNSCRIPT_EXTENSIONS)
+			# L0-only stale cleanup: skips secondary-axis scripts in this folder.
+			_delete_stale_l0_files(round_dir, fs_dst_name)
+			# Cache action count + length so the catalogue scan never re-parses this.
+			var fs_stats: Dictionary = JourneyData.read_funscript_stats(round_dir + "/" + fs_dst_name)
+
+			# Copy secondary-axis scripts and collect relative paths for the JSON.
+			var axis_scripts_in: Dictionary = it.get("axis_scripts", {})
+			var axis_scripts_rel: Dictionary = {}
+			for axis: String in axis_scripts_in:
+				var ax_src: String = axis_scripts_in[axis]
+				if ax_src == "":
+					continue
+				var ax_dst_name: String = round_name + "_" + axis + "." + ax_src.get_extension()
+				_copy_file(ax_src, round_dir + "/" + ax_dst_name)
+				_delete_stale_axis_files(round_dir, axis, ax_dst_name)
+				axis_scripts_rel[axis] = round_name + "/" + ax_dst_name
 
 			var vid_src: String = it.get("video_path","")
 			if vid_src != "":
@@ -504,13 +554,17 @@ func _on_save_pressed() -> void:
 			if orig_folder != "":
 				var orig_abs: String = ProjectSettings.globalize_path(orig_folder)
 				if orig_abs != round_dir and DirAccess.dir_exists_absolute(orig_abs):
-					_delete_dir_recursive(orig_abs)
+					JourneyData.delete_dir_recursive(orig_abs)
 
 			rounds_json.append({
-				"Name":         round_name,
-				"Order":        rorder,
-				"CoinsAwarded": it.get("coins",0) as int,
-				"RoundType":    "Normal",
+				"Name":           round_name,
+				"Order":          rorder,
+				"CoinsAwarded":   it.get("coins",0) as int,
+				"RoundType":      "Normal",
+				"FunscriptPath":  round_name + "/" + fs_dst_name,
+				"AxisScripts":    axis_scripts_rel,
+				"ActionCount":    fs_stats["count"],
+				"LengthMs":       fs_stats["length_ms"],
 			})
 		else:
 			# Fork — recursively save the fork and all nested forks.
@@ -524,7 +578,7 @@ func _on_save_pressed() -> void:
 		"Name":        journey_name,
 		"Author":      _journey_author.strip_edges(),
 		"Description": _journey_desc.strip_edges(),
-		"Difficulty":  DIFFICULTIES[_journey_difficulty_idx],
+		"Difficulty":  JourneyData.DIFFICULTIES[_journey_difficulty_idx],
 		"Rounds":      rounds_json,
 		"Forks":       forks_json,
 		"Shops":       shops_json,
@@ -636,24 +690,41 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				var pr_dir: String  = abs_dir + "/" + pr_name
 				DirAccess.make_dir_recursive_absolute(pr_dir)
 				var pr_fs: String = pi_item.get("funscript_path","")
+				var pr_fs_dst_name: String = ""
+				var pr_fs_stats: Dictionary = {"count": 0, "length_ms": 0}
 				if pr_fs != "":
-					var pr_fs_dst_name: String = pr_name + "." + pr_fs.get_extension()
+					pr_fs_dst_name = pr_name + "." + pr_fs.get_extension()
 					_copy_file(pr_fs, pr_dir + "/" + pr_fs_dst_name)
-					_delete_stale_files(pr_dir, pr_fs_dst_name, JourneyData.FUNSCRIPT_EXTENSIONS)
+					_delete_stale_l0_files(pr_dir, pr_fs_dst_name)
+					pr_fs_stats = JourneyData.read_funscript_stats(pr_dir + "/" + pr_fs_dst_name)
 				var pr_vid: String = pi_item.get("video_path","")
 				if pr_vid != "":
 					var pr_vid_dst_name: String = pr_vid.get_file()
 					_copy_file(pr_vid, pr_dir + "/" + pr_vid_dst_name)
 					_delete_stale_files(pr_dir, pr_vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
+				var pr_axis_in: Dictionary = pi_item.get("axis_scripts", {})
+				var pr_axis_rel: Dictionary = {}
+				for axis: String in pr_axis_in:
+					var ax_src: String = pr_axis_in[axis]
+					if ax_src == "":
+						continue
+					var ax_dst_name: String = pr_name + "_" + axis + "." + ax_src.get_extension()
+					_copy_file(ax_src, pr_dir + "/" + ax_dst_name)
+					_delete_stale_axis_files(pr_dir, axis, ax_dst_name)
+					pr_axis_rel[axis] = pr_name + "/" + ax_dst_name
 				var pr_orig_folder: String = pi_item.get("original_folder", "")
 				if pr_orig_folder != "":
 					var pr_orig_abs: String = ProjectSettings.globalize_path(pr_orig_folder)
 					if pr_orig_abs != pr_dir and DirAccess.dir_exists_absolute(pr_orig_abs):
-						_delete_dir_recursive(pr_orig_abs)
+						JourneyData.delete_dir_recursive(pr_orig_abs)
 				path_entry["Rounds"].append({
-					"Name":         pr_name,
-					"Order":        pr_order,
-					"CoinsAwarded": pi_item.get("coins",0) as int,
+					"Name":          pr_name,
+					"Order":         pr_order,
+					"CoinsAwarded":  pi_item.get("coins",0) as int,
+					"FunscriptPath": pr_name + "/" + pr_fs_dst_name if pr_fs_dst_name != "" else "",
+					"AxisScripts":   pr_axis_rel,
+					"ActionCount":   pr_fs_stats["count"],
+					"LengthMs":      pr_fs_stats["length_ms"],
 				})
 
 	return path_entry
@@ -924,28 +995,9 @@ func _copy_file(src: String, dst: String) -> void:
 	dst_file.close()
 
 
-# Recursively deletes a directory and all its contents. Used to remove a round
-# folder after the round has been renamed and its files written to the new one.
-func _delete_dir_recursive(path: String) -> void:
-	var da: DirAccess = DirAccess.open(path)
-	if da == null:
-		return
-	da.list_dir_begin()
-	var fname: String = da.get_next()
-	while fname != "":
-		var child: String = path + "/" + fname
-		if da.current_is_dir():
-			_delete_dir_recursive(child)
-		else:
-			DirAccess.remove_absolute(child)
-		fname = da.get_next()
-	da.list_dir_end()
-	DirAccess.remove_absolute(path)
-
-
 # Removes files inside `dir_path` whose extension is in `extensions` but whose
-# filename is NOT `keep_filename`. Called after writing a replacement funscript
-# or video so the old file doesn't linger as a duplicate.
+# filename is NOT `keep_filename`. Called after writing a replacement video
+# (for funscripts use _delete_stale_l0_files / _delete_stale_axis_files instead).
 func _delete_stale_files(dir_path: String, keep_filename: String, extensions: Array) -> void:
 	var da: DirAccess = DirAccess.open(dir_path)
 	if da == null:
@@ -957,6 +1009,53 @@ func _delete_stale_files(dir_path: String, keep_filename: String, extensions: Ar
 		if not da.current_is_dir() \
 				and fname.get_extension().to_lower() in extensions \
 				and fname != keep_filename:
+			to_delete.append(dir_path + "/" + fname)
+		fname = da.get_next()
+	da.list_dir_end()
+	for p: String in to_delete:
+		DirAccess.remove_absolute(p)
+
+
+# Like _delete_stale_files but specifically for the L0 (main stroke) funscript.
+# Skips files that look like secondary-axis scripts (`*_L1.*`, `*_R0.*`, etc.)
+# so they are never accidentally deleted when the L0 name changes.
+func _delete_stale_l0_files(dir_path: String, keep_filename: String) -> void:
+	var da: DirAccess = DirAccess.open(dir_path)
+	if da == null:
+		return
+	da.list_dir_begin()
+	var to_delete: PackedStringArray = []
+	var fname: String = da.get_next()
+	while fname != "":
+		if not da.current_is_dir() and fname != keep_filename \
+				and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS:
+			var stem: String = fname.get_basename()
+			var is_axis: bool = false
+			for ax: String in JourneyData.EXTRA_AXES:
+				if stem.ends_with("_" + ax):
+					is_axis = true
+					break
+			if not is_axis:
+				to_delete.append(dir_path + "/" + fname)
+		fname = da.get_next()
+	da.list_dir_end()
+	for p: String in to_delete:
+		DirAccess.remove_absolute(p)
+
+
+# Removes stale funscript files that belong to a specific secondary axis
+# (i.e. `*_AXIS.funscript`) but are not the newly written `keep_filename`.
+func _delete_stale_axis_files(dir_path: String, axis: String, keep_filename: String) -> void:
+	var da: DirAccess = DirAccess.open(dir_path)
+	if da == null:
+		return
+	da.list_dir_begin()
+	var to_delete: PackedStringArray = []
+	var fname: String = da.get_next()
+	while fname != "":
+		if not da.current_is_dir() and fname != keep_filename \
+				and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS \
+				and fname.get_basename().ends_with("_" + axis):
 			to_delete.append(dir_path + "/" + fname)
 		fname = da.get_next()
 	da.list_dir_end()

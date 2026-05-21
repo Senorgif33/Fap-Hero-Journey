@@ -18,13 +18,20 @@ extends RefCounted
 
 const COVER_HEIGHT: int = 280
 const ROW_SEP:      int = 8
-const DIFFICULTIES: Array = ["Easy", "Medium", "Hard", "Very Hard", "Extreme", "Insane"]
 
-const VIDEO_EXTENSIONS:     Array[String] = ["mp4", "m4v", "mkv", "avi", "mov", "wmv", "webm"]
-const FUNSCRIPT_EXTENSIONS: Array[String] = ["funscript", "json"]
-const IMAGE_EXTENSIONS:     Array[String] = ["png", "jpg", "jpeg", "webp"]
+# Difficulty list and file-extension sets are owned by JourneyData — the single
+# canonical schema. Referenced here as JourneyData.<NAME>.
 
 const DropZoneScript = preload("res://scripts/journey_builder/DropZone.gd")
+
+# T-code secondary axes shown in the collapsible expander for each round.
+const EXTRA_AXES_INFO: Array = [
+	{"axis": "L1", "label": "L1  —  SURGE  (in / out)"},
+	{"axis": "L2", "label": "L2  —  SWAY  (left / right)"},
+	{"axis": "R0", "label": "R0  —  TWIST  (rotate)"},
+	{"axis": "R1", "label": "R1  —  ROLL  (tilt side)"},
+	{"axis": "R2", "label": "R2  —  PITCH  (tilt fwd / back)"},
+]
 
 var _owner: JourneyBuilder
 
@@ -63,7 +70,7 @@ func show_insert_popup(overlay: Control, graph: Control, arr: Array, insert_idx:
 	vbox.add_child(hdr)
 
 	var specs: Array = [
-		{"label": "▶ ROUND",      "color": UITheme.PURPLE_MID,    "item": {"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0}},
+		{"label": "▶ ROUND",      "color": UITheme.PURPLE_MID,    "item": {"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0, "axis_scripts": {}}},
 		{"label": "◆ SHOP",       "color": UITheme.PURPLE_BRIGHT, "item": {"type": "shop", "title": ""}},
 		{"label": "◈ STORYBOARD", "color": UITheme.STORYBOARD,    "item": {"type": "storyboard", "coins": 0, "image": "", "lines": []}},
 		{"label": "⑂ FORK",       "color": UITheme.MAGENTA,       "item": {
@@ -156,7 +163,7 @@ func show_journey_info_panel() -> void:
 	# Difficulty
 	side_vbox.add_child(_side_field_label("DIFFICULTY"))
 	var diff_btn: OptionButton = OptionButton.new()
-	for diff: String in DIFFICULTIES:
+	for diff: String in JourneyData.DIFFICULTIES:
 		diff_btn.add_item(diff)
 	diff_btn.selected = _owner._journey_difficulty_idx
 	UITheme.style_option_button(diff_btn)
@@ -186,7 +193,7 @@ func show_journey_info_panel() -> void:
 	side_vbox.add_child(add_lbl)
 
 	var add_specs: Array = [
-		{"label": "+ ROUND",      "color": UITheme.PURPLE_MID,    "item": {"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0}},
+		{"label": "+ ROUND",      "color": UITheme.PURPLE_MID,    "item": {"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0, "axis_scripts": {}}},
 		{"label": "◆ SHOP",       "color": UITheme.PURPLE_BRIGHT, "item": {"type": "shop", "title": ""}},
 		{"label": "◈ STORYBOARD", "color": UITheme.STORYBOARD,    "item": {"type": "storyboard", "coins": 0, "image": "", "lines": []}},
 		{"label": "⑂ FORK",       "color": UITheme.MAGENTA,       "item": {
@@ -325,6 +332,16 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 	var col: VBoxContainer = VBoxContainer.new()
 	col.add_theme_constant_override("separation", 6)
 
+	# Multi-drop hint — shown at the top so it's the first thing the user sees.
+	var drop_hint: Label = Label.new()
+	drop_hint.text = "TIP: DROP ALL SCRIPTS AT ONCE TO AUTO-ROUTE BY AXIS"
+	drop_hint.add_theme_color_override("font_color", Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.7))
+	drop_hint.add_theme_font_size_override("font_size", 10)
+	drop_hint.uppercase = true
+	drop_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	drop_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(drop_hint)
+
 	col.add_child(_side_field_label("ROUND NAME"))
 	var name_edit: LineEdit = LineEdit.new()
 	name_edit.placeholder_text = "Round name..."
@@ -338,7 +355,7 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 	col.add_child(_side_section_separator())
 	col.add_child(_side_field_label("VIDEO FILE"))
 	var video_zone: PanelContainer = DropZoneScript.new()
-	video_zone.accepted_extensions   = VIDEO_EXTENSIONS.duplicate()
+	video_zone.accepted_extensions   = JourneyData.VIDEO_EXTENSIONS.duplicate()
 	video_zone.picker_title          = "Select Video"
 	video_zone.picker_filters        = ["*.mp4,*.m4v,*.mkv,*.avi,*.mov,*.wmv,*.webm ; Video Files", "*.* ; All Files"]
 	video_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -356,7 +373,7 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 	col.add_child(_side_section_separator())
 	col.add_child(_side_field_label("FUNSCRIPT"))
 	var fs_zone: PanelContainer = DropZoneScript.new()
-	fs_zone.accepted_extensions   = FUNSCRIPT_EXTENSIONS.duplicate()
+	fs_zone.accepted_extensions   = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
 	fs_zone.picker_title          = "Select Funscript"
 	fs_zone.picker_filters        = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
 	fs_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -382,6 +399,9 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 		arr[idx]["coins"] = val.to_int()
 	)
 	col.add_child(coins_edit)
+
+	col.add_child(_side_section_separator())
+	col.add_child(_make_axis_expander(arr, idx))
 
 	col.add_child(_side_section_separator())
 	col.add_child(_side_action_row(arr, idx, graph, reselect))
@@ -427,7 +447,7 @@ func _make_side_storyboard_editor(arr: Array, idx: int, graph: Control, reselect
 	col.add_child(_side_section_separator())
 	col.add_child(_side_field_label("DEFAULT IMAGE"))
 	var img_zone: PanelContainer = DropZoneScript.new()
-	img_zone.accepted_extensions   = IMAGE_EXTENSIONS.duplicate()
+	img_zone.accepted_extensions   = JourneyData.IMAGE_EXTENSIONS.duplicate()
 	img_zone.picker_title          = "Select Default Image"
 	img_zone.picker_filters        = ["*.png,*.jpg,*.jpeg,*.webp ; Image Files"]
 	img_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -619,7 +639,7 @@ func _make_side_storyboard_line_block(lines_arr: Array, line_idx: int, refresh_s
 
 	col.add_child(_side_field_label("SPEAKER IMAGE (OPTIONAL)"))
 	var img_zone: PanelContainer = DropZoneScript.new()
-	img_zone.accepted_extensions   = IMAGE_EXTENSIONS.duplicate()
+	img_zone.accepted_extensions   = JourneyData.IMAGE_EXTENSIONS.duplicate()
 	img_zone.picker_title          = "Select Speaker Image for Line %d" % (line_idx + 1)
 	img_zone.picker_filters        = ["*.png,*.jpg,*.jpeg,*.webp ; Image Files"]
 	img_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -840,7 +860,7 @@ func _make_path_editor_block(paths_arr: Array, pi: int, graph: Control, reselect
 
 	sub.add_child(_side_field_label("CARD IMAGE"))
 	var img_zone: PanelContainer = DropZoneScript.new()
-	img_zone.accepted_extensions   = IMAGE_EXTENSIONS.duplicate()
+	img_zone.accepted_extensions   = JourneyData.IMAGE_EXTENSIONS.duplicate()
 	img_zone.picker_title          = "Select Card Image for Path %d" % (pi + 1)
 	img_zone.picker_filters        = ["*.png,*.jpg,*.jpeg,*.webp ; Image Files"]
 	img_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -852,3 +872,62 @@ func _make_path_editor_block(paths_arr: Array, pi: int, graph: Control, reselect
 	)
 
 	return panel
+
+
+# ── Extra axes expander ──────────────────────────────────────────────────────
+
+# Collapsed "▶ EXTRA AXES (SERIAL ONLY)" expander with one DropZone per axis.
+# Serial-only: Buttplug devices ignore all secondary axes.
+func _make_axis_expander(arr: Array, idx: int) -> Control:
+	# Ensure the dict key exists.
+	if not arr[idx].has("axis_scripts"):
+		arr[idx]["axis_scripts"] = {}
+
+	var wrapper: VBoxContainer = VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 4)
+
+	var toggle_btn: Button = Button.new()
+	toggle_btn.text = "▶  EXTRA AXES  (SERIAL ONLY)"
+	toggle_btn.toggle_mode = true
+	toggle_btn.button_pressed = false
+	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(toggle_btn, UITheme.PURPLE_MID)
+	wrapper.add_child(toggle_btn)
+
+	var axes_panel: VBoxContainer = VBoxContainer.new()
+	axes_panel.add_theme_constant_override("separation", 6)
+	axes_panel.visible = false
+	wrapper.add_child(axes_panel)
+
+	var hint: Label = Label.new()
+	hint.text = "SECONDARY-AXIS .FUNSCRIPT FILES FOR T-CODE SR6 / OSR2+ DEVICES.  SERIAL OUTPUT ONLY — IGNORED FOR BUTTPLUG."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	axes_panel.add_child(hint)
+
+	for info: Dictionary in EXTRA_AXES_INFO:
+		var axis: String = info["axis"]
+		axes_panel.add_child(_side_field_label(info["label"]))
+		var zone: PanelContainer = DropZoneScript.new()
+		zone.accepted_extensions   = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
+		zone.picker_title          = "Select %s Funscript" % axis
+		zone.picker_filters        = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
+		zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		axes_panel.add_child(zone)
+		var current_path: String = (arr[idx]["axis_scripts"] as Dictionary).get(axis, "")
+		if current_path != "":
+			zone.call_deferred("set_file", current_path)
+		# Capture axis in closure.
+		var captured_axis: String = axis
+		zone.file_dropped.connect(func(p: String) -> void:
+			arr[idx]["axis_scripts"][captured_axis] = p
+		)
+
+	toggle_btn.toggled.connect(func(pressed: bool) -> void:
+		toggle_btn.text = ("▼  EXTRA AXES  (SERIAL ONLY)" if pressed else "▶  EXTRA AXES  (SERIAL ONLY)")
+		axes_panel.visible = pressed
+	)
+
+	return wrapper

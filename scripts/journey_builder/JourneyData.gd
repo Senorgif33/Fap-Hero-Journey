@@ -26,6 +26,9 @@ const VIDEO_EXTENSIONS:     Array[String] = ["mp4", "m4v", "mkv", "avi", "mov", 
 const FUNSCRIPT_EXTENSIONS: Array[String] = ["funscript", "json"]
 const IMAGE_EXTENSIONS:     Array[String] = ["png", "jpg", "jpeg", "webp"]
 
+# Secondary T-code axes supported for serial devices (L0 = main stroke, handled separately).
+const EXTRA_AXES: Array[String] = ["L1", "L2", "R0", "R1", "R2"]
+
 
 # ── Parse ───────────────────────────────────────────────────────────────────
 
@@ -69,6 +72,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 				"type":            "round",
 				"name":            r.get("name", ""),
 				"funscript_path":  r.get("funscript_path", ""),
+				"axis_scripts":    r.get("axis_scripts", {}),
 				"video_path":      find_video_in_round(r.get("folder", "")),
 				"coins":           r.get("coins", 0),
 				"original_folder": r.get("folder", ""),
@@ -144,6 +148,7 @@ static func _build_path_items(p: Dictionary) -> Array:
 				"type":            "round",
 				"name":            pr.get("name", ""),
 				"funscript_path":  pr.get("funscript_path", ""),
+				"axis_scripts":    pr.get("axis_scripts", {}),
 				"video_path":      find_video_in_round(pr.get("folder", "")),
 				"coins":           pr.get("coins", 0),
 				"original_folder": pr.get("folder", ""),
@@ -268,6 +273,82 @@ static func find_video_in_round(folder: String) -> String:
 		fname = dir.get_next()
 	dir.list_dir_end()
 	return ""
+
+
+# Recursively deletes a directory and all its contents. Accepts either a
+# user:// path or an OS-absolute path — globalize_path leaves absolutes
+# unchanged, so this is safe for both callers.
+static func delete_dir_recursive(path: String) -> void:
+	var dir: DirAccess = DirAccess.open(path)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var fname: String = dir.get_next()
+	while fname != "":
+		var child: String = path + "/" + fname
+		if dir.current_is_dir():
+			delete_dir_recursive(child)
+		else:
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(child))
+		fname = dir.get_next()
+	dir.list_dir_end()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+
+# Loads an image by inspecting magic bytes rather than trusting the file
+# extension — handles covers that are JPEG/WebP saved with a .png extension.
+# Returns the Image, or null if the path is empty / unreadable / undecodable.
+static func load_image_smart(user_path: String) -> Image:
+	if user_path == "":
+		return null
+	var abs_path: String = ProjectSettings.globalize_path(user_path)
+	var f: FileAccess = FileAccess.open(abs_path, FileAccess.READ)
+	if f == null:
+		return null
+	var bytes: PackedByteArray = f.get_buffer(f.get_length())
+	f.close()
+	if bytes.is_empty():
+		return null
+
+	var img: Image = Image.new()
+	var err: Error
+
+	if bytes.size() >= 4 and bytes[0] == 0x89 and bytes[1] == 0x50 and bytes[2] == 0x4E and bytes[3] == 0x47:
+		err = img.load_png_from_buffer(bytes)
+	elif bytes.size() >= 3 and bytes[0] == 0xFF and bytes[1] == 0xD8 and bytes[2] == 0xFF:
+		err = img.load_jpg_from_buffer(bytes)
+	elif bytes.size() >= 12 and bytes[0] == 0x52 and bytes[1] == 0x49 and bytes[2] == 0x46 and bytes[3] == 0x46 \
+			and bytes[8] == 0x57 and bytes[9] == 0x45 and bytes[10] == 0x42 and bytes[11] == 0x50:
+		err = img.load_webp_from_buffer(bytes)
+	else:
+		err = img.load_jpg_from_buffer(bytes)
+		if err != OK:
+			err = img.load_png_from_buffer(bytes)
+		if err != OK:
+			err = img.load_webp_from_buffer(bytes)
+
+	return img if err == OK else null
+
+
+# Parses a funscript and returns {count, length_ms}: the number of actions and
+# the timestamp of the last action. Both 0 if the file is missing/unreadable.
+# JourneyBuilder calls this once at save time to cache the stats into
+# journey.json so the catalogue scan never has to re-parse funscripts.
+static func read_funscript_stats(path: String) -> Dictionary:
+	var result: Dictionary = {"count": 0, "length_ms": 0}
+	if path == "" or not FileAccess.file_exists(path):
+		return result
+	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return result
+	var parser: JSON = JSON.new()
+	if parser.parse(f.get_as_text()) == OK and parser.data is Dictionary:
+		var actions: Array = (parser.data as Dictionary).get("actions", [])
+		result["count"] = actions.size()
+		if not actions.is_empty():
+			result["length_ms"] = int(actions[-1].get("at", 0))
+	f.close()
+	return result
 
 
 # Recursively scans a items[] tree (including nested fork paths) for any

@@ -19,7 +19,7 @@ const BORDER_WIDTH:     int = 3
 
 const JOURNEYS_DIR: String = "user://journeys"
 
-const DIFFICULTIES: Array[String] = ["Easy", "Medium", "Hard", "Very Hard", "Extreme", "Insane"]
+# Difficulty list is owned by JourneyData (canonical schema) — JourneyData.DIFFICULTIES.
 
 const DIFF_COLORS: Dictionary = {
 	"Easy":      Color(0.35, 0.95, 0.35),
@@ -123,7 +123,7 @@ func _apply_layout() -> void:
 	_diff_filter = OptionButton.new()
 	_diff_filter.custom_minimum_size = Vector2(172, 0)
 	_diff_filter.add_item("ALL DIFFICULTIES")
-	for d: String in DIFFICULTIES:
+	for d: String in JourneyData.DIFFICULTIES:
 		_diff_filter.add_item(d.to_upper())
 	_top_bar.add_child(_diff_filter)
 	_top_bar.move_child(_diff_filter, 3)
@@ -397,319 +397,20 @@ func _on_delete_pressed() -> void:
 func _confirm_delete() -> void:
 	var folder: String = _current_journey.get("folder", "")
 	if folder != "":
-		_delete_directory_recursive(folder)
+		JourneyData.delete_dir_recursive(folder)
 	_journeys.erase(_current_journey)
 	_current_journey = {}
 	_modal.visible = false
 	_sort_and_populate()
 
 
-func _delete_directory_recursive(path: String) -> void:
-	var dir: DirAccess = DirAccess.open(path)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var fname: String = dir.get_next()
-	while fname != "":
-		var child: String = path + "/" + fname
-		if dir.current_is_dir():
-			_delete_directory_recursive(child)
-		else:
-			DirAccess.remove_absolute(ProjectSettings.globalize_path(child))
-		fname = dir.get_next()
-	dir.list_dir_end()
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
-
 # ---------------------------------------------------------------------------
 # Journey scanning
 # ---------------------------------------------------------------------------
 
+# Scanning + journey.json parsing lives in JourneyScanner (RefCounted helper).
 func _scan_journeys() -> void:
-	_journeys.clear()
-	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(JOURNEYS_DIR)):
-		DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(JOURNEYS_DIR))
-		return
-	var dir: DirAccess = DirAccess.open(JOURNEYS_DIR)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var entry: String = dir.get_next()
-	while entry != "":
-		if dir.current_is_dir() and not entry.begins_with("."):
-			var journey: Dictionary = _parse_journey(JOURNEYS_DIR + "/" + entry, entry)
-			if not journey.is_empty():
-				_journeys.append(journey)
-		entry = dir.get_next()
-	dir.list_dir_end()
-
-
-func _parse_journey(path: String, folder: String) -> Dictionary:
-	var json_path: String = path + "/journey.json"
-	if not FileAccess.file_exists(json_path):
-		return {}
-	var file: FileAccess = FileAccess.open(json_path, FileAccess.READ)
-	if file == null:
-		return {}
-	var parser: JSON = JSON.new()
-	var err: int = parser.parse(file.get_as_text())
-	file.close()
-	if err != OK:
-		return {}
-	var data: Dictionary = parser.data
-
-	var journey: Dictionary = {
-		"folder":          path,
-		"folder_name":     folder,
-		"title":           data.get("Name", folder),
-		"description":     data.get("Description", ""),
-		"difficulty":      data.get("Difficulty", "Unknown"),
-		"author":          data.get("Author", "Unknown"),
-		"rounds":          [],
-		"forks":           [],
-		"shops":           [],
-		"storyboards":     [],
-		"cover_path":      "",
-		"total_actions":   0,
-		"total_length_ms": 0,
-		"modified_time":   FileAccess.get_modified_time(json_path),
-	}
-
-	var raw_shops: Array = data.get("Shops", [])
-	for raw_shop in raw_shops:
-		if raw_shop is Dictionary:
-			journey["shops"].append({
-				"after_order": raw_shop.get("AfterOrder", raw_shop.get("after_order", 0)),
-				"title":       raw_shop.get("Title",       raw_shop.get("title",       "")),
-			})
-		else:
-			# Legacy format: bare int order number.
-			journey["shops"].append({"after_order": int(raw_shop), "title": ""})
-
-	var raw_storyboards: Array = data.get("Storyboards", [])
-	for raw_sb in raw_storyboards:
-		if not raw_sb is Dictionary:
-			continue
-		var sb_img_file: String = raw_sb.get("Image", raw_sb.get("image", ""))
-		var sb_lines_raw: Array = raw_sb.get("Lines", raw_sb.get("lines", []))
-		var sb_lines: Array = []
-		for raw_line in sb_lines_raw:
-			if not raw_line is Dictionary:
-				continue
-			var line_img_file: String = raw_line.get("Image", raw_line.get("image", ""))
-			sb_lines.append({
-				"speaker": raw_line.get("Speaker", raw_line.get("speaker", "")),
-				"text":    raw_line.get("Text",    raw_line.get("text",    "")),
-				"image":   (path + "/" + line_img_file) if line_img_file != "" else "",
-			})
-		journey["storyboards"].append({
-			"order":  raw_sb.get("Order",        raw_sb.get("order",        0)),
-			"coins":  raw_sb.get("CoinsAwarded", raw_sb.get("coins",        0)),
-			"image":  (path + "/" + sb_img_file) if sb_img_file != "" else "",
-			"lines":  sb_lines,
-		})
-
-	journey["cover_path"] = _find_cover_image(path)
-
-	var raw_rounds: Array = data.get("Rounds", [])
-	# Filter out any legacy Shop-type rounds — shops are now declared via "Shops": [...]
-	raw_rounds = raw_rounds.filter(func(r: Dictionary) -> bool:
-		return r.get("RoundType", "Normal") != "Shop"
-	)
-	raw_rounds.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return (a.get("Order", 0) as int) < (b.get("Order", 0) as int)
-	)
-
-	for raw: Dictionary in raw_rounds:
-		var round_name: String   = raw.get("Name", "Round")
-		var round_folder: String = path + "/" + round_name
-		var fs: Dictionary       = _read_funscript_stats(round_folder)
-		var round_data: Dictionary = {
-			"name":           round_name,
-			"folder":         round_folder,
-			"funscript_path": fs["path"],
-			"coins":          raw.get("CoinsAwarded", 0),
-			"order":          raw.get("Order", 0),
-			"action_count":   fs["count"],
-			"length_ms":      fs["length_ms"],
-		}
-		journey["total_actions"]   = (journey["total_actions"] as int) + (fs["count"] as int)
-		journey["total_length_ms"] = (journey["total_length_ms"] as int) + (fs["length_ms"] as int)
-		journey["rounds"].append(round_data)
-
-	var raw_forks: Array = data.get("Forks", [])
-	var parsed_forks: Array = []
-	for raw_fork: Dictionary in raw_forks:
-		parsed_forks.append(_parse_fork(raw_fork, path))
-	journey["forks"] = parsed_forks
-
-	return journey
-
-
-# Recursively parses a fork's JSON dict. Each path can contain nested forks
-# in its "Forks" array.
-func _parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary:
-	var fork_entry: Dictionary = {
-		"after_order": raw_fork.get("AfterOrder", raw_fork.get("after_order", 0)),
-		"title":       raw_fork.get("Title",       raw_fork.get("title",       "")),
-		"description": raw_fork.get("Description", raw_fork.get("description", "")),
-		"paths":       [],
-	}
-	var raw_paths: Array = raw_fork.get("Paths", raw_fork.get("paths", []))
-	for raw_path: Dictionary in raw_paths:
-		var img_file: String = raw_path.get("Image", raw_path.get("image", ""))
-		var path_entry: Dictionary = {
-			"name":        raw_path.get("Name",        raw_path.get("name",        "Path")),
-			"description": raw_path.get("Description", raw_path.get("description", "")),
-			"image_path":  (journey_path + "/" + img_file) if img_file != "" else "",
-			"rounds":      [],
-			"shops":       [],
-			"storyboards": [],
-			"forks":       [],
-		}
-		var raw_pr_rounds: Array = raw_path.get("Rounds", raw_path.get("rounds", []))
-		for raw_pr: Dictionary in raw_pr_rounds:
-			var pr_name: String   = raw_pr.get("Name", raw_pr.get("name", "Round"))
-			var pr_folder: String = journey_path + "/" + pr_name
-			var pr_fs: Dictionary = _read_funscript_stats(pr_folder)
-			path_entry["rounds"].append({
-				"name":           pr_name,
-				"folder":         pr_folder,
-				"funscript_path": pr_fs["path"],
-				"coins":          raw_pr.get("CoinsAwarded", raw_pr.get("coins", 0)),
-				"order":          raw_pr.get("Order",        raw_pr.get("order", 0)),
-				"action_count":   pr_fs["count"],
-				"length_ms":      pr_fs["length_ms"],
-			})
-		var raw_pr_shops: Array = raw_path.get("Shops", raw_path.get("shops", []))
-		for raw_ps in raw_pr_shops:
-			if raw_ps is Dictionary:
-				path_entry["shops"].append({
-					"after_order": raw_ps.get("AfterOrder", raw_ps.get("after_order", 0)),
-					"title":       raw_ps.get("Title",      raw_ps.get("title",       "")),
-				})
-			else:
-				path_entry["shops"].append({"after_order": int(raw_ps), "title": ""})
-		var raw_pr_sbs: Array = raw_path.get("Storyboards", raw_path.get("storyboards", []))
-		for raw_psb in raw_pr_sbs:
-			if not raw_psb is Dictionary:
-				continue
-			var psb_img_file: String = raw_psb.get("Image", raw_psb.get("image", ""))
-			var psb_lines_raw: Array = raw_psb.get("Lines", raw_psb.get("lines", []))
-			var psb_lines: Array = []
-			for raw_pl in psb_lines_raw:
-				if not raw_pl is Dictionary:
-					continue
-				var pl_img_file: String = raw_pl.get("Image", raw_pl.get("image", ""))
-				psb_lines.append({
-					"speaker": raw_pl.get("Speaker", raw_pl.get("speaker", "")),
-					"text":    raw_pl.get("Text",    raw_pl.get("text",    "")),
-					"image":   (journey_path + "/" + pl_img_file) if pl_img_file != "" else "",
-				})
-			path_entry["storyboards"].append({
-				"order":  raw_psb.get("Order",        raw_psb.get("order",        0)),
-				"coins":  raw_psb.get("CoinsAwarded", raw_psb.get("coins",        0)),
-				"image":  (journey_path + "/" + psb_img_file) if psb_img_file != "" else "",
-				"lines":  psb_lines,
-			})
-		# Nested forks — recurse.
-		var raw_pr_forks: Array = raw_path.get("Forks", raw_path.get("forks", []))
-		for raw_nf in raw_pr_forks:
-			if not raw_nf is Dictionary:
-				continue
-			path_entry["forks"].append(_parse_fork(raw_nf, journey_path))
-		fork_entry["paths"].append(path_entry)
-	return fork_entry
-
-
-func _find_cover_image(path: String) -> String:
-	# New journeys store all images inside a media/ subfolder. Check there first.
-	var media_path: String = path + "/media"
-	var media_dir: DirAccess = DirAccess.open(media_path)
-	if media_dir != null:
-		media_dir.list_dir_begin()
-		var mfname: String = media_dir.get_next()
-		while mfname != "":
-			if not media_dir.current_is_dir() and mfname.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp"]:
-				media_dir.list_dir_end()
-				return media_path + "/" + mfname
-			mfname = media_dir.get_next()
-		media_dir.list_dir_end()
-
-	# Fallback: old journeys stored the cover at the journey root.
-	var dir: DirAccess = DirAccess.open(path)
-	if dir == null:
-		return ""
-	dir.list_dir_begin()
-	var fname: String = dir.get_next()
-	while fname != "":
-		if not dir.current_is_dir() and fname.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp"]:
-			dir.list_dir_end()
-			return path + "/" + fname
-		fname = dir.get_next()
-	dir.list_dir_end()
-	return ""
-
-
-# Loads an image by inspecting magic bytes rather than trusting the file extension.
-# Handles covers that are JPEG/WebP saved with a .png extension.
-static func load_image_smart(user_path: String) -> Image:
-	if user_path == "":
-		return null
-	var abs_path: String = ProjectSettings.globalize_path(user_path)
-	var f: FileAccess = FileAccess.open(abs_path, FileAccess.READ)
-	if f == null:
-		return null
-	var bytes: PackedByteArray = f.get_buffer(f.get_length())
-	f.close()
-	if bytes.is_empty():
-		return null
-
-	var img: Image = Image.new()
-	var err: Error
-
-	if bytes.size() >= 4 and bytes[0] == 0x89 and bytes[1] == 0x50 and bytes[2] == 0x4E and bytes[3] == 0x47:
-		err = img.load_png_from_buffer(bytes)
-	elif bytes.size() >= 3 and bytes[0] == 0xFF and bytes[1] == 0xD8 and bytes[2] == 0xFF:
-		err = img.load_jpg_from_buffer(bytes)
-	elif bytes.size() >= 12 and bytes[0] == 0x52 and bytes[1] == 0x49 and bytes[2] == 0x46 and bytes[3] == 0x46 \
-			and bytes[8] == 0x57 and bytes[9] == 0x45 and bytes[10] == 0x42 and bytes[11] == 0x50:
-		err = img.load_webp_from_buffer(bytes)
-	else:
-		err = img.load_jpg_from_buffer(bytes)
-		if err != OK:
-			err = img.load_png_from_buffer(bytes)
-		if err != OK:
-			err = img.load_webp_from_buffer(bytes)
-
-	return img if err == OK else null
-
-
-func _read_funscript_stats(folder: String) -> Dictionary:
-	var result: Dictionary = {"count": 0, "length_ms": 0, "path": ""}
-	var dir: DirAccess = DirAccess.open(folder)
-	if dir == null:
-		return result
-	dir.list_dir_begin()
-	var fname: String = dir.get_next()
-	while fname != "":
-		if not dir.current_is_dir() and fname.get_extension() in ["funscript", "json"]:
-			var full_path: String = folder + "/" + fname
-			var f: FileAccess = FileAccess.open(full_path, FileAccess.READ)
-			if f:
-				var parser: JSON = JSON.new()
-				if parser.parse(f.get_as_text()) == OK:
-					var d: Dictionary = parser.data
-					var actions: Array = d.get("actions", [])
-					result["count"]     = actions.size()
-					result["path"]      = full_path
-					if not actions.is_empty():
-						result["length_ms"] = actions[-1].get("at", 0)
-				f.close()
-				dir.list_dir_end()
-				return result
-		fname = dir.get_next()
-	dir.list_dir_end()
-	return result
+	_journeys = JourneyScanner.scan_all(JOURNEYS_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +452,7 @@ func _passes_filter(j: Dictionary) -> bool:
 		if not title.contains(_search_text.to_lower()):
 			return false
 	if _diff_filter_idx > 0:
-		var required: String = DIFFICULTIES[_diff_filter_idx - 1]
+		var required: String = JourneyData.DIFFICULTIES[_diff_filter_idx - 1]
 		if j.get("difficulty", "") != required:
 			return false
 	return true
@@ -801,7 +502,7 @@ func _populate_modal(journey: Dictionary) -> void:
 	_modal_desc.visible = desc != ""
 
 	var cover_path: String = journey.get("cover_path", "")
-	var cover_img: Image = load_image_smart(cover_path)
+	var cover_img: Image = JourneyData.load_image_smart(cover_path)
 	_cover_img.texture = ImageTexture.create_from_image(cover_img) if cover_img else null
 
 	for child in _round_list.get_children():
