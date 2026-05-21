@@ -5,587 +5,599 @@ using System.Collections.Generic;
 
 public partial class FunscriptPlayer : Node
 {
-	private struct Action { public float AtMs; public int Pos; }
-
-	// Per-axis state for secondary T-code channels (L1, L2, R0, R1, R2).
-	// Serial-only — Buttplug ignores these entirely.
-	private class AxisState
-	{
-		public List<Action> Actions = new List<Action>();
-		public int          Index   = 0;
-	}
-
-	// Maps T-code axis name → its loaded script state.
-	// Explicitly System.Collections.Generic — AxisState is a C# class, not a Godot Variant.
-	private readonly System.Collections.Generic.Dictionary<string, AxisState> _axes =
-		new System.Collections.Generic.Dictionary<string, AxisState>();
-
-	private static readonly string[] KnownAxes = { "L1", "L2", "R0", "R1", "R2" };
-
-	private enum OutputMode { Buttplug, Serial }
-
-	private List<Action> _actions = new List<Action>();
-	private bool _playing = false;
-	private double _positionMs = 0.0;
-	private int _actionIndex = 0;
-	private bool? _isLinearDevice = null;
-	private int _deviceIndex = -1;
-	private bool _syncedThisFrame = false;
-	private OutputMode _outputMode = OutputMode.Buttplug;
-	private bool _outputResolved = false;
-	private int _rangeMin = 0;
-	private int _rangeMax = 100;
-
-	// Storyboard filler — alternating stroke played while a storyboard screen is
-	// open so the device doesn't sit idle. Independent of _playing / the funscript.
-	private bool   _fillerActive        = false;
-	private double _fillerElapsedMs     = 0.0;
-	private int    _fillerHalfCycleMs   = 2000; // ms per half-stroke (hi→lo or lo→hi)
-	private int    _fillerLo            = 0;
-	private int    _fillerHi            = 100;
-	private bool   _fillerGoingToLo     = false; // false = first command goes to hi
-	private double _fillerVibTickMs     = 0.0;
-	private const  double FillerVibTickIntervalMs = 50.0;
-
-	// Ease-in state — blends output from neutral (50) toward the script position
-	// at the start of each round, journey, or resume-from-pause.
-	private bool   _easing          = false;
-	private double _easeStartMs     = 0.0;
-	private double _easeDurationMs  = 0.0;
-	private const float  EaseFromPos         = 50f;
-	private const float  EaseSpeedUnitsPerMs = 40f / 1000f; // 40 units/sec
-	private const double EaseMinMs           = 50.0;
-	private const double EaseMaxMs           = 1500.0;
-
-	public bool Playing     => _playing;
-	public int  ActionCount => _actions.Count;
-
-	// Cached autoload references — resolved once instead of looked up per-call
-	// (some were hit every frame, per axis, inside _Process). FunscriptPlayer is
-	// a late autoload, so all of these exist by the time _Ready runs.
-	private SerialDeviceService _serial;
-	private ButtplugService     _buttplug;
-	private InventoryService    _inventory;
-	private ScoreService        _score;
-	private Node                _settings;
-
-	public override void _Ready()
-	{
-		_serial    = GetNode<SerialDeviceService>("/root/SerialDeviceService");
-		_buttplug  = GetNode<ButtplugService>("/root/ButtplugService");
-		_inventory = GetNode<InventoryService>("/root/InventoryService");
-		_score     = GetNode<ScoreService>("/root/ScoreService");
-		_settings  = GetNode("/root/SettingsService");
-	}
-
-	/// Push updated range-clamp values directly into the player.
-	/// Called by the Options screen on every slider change so mid-playback
-	/// adjustments take effect on the very next SendCommand without needing
-	/// a round restart.
-	public void SetRangeClamp(int min, int max)
-	{
-		_rangeMin = min;
-		_rangeMax = max;
-	}
-
-	public void LoadFunscript(string path)
-	{
-		_actions.Clear();
-		_actionIndex = 0;
-		_positionMs = 0.0;
-		_playing = false;
-		_isLinearDevice = null;
-
-		foreach (var kv in _axes) 
-			kv.Value.Index = 0;
-
-		string absPath = ProjectSettings.GlobalizePath(path);
-		using var f = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
-		if (f == null) 
-		{ 
-			GD.PrintErr($"FunscriptPlayer: cannot open {path}"); 
-			return; 
-		}
-
-		var parser = new Json();
-		if (parser.Parse(f.GetAsText()) != Error.Ok)
-		{
-			GD.PrintErr($"FunscriptPlayer: JSON parse error in {path}");
-			return;
-		}
-
-		var data = parser.Data.AsGodotDictionary();
-		var raw = data.ContainsKey("actions") ? data["actions"].AsGodotArray() : new Godot.Collections.Array();
-		foreach (var item in raw)
-		{
-			var a = item.AsGodotDictionary();
-			_actions.Add(new Action
-			{
-				AtMs = a.ContainsKey("at") ? a["at"].AsSingle() : 0f,
-				Pos = a.ContainsKey("pos") ? a["pos"].AsInt32() : 0,
-			});
-		}
-	}
-
-	private const uint EaseDurationMs = 500;
-	private const double CenterPosition = 0.5;
-
-	// Load a secondary-axis funscript. Call before Play().
-	// axis: T-code name, e.g. "L1", "R0".
-	public void LoadAxisScript(string axis, string path)
-	{
-		var state = new AxisState();
-		string absPath = ProjectSettings.GlobalizePath(path);
-		using var f = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
-		if (f == null)
-		{
-			GD.PrintErr($"FunscriptPlayer: cannot open axis script {path}");
-			return;
-		}
-		var parser = new Json();
-		if (parser.Parse(f.GetAsText()) != Error.Ok)
-		{
-			GD.PrintErr($"FunscriptPlayer: JSON parse error in axis script {path}");
-			return;
-		}
-		var data = parser.Data.AsGodotDictionary();
-		var raw  = data.ContainsKey("actions") ? data["actions"].AsGodotArray() : new Godot.Collections.Array();
-		foreach (var item in raw)
-		{
-			var a = item.AsGodotDictionary();
-			state.Actions.Add(new Action
-			{
-				AtMs = a.ContainsKey("at")  ? a["at"].AsSingle()  : 0f,
-				Pos  = a.ContainsKey("pos") ? a["pos"].AsInt32()  : 0,
-			});
-		}
-		_axes[axis] = state;
-	}
-
-	// Remove all secondary axis scripts (call before loading a new round).
-	public void ClearAxisScripts()
-	{
-		_axes.Clear();
-	}
-
-	// Send all known axes that have NO loaded script to neutral (50 → 0.5) so the
-	// device doesn't stay wherever it was from a previous round.
-	// Only runs when at least one axis script is loaded — single-axis devices
-	// (which have no axis scripts) receive no unnecessary secondary-axis traffic.
-	private void _SendNeutralToUnloadedAxes()
-	{
-		if (_outputMode != OutputMode.Serial) return;
-		if (_axes.Count == 0) 
-			return; // no multi-axis scripts → nothing to park
-
-		var serial = _serial;
-		if (serial == null || !serial.SerialConnected) 
-			return;
-
-		foreach (var axis in KnownAxes)
-		{
-			if (!_axes.ContainsKey(axis))
-				serial.SendAxis(axis, EaseDurationMs, 0.5);
-		}
-	}
-
-	public void Play()
-	{
-		_playing = true;
-		ResolveOutput();
-		_SendNeutralToUnloadedAxes();
-		_StartEaseIn();
-	}
-
-	public void Pause()
-	{
-		_playing = false;
-		_easing  = false;
-		EaseToNeutral();
-	}
-
-	public void Resume()
-	{
-		_playing = true;
-		_StartEaseIn();
-	}
-
-	public void Stop()
-	{
-		_playing      = false;
-		_easing       = false;
-		_fillerActive = false; // cancel any storyboard filler that may still be running
-
-		EaseToNeutral();
-		_positionMs = 0.0;
-		_actionIndex = 0;
-
-		foreach (var kv in _axes) 
-			kv.Value.Index = 0;
-
-		_isLinearDevice = null;
-		_deviceIndex = -1;
-		_outputResolved = false;
-	}
-
-	// Begin the storyboard filler: alternating hi→lo→hi strokes at the given
-	// half-cycle speed. Respects the device range clamp but not inventory effects.
-	// lo/hi are in the same 0–100 scale as funscript positions.
-	public void StartFiller(int lo, int hi, int halfCycleMs)
-	{
-		_fillerLo        = lo;
-		_fillerHi        = hi;
-		_fillerHalfCycleMs = Math.Max(100, halfCycleMs);
-		_fillerElapsedMs = 0.0;
-		_fillerGoingToLo = false; // first stroke goes to hi, then alternates
-		_fillerVibTickMs = 0.0;
-		_fillerActive    = true;
-		ResolveOutput();
-		_SendFillerCommand(); // fire immediately so there's no leading silence
-	}
-
-	// Stop the filler and ease the device back to neutral.
-	public void StopFiller()
-	{
-		if (!_fillerActive) return;
-		_fillerActive = false;
-		EaseToNeutral();
-	}
-
-	// Compute ease-in parameters from the first upcoming script action.
-	// Duration is proportional to how far that position is from neutral (50),
-	// so the device always approaches at a consistent speed regardless of gap size.
-	// Skipped entirely for vibrators — intensity jumps are not jarring the way
-	// sudden linear strokes are, so no ease is needed.
-	private void _StartEaseIn()
-	{
-		if (_isLinearDevice == false) return; // vibrators: no ease-in
-		if (_actions.Count == 0) return;
-		int idx = Math.Min(_actionIndex, _actions.Count - 1);
-		float gap = Math.Abs(_actions[idx].Pos - EaseFromPos);
-		if (gap <= 2f)
-		{
-			_easing = false;
-			return;
-		}
-		_easeDurationMs = Math.Clamp(gap / EaseSpeedUnitsPerMs, EaseMinMs, EaseMaxMs);
-		_easeStartMs    = _positionMs;
-		_easing         = true;
-	}
-
-	// Send a gentle "go to neutral" command so the device doesn't stay
-	// mid-stroke or vibrating when playback halts. Linear → midpoint,
-	// vibrator → 0 intensity. Safe to call when nothing is connected.
-	// For serial devices, all loaded secondary axes are also returned to 0.5.
-	private void EaseToNeutral()
-	{
-		ResolveOutput();
-
-		if (_outputMode == OutputMode.Serial)
-		{
-			var serial = _serial;
-			if (serial != null && serial.SerialConnected)
-			{
-				serial.SendLinear(EaseDurationMs, CenterPosition);
-				// Return every loaded secondary axis to neutral so none stay
-				// mid-position after a pause, stop, or mid-round exit.
-				foreach (var axis in _axes.Keys)
-					serial.SendAxis(axis, EaseDurationMs, 0.5);
-			}
-			return;
-		}
-
-		var bp = _buttplug;
-		if (bp == null || !bp.BpConnected || _deviceIndex < 0)
-			return;
-
-		if (_isLinearDevice == true)
-			bp.SendLinear(_deviceIndex, EaseDurationMs, CenterPosition);
-		else
-			bp.SendVibrate(_deviceIndex, 0.0);
-	}
-
-	// Call this each frame from GameLoop to keep funscript in sync with the video clock.
-	// Only updates _positionMs — _Process is responsible for dispatching due actions.
-	public void SyncTo(double videoPositionSec)
-	{
-		_positionMs = videoPositionSec * 1000.0;
-		_syncedThisFrame = true;
-	}
-
-	public override void _Process(double delta)
-	{
-		if (_playing && _actions.Count > 0)
-		{
-			// When synced to a video clock, SyncTo already set _positionMs this frame.
-			// Only accumulate delta in free-running mode (no video / funscript-only).
-			if (_syncedThisFrame)
-				_syncedThisFrame = false;
-			else
-				_positionMs += delta * 1000.0;
-
-			while (_actionIndex < _actions.Count)
-			{
-				if (_actions[_actionIndex].AtMs > _positionMs)
-					break;
-
-				SendCommand(_actionIndex);
-				_actionIndex++;
-			}
-
-			// Dispatch secondary axes (serial only). Applies the same smoothstep
-			// ease-in as L0 so all axes blend in together from neutral at round start.
-			if (_outputMode == OutputMode.Serial)
-			{
-				var serial = _serial;
-				if (serial != null && serial.SerialConnected)
-				{
-					// Compute ease blend factor once for this batch of axis commands.
-					// _easing may already be false (cleared by L0's SendCommand above),
-					// which is fine — both axes will stop easing at the same moment.
-					float easeSmooth = 1f;
-					if (_easing)
-					{
-						double elapsed  = _positionMs - _easeStartMs;
-						float  t        = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
-						easeSmooth      = t * t * (3f - 2f * t); // smoothstep
-					}
-
-					foreach (var kv in _axes)
-					{
-						string    axis  = kv.Key;
-						AxisState state = kv.Value;
-						while (state.Index < state.Actions.Count)
-						{
-							if (state.Actions[state.Index].AtMs > _positionMs)
-								break;
-
-							int idx = state.Index;
-							if (idx + 1 < state.Actions.Count)
-							{
-								int nextPos = state.Actions[idx + 1].Pos;
-								// Blend toward neutral (EaseFromPos = 50) during ease-in.
-								if (_easing || easeSmooth < 1f)
-									nextPos = (int)Math.Round(EaseFromPos + (nextPos - EaseFromPos) * easeSmooth);
-
-								double targetNorm = nextPos / 100.0;
-								uint   durMs      = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
-								serial.SendAxis(axis, durMs, targetNorm);
-							}
-							state.Index++;
-						}
-					}
-				}
-			}
-		}
-
-		// Storyboard filler runs independently of normal funscript playback.
-		if (_fillerActive)
-		{
-			_fillerElapsedMs += delta * 1000.0;
-			if (_fillerElapsedMs >= _fillerHalfCycleMs)
-			{
-				_fillerElapsedMs -= _fillerHalfCycleMs;
-				_fillerGoingToLo  = !_fillerGoingToLo;
-				_SendFillerCommand();
-			}
-
-			// Vibrators can't interpolate, so update them frequently with a
-			// triangle-wave intensity that mirrors the linear stroke position.
-			if (_isLinearDevice == false)
-			{
-				_fillerVibTickMs += delta * 1000.0;
-				if (_fillerVibTickMs >= FillerVibTickIntervalMs)
-				{
-					_fillerVibTickMs = 0.0;
-					_SendFillerVibrateTick();
-				}
-			}
-		}
-	}
-
-	// Send a single linear command to the device for the current filler direction.
-	private void _SendFillerCommand()
-	{
-		int target = _fillerGoingToLo ? _fillerLo : _fillerHi;
-		target = Math.Clamp(target, _rangeMin, _rangeMax);
-		uint dur = (uint)_fillerHalfCycleMs;
-
-		if (_outputMode == OutputMode.Serial)
-		{
-			var serial = _serial;
-			if (serial != null && serial.SerialConnected)
-				serial.SendLinear(dur, target / 100.0);
-			return;
-		}
-
-		var bp = _buttplug;
-		if (bp == null || !bp.BpConnected || _deviceIndex < 0) return;
-
-		if (_isLinearDevice == true)
-			bp.SendLinear(_deviceIndex, dur, target / 100.0);
-		// Vibrators are handled by _SendFillerVibrateTick, not here.
-	}
-
-	// Compute current triangle-wave intensity for a vibrator and send it.
-	private void _SendFillerVibrateTick()
-	{
-		double t       = Math.Clamp(_fillerElapsedMs / _fillerHalfCycleMs, 0.0, 1.0);
-		double fromPos = _fillerGoingToLo ? _fillerHi : _fillerLo;
-		double toPos   = _fillerGoingToLo ? _fillerLo : _fillerHi;
-		double pos     = fromPos + (toPos - fromPos) * t;
-		pos = Math.Clamp(pos, _rangeMin, _rangeMax);
-
-		var bp = _buttplug;
-		if (bp == null || !bp.BpConnected || _deviceIndex < 0) return;
-		bp.SendVibrate(_deviceIndex, pos / 100.0);
-	}
-
-	private void ResolveOutput()
-	{
-		if (_outputResolved) 
-			return;
-
-		string mode = _settings.Call("get_output_mode").AsString();
-		_outputMode = mode == "serial" ? OutputMode.Serial : OutputMode.Buttplug;
-
-		// Cache device range limits so SendCommand doesn't hit disk per-action.
-		_rangeMin = _settings.Call("get_range_min").AsInt32();
-		_rangeMax = _settings.Call("get_range_max").AsInt32();
-
-		if (_outputMode == OutputMode.Serial)
-		{
-			// Serial T-code devices are always linear; nothing else to resolve.
-			_isLinearDevice = true;
-			_deviceIndex = 0;
-		}
-		else
-		{
-			var bp = _buttplug;
-			if (bp != null)
-			{
-				_deviceIndex = bp.GetSelectedDeviceIndex();
-				_isLinearDevice = _deviceIndex >= 0 && bp.DeviceSupportsLinear(_deviceIndex);
-			}
-		}
-		_outputResolved = true;
-	}
-
-	private void SendCommand(int index)
-	{
-		ResolveOutput();
-
-		var inv = _inventory;
-		var effects = inv?.GetActiveEffects();
-
-		if (effects != null && HasBlockEffect(effects))
-			return;
-
-		int currentPos = TransformPos(_actions[index].Pos, effects);
-		int nextPos    = index + 1 < _actions.Count ? TransformPos(_actions[index + 1].Pos, effects) : currentPos;
-
-		// Apply user-configured hard range clamp (device settings → Position Clamp).
-		// Runs after inventory effects so shop modifiers compose correctly with the limit.
-		currentPos = Math.Clamp(currentPos, _rangeMin, _rangeMax);
-		nextPos    = Math.Clamp(nextPos,    _rangeMin, _rangeMax);
-
-		// Ease-in blend: interpolate from neutral (50) toward the script positions
-		// over the computed ease duration. Both current and next are blended so the
-		// device doesn't receive an inconsistent target during the blend window.
-		// Vibrators are exempt — _StartEaseIn() never sets _easing for them, but
-		// guard here too so any stale flag can never affect vibrator output.
-		if (_easing && _isLinearDevice != false)
-		{
-			double elapsed = _positionMs - _easeStartMs;
-			float t = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
-			// Smoothstep (ease-in-out Hermite) — feels natural for device motion.
-			float smooth = t * t * (3f - 2f * t);
-			currentPos = (int)Math.Round(EaseFromPos + (currentPos - EaseFromPos) * smooth);
-			nextPos    = (int)Math.Round(EaseFromPos + (nextPos    - EaseFromPos) * smooth);
-			if (elapsed >= _easeDurationMs)
-				_easing = false;
-		}
-
-		if (index + 1 < _actions.Count)
-		{
-			int amplitude = Math.Abs(nextPos - currentPos);
-			_score?.AddStroke(amplitude);
-		}
-
-		if (_outputMode == OutputMode.Serial)
-		{
-			var serial = _serial;
-
-			if (serial == null || !serial.SerialConnected)
-				return;
-
-			if (index + 1 >= _actions.Count)
-				return;
-
-			double targetNormalised = nextPos / 100.0;
-			uint durationMs = (uint)Math.Max(1, (int)(_actions[index + 1].AtMs - _actions[index].AtMs));
-			serial.SendLinear(durationMs, targetNormalised);
-
-			return;
-		}
-
-		var bp = _buttplug;
-		if (bp == null || !bp.BpConnected || _deviceIndex < 0)
-			return;
-
-		if (_isLinearDevice == true)
-		{
-			if (index + 1 >= _actions.Count)
-				return;
-
-			double targetNormalised = nextPos / 100.0;
-			uint durationMs = (uint)Math.Max(1, (int)(_actions[index + 1].AtMs - _actions[index].AtMs));
-			bp.SendLinear(_deviceIndex, durationMs, targetNormalised);
-		}
-		else
-		{
-			// Vibrators have no stroke direction — just hold the current keyframe intensity.
-			bp.SendVibrate(_deviceIndex, currentPos / 100.0);
-		}
-	}
-
-	private static bool HasBlockEffect(Godot.Collections.Array effects)
-	{
-		foreach (var e in effects)
-		{
-			var d = e.AsGodotDictionary();
-			if (d.ContainsKey("kind") && d["kind"].AsString() == "block")
-				return true;
-		}
-		return false;
-	}
-
-	// Scale around centre, then remap into clamp range. Multiple effects of the
-	// same kind stack multiplicatively (scale) or successively (clamp).
-	private static int TransformPos(int rawPos, Godot.Collections.Array effects)
-	{
-		if (effects == null || effects.Count == 0) return rawPos;
-		float pos = rawPos;
-		foreach (var e in effects)
-		{
-			var d = e.AsGodotDictionary();
-			if (d.ContainsKey("kind") && d["kind"].AsString() == "scale" && d.ContainsKey("factor"))
-			{
-				float factor = d["factor"].AsSingle();
-				pos = 50f + (pos - 50f) * factor;
-			}
-		}
-		foreach (var e in effects)
-		{
-			var d = e.AsGodotDictionary();
-			if (d.ContainsKey("kind") && d["kind"].AsString() == "clamp")
-			{
-				float minV = d.ContainsKey("min") ? d["min"].AsSingle() : 0f;
-				float maxV = d.ContainsKey("max") ? d["max"].AsSingle() : 100f;
-				pos = minV + Math.Clamp(pos, 0f, 100f) / 100f * (maxV - minV);
-			}
-		}
-		pos = Math.Clamp(pos, 0f, 100f);
-		return (int)Math.Round(pos);
-	}
+    private struct Action { public float AtMs; public int Pos; }
+
+    // Per-axis state for secondary T-code channels (L1, L2, R0, R1, R2).
+    // Serial-only — Buttplug ignores these entirely.
+    private class AxisState
+    {
+        public List<Action> Actions = new List<Action>();
+        public int Index = 0;
+    }
+
+    // Maps T-code axis name → its loaded script state.
+    // Explicitly System.Collections.Generic — AxisState is a C# class, not a Godot Variant.
+    private readonly System.Collections.Generic.Dictionary<string, AxisState> _axes =
+        new System.Collections.Generic.Dictionary<string, AxisState>();
+
+    private static readonly string[] KnownAxes = { "L1", "L2", "R0", "R1", "R2" };
+
+    private enum OutputMode { Buttplug, Serial }
+
+    private List<Action> _actions = new List<Action>();
+    private bool _playing = false;
+    private double _positionMs = 0.0;
+    private int _actionIndex = 0;
+    private bool? _isLinearDevice = null;
+    private int _deviceIndex = -1;
+    private bool _syncedThisFrame = false;
+    private OutputMode _outputMode = OutputMode.Buttplug;
+    private bool _outputResolved = false;
+    private int _rangeMin = 0;
+    private int _rangeMax = 100;
+
+    // Storyboard filler — alternating stroke played while a storyboard screen is
+    // open so the device doesn't sit idle. Independent of _playing / the funscript.
+    private bool _fillerActive = false;
+    private double _fillerElapsedMs = 0.0;
+    private int _fillerHalfCycleMs = 2000; // ms per half-stroke (hi→lo or lo→hi)
+    private int _fillerLo = 0;
+    private int _fillerHi = 100;
+    private bool _fillerGoingToLo = false; // false = first command goes to hi
+    private double _fillerVibTickMs = 0.0;
+    private const double FillerVibTickIntervalMs = 50.0;
+
+    // Ease-in state — blends output from neutral (50) toward the script position
+    // at the start of each round, journey, or resume-from-pause.
+    private bool _easing = false;
+    private double _easeStartMs = 0.0;
+    private double _easeDurationMs = 0.0;
+    private const float EaseFromPos = 50f;
+    private const float EaseSpeedUnitsPerMs = 40f / 1000f; // 40 units/sec
+    private const double EaseMinMs = 50.0;
+    private const double EaseMaxMs = 1500.0;
+
+    public bool Playing => _playing;
+    public int ActionCount => _actions.Count;
+
+    // Cached autoload references — resolved once instead of looked up per-call
+    // (some were hit every frame, per axis, inside _Process). FunscriptPlayer is
+    // a late autoload, so all of these exist by the time _Ready runs.
+    private SerialDeviceService _serial;
+    private ButtplugService _buttplug;
+    private InventoryService _inventory;
+    private ScoreService _score;
+    private Node _settings;
+
+    public override void _Ready()
+    {
+        _serial = GetNode<SerialDeviceService>("/root/SerialDeviceService");
+        _buttplug = GetNode<ButtplugService>("/root/ButtplugService");
+        _inventory = GetNode<InventoryService>("/root/InventoryService");
+        _score = GetNode<ScoreService>("/root/ScoreService");
+        _settings = GetNode("/root/SettingsService");
+    }
+
+    /// Push updated range-clamp values directly into the player.
+    /// Called by the Options screen on every slider change so mid-playback
+    /// adjustments take effect on the very next SendCommand without needing
+    /// a round restart.
+    public void SetRangeClamp(int min, int max)
+    {
+        _rangeMin = min;
+        _rangeMax = max;
+    }
+
+    public void LoadFunscript(string path)
+    {
+        _actions.Clear();
+        _actionIndex = 0;
+        _positionMs = 0.0;
+        _playing = false;
+        _isLinearDevice = null;
+
+        foreach (var kv in _axes)
+            kv.Value.Index = 0;
+
+        string absPath = ProjectSettings.GlobalizePath(path);
+        using var funscriptFile = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
+        if (funscriptFile == null)
+        {
+            GD.PrintErr($"FunscriptPlayer: cannot open {path}");
+            return;
+        }
+
+        var parser = new Json();
+        if (parser.Parse(funscriptFile.GetAsText()) != Error.Ok)
+        {
+            GD.PrintErr($"FunscriptPlayer: JSON parse error in {path}");
+            return;
+        }
+
+        var funscript = parser.Data.AsGodotDictionary();
+        var rawActions = funscript.ContainsKey("actions") ? funscript["actions"].AsGodotArray() : new Godot.Collections.Array();
+        foreach (var rawAction in rawActions)
+        {
+            var a = rawAction.AsGodotDictionary();
+            _actions.Add(new Action
+            {
+                AtMs = a.ContainsKey("at") ? a["at"].AsSingle() : 0f,
+                Pos = a.ContainsKey("pos") ? a["pos"].AsInt32() : 0,
+            });
+        }
+    }
+
+    private const uint EaseDurationMs = 500;
+    private const double CenterPosition = 0.5;
+
+    // Load a secondary-axis funscript. Call before Play().
+    // axis: T-code name, e.g. "L1", "R0".
+    public void LoadAxisScript(string axis, string path)
+    {
+        var state = new AxisState();
+        string absPath = ProjectSettings.GlobalizePath(path);
+        using var funscriptFile = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
+        if (funscriptFile == null)
+        {
+            GD.PrintErr($"FunscriptPlayer: cannot open axis script {path}");
+            return;
+        }
+        var parser = new Json();
+        if (parser.Parse(funscriptFile.GetAsText()) != Error.Ok)
+        {
+            GD.PrintErr($"FunscriptPlayer: JSON parse error in axis script {path}");
+            return;
+        }
+        var funscript = parser.Data.AsGodotDictionary();
+        var rawActions = funscript.ContainsKey("actions") ? funscript["actions"].AsGodotArray() : new Godot.Collections.Array();
+        foreach (var rawAction in rawActions)
+        {
+            var a = rawAction.AsGodotDictionary();
+            state.Actions.Add(new Action
+            {
+                AtMs = a.ContainsKey("at") ? a["at"].AsSingle() : 0f,
+                Pos = a.ContainsKey("pos") ? a["pos"].AsInt32() : 0,
+            });
+        }
+        _axes[axis] = state;
+    }
+
+    // Remove all secondary axis scripts (call before loading a new round).
+    public void ClearAxisScripts()
+    {
+        _axes.Clear();
+    }
+
+    // Send all known axes that have NO loaded script to neutral (50 → 0.5) so the
+    // device doesn't stay wherever it was from a previous round.
+    // Only runs when at least one axis script is loaded — single-axis devices
+    // (which have no axis scripts) receive no unnecessary secondary-axis traffic.
+    private void _SendNeutralToUnloadedAxes()
+    {
+        if (_outputMode != OutputMode.Serial)
+            return;
+        if (_axes.Count == 0)
+            return; // no multi-axis scripts → nothing to park
+
+        var serial = _serial;
+        if (serial == null || !serial.SerialConnected)
+            return;
+
+        foreach (var axis in KnownAxes)
+        {
+            if (!_axes.ContainsKey(axis))
+                serial.SendAxis(axis, EaseDurationMs, 0.5);
+        }
+    }
+
+    public void Play()
+    {
+        _playing = true;
+        ResolveOutput();
+        _SendNeutralToUnloadedAxes();
+        _StartEaseIn();
+    }
+
+    public void Pause()
+    {
+        _playing = false;
+        _easing = false;
+        EaseToNeutral();
+    }
+
+    public void Resume()
+    {
+        _playing = true;
+        _StartEaseIn();
+    }
+
+    public void Stop()
+    {
+        _playing = false;
+        _easing = false;
+        _fillerActive = false; // cancel any storyboard filler that may still be running
+
+        EaseToNeutral();
+        _positionMs = 0.0;
+        _actionIndex = 0;
+
+        foreach (var kv in _axes)
+            kv.Value.Index = 0;
+
+        _isLinearDevice = null;
+        _deviceIndex = -1;
+        _outputResolved = false;
+    }
+
+    // Begin the storyboard filler: alternating hi→lo→hi strokes at the given
+    // half-cycle speed. Respects the device range clamp but not inventory effects.
+    // lo/hi are in the same 0–100 scale as funscript positions.
+    public void StartFiller(int lo, int hi, int halfCycleMs)
+    {
+        _fillerLo = lo;
+        _fillerHi = hi;
+        _fillerHalfCycleMs = Math.Max(100, halfCycleMs);
+        _fillerElapsedMs = 0.0;
+        _fillerGoingToLo = false; // first stroke goes to hi, then alternates
+        _fillerVibTickMs = 0.0;
+        _fillerActive = true;
+        ResolveOutput();
+        _SendFillerCommand(); // fire immediately so there's no leading silence
+    }
+
+    // Stop the filler and ease the device back to neutral.
+    public void StopFiller()
+    {
+        if (!_fillerActive) return;
+        _fillerActive = false;
+        EaseToNeutral();
+    }
+
+    // Compute ease-in parameters from the first upcoming script action.
+    // Duration is proportional to how far that position is from neutral (50),
+    // so the device always approaches at a consistent speed regardless of gap size.
+    // Skipped entirely for vibrators — intensity jumps are not jarring the way
+    // sudden linear strokes are, so no ease is needed.
+    private void _StartEaseIn()
+    {
+        if (_isLinearDevice == false)
+            return; // vibrators: no ease-in
+
+        if (_actions.Count == 0)
+            return;
+
+        int idx = Math.Min(_actionIndex, _actions.Count - 1);
+        float gap = Math.Abs(_actions[idx].Pos - EaseFromPos);
+
+        if (gap <= 2f)
+        {
+            _easing = false;
+            return;
+        }
+
+        _easeDurationMs = Math.Clamp(gap / EaseSpeedUnitsPerMs, EaseMinMs, EaseMaxMs);
+        _easeStartMs = _positionMs;
+        _easing = true;
+    }
+
+    // Send a gentle "go to neutral" command so the device doesn't stay
+    // mid-stroke or vibrating when playback halts. Linear → midpoint,
+    // vibrator → 0 intensity. Safe to call when nothing is connected.
+    // For serial devices, all loaded secondary axes are also returned to 0.5.
+    private void EaseToNeutral()
+    {
+        ResolveOutput();
+
+        if (_outputMode == OutputMode.Serial)
+        {
+            var serial = _serial;
+            if (serial != null && serial.SerialConnected)
+            {
+                serial.SendLinear(EaseDurationMs, CenterPosition);
+                // Return every loaded secondary axis to neutral so none stay
+                // mid-position after a pause, stop, or mid-round exit.
+                foreach (var axis in _axes.Keys)
+                    serial.SendAxis(axis, EaseDurationMs, 0.5);
+            }
+            return;
+        }
+
+        var bp = _buttplug;
+        if (bp == null || !bp.BpConnected || _deviceIndex < 0)
+            return;
+
+        if (_isLinearDevice == true)
+            bp.SendLinear(_deviceIndex, EaseDurationMs, CenterPosition);
+        else
+            bp.SendVibrate(_deviceIndex, 0.0);
+    }
+
+    // Call this each frame from GameLoop to keep funscript in sync with the video clock.
+    // Only updates _positionMs — _Process is responsible for dispatching due actions.
+    public void SyncTo(double videoPositionSec)
+    {
+        _positionMs = videoPositionSec * 1000.0;
+        _syncedThisFrame = true;
+    }
+
+    public override void _Process(double delta)
+    {
+        if (_playing && _actions.Count > 0)
+        {
+            // When synced to a video clock, SyncTo already set _positionMs this frame.
+            // Only accumulate delta in free-running mode (no video / funscript-only).
+            if (_syncedThisFrame)
+                _syncedThisFrame = false;
+            else
+                _positionMs += delta * 1000.0;
+
+            while (_actionIndex < _actions.Count)
+            {
+                if (_actions[_actionIndex].AtMs > _positionMs)
+                    break;
+
+                SendCommand(_actionIndex);
+                _actionIndex++;
+            }
+
+            // Dispatch secondary axes (serial only). Applies the same smoothstep
+            // ease-in as L0 so all axes blend in together from neutral at round start.
+            if (_outputMode == OutputMode.Serial)
+            {
+                var serial = _serial;
+                if (serial != null && serial.SerialConnected)
+                {
+                    // Compute ease blend factor once for this batch of axis commands.
+                    // _easing may already be false (cleared by L0's SendCommand above),
+                    // which is fine — both axes will stop easing at the same moment.
+                    float easeSmooth = 1f;
+                    if (_easing)
+                    {
+                        double elapsed = _positionMs - _easeStartMs;
+                        float t = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
+                        easeSmooth = t * t * (3f - 2f * t); // smoothstep
+                    }
+
+                    foreach (var multiaxis in _axes)
+                    {
+                        string axis = multiaxis.Key;
+                        AxisState state = multiaxis.Value;
+                        while (state.Index < state.Actions.Count)
+                        {
+                            if (state.Actions[state.Index].AtMs > _positionMs)
+                                break;
+
+                            int idx = state.Index;
+                            if (idx + 1 < state.Actions.Count)
+                            {
+                                int nextPos = state.Actions[idx + 1].Pos;
+                                // Blend toward neutral (EaseFromPos = 50) during ease-in.
+                                if (_easing || easeSmooth < 1f)
+                                    nextPos = (int)Math.Round(EaseFromPos + (nextPos - EaseFromPos) * easeSmooth);
+
+                                double targetNorm = nextPos / 100.0;
+                                uint durMs = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
+                                serial.SendAxis(axis, durMs, targetNorm);
+                            }
+                            state.Index++;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Storyboard filler runs independently of normal funscript playback.
+        if (_fillerActive)
+        {
+            _fillerElapsedMs += delta * 1000.0;
+            if (_fillerElapsedMs >= _fillerHalfCycleMs)
+            {
+                _fillerElapsedMs -= _fillerHalfCycleMs;
+                _fillerGoingToLo = !_fillerGoingToLo;
+                _SendFillerCommand();
+            }
+
+            // Vibrators can't interpolate, so update them frequently with a
+            // triangle-wave intensity that mirrors the linear stroke position.
+            if (_isLinearDevice == false)
+            {
+                _fillerVibTickMs += delta * 1000.0;
+                if (_fillerVibTickMs >= FillerVibTickIntervalMs)
+                {
+                    _fillerVibTickMs = 0.0;
+                    _SendFillerVibrateTick();
+                }
+            }
+        }
+    }
+
+    // Send a single linear command to the device for the current filler direction.
+    private void _SendFillerCommand()
+    {
+        int target = _fillerGoingToLo ? _fillerLo : _fillerHi;
+        target = Math.Clamp(target, _rangeMin, _rangeMax);
+        uint dur = (uint)_fillerHalfCycleMs;
+
+        if (_outputMode == OutputMode.Serial)
+        {
+            var serial = _serial;
+            if (serial != null && serial.SerialConnected)
+                serial.SendLinear(dur, target / 100.0);
+            return;
+        }
+
+        var bp = _buttplug;
+        if (bp == null || !bp.BpConnected || _deviceIndex < 0) return;
+
+        if (_isLinearDevice == true)
+            bp.SendLinear(_deviceIndex, dur, target / 100.0);
+        // Vibrators are handled by _SendFillerVibrateTick, not here.
+    }
+
+    // Compute current triangle-wave intensity for a vibrator and send it.
+    private void _SendFillerVibrateTick()
+    {
+        double t = Math.Clamp(_fillerElapsedMs / _fillerHalfCycleMs, 0.0, 1.0);
+        double fromPos = _fillerGoingToLo ? _fillerHi : _fillerLo;
+        double toPos = _fillerGoingToLo ? _fillerLo : _fillerHi;
+        double pos = fromPos + (toPos - fromPos) * t;
+        pos = Math.Clamp(pos, _rangeMin, _rangeMax);
+
+        var bp = _buttplug;
+        if (bp == null || !bp.BpConnected || _deviceIndex < 0) return;
+        bp.SendVibrate(_deviceIndex, pos / 100.0);
+    }
+
+    private void ResolveOutput()
+    {
+        if (_outputResolved)
+            return;
+
+        string mode = _settings.Call("get_output_mode").AsString();
+        _outputMode = mode == "serial" ? OutputMode.Serial : OutputMode.Buttplug;
+
+        // Cache device range limits so SendCommand doesn't hit disk per-action.
+        _rangeMin = _settings.Call("get_range_min").AsInt32();
+        _rangeMax = _settings.Call("get_range_max").AsInt32();
+
+        if (_outputMode == OutputMode.Serial)
+        {
+            // Serial T-code devices are always linear; nothing else to resolve.
+            _isLinearDevice = true;
+            _deviceIndex = 0;
+        }
+        else
+        {
+            var bp = _buttplug;
+            if (bp != null)
+            {
+                _deviceIndex = bp.GetSelectedDeviceIndex();
+                _isLinearDevice = _deviceIndex >= 0 && bp.DeviceSupportsLinear(_deviceIndex);
+            }
+        }
+        _outputResolved = true;
+    }
+
+    private void SendCommand(int index)
+    {
+        ResolveOutput();
+
+        var inv = _inventory;
+        var effects = inv?.GetActiveEffects();
+
+        if (effects != null && HasBlockEffect(effects))
+            return;
+
+        int currentPos = TransformPos(_actions[index].Pos, effects);
+        int nextPos = index + 1 < _actions.Count ? TransformPos(_actions[index + 1].Pos, effects) : currentPos;
+
+        // Apply user-configured hard range clamp (device settings → Position Clamp).
+        // Runs after inventory effects so shop modifiers compose correctly with the limit.
+        currentPos = Math.Clamp(currentPos, _rangeMin, _rangeMax);
+        nextPos = Math.Clamp(nextPos, _rangeMin, _rangeMax);
+
+        // Ease-in blend: interpolate from neutral (50) toward the script positions
+        // over the computed ease duration. Both current and next are blended so the
+        // device doesn't receive an inconsistent target during the blend window.
+        // Vibrators are exempt — _StartEaseIn() never sets _easing for them, but
+        // guard here too so any stale flag can never affect vibrator output.
+        if (_easing && _isLinearDevice != false)
+        {
+            double elapsed = _positionMs - _easeStartMs;
+            float t = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
+            // Smoothstep (ease-in-out Hermite) — feels natural for device motion.
+            float smooth = t * t * (3f - 2f * t);
+            currentPos = (int)Math.Round(EaseFromPos + (currentPos - EaseFromPos) * smooth);
+            nextPos = (int)Math.Round(EaseFromPos + (nextPos - EaseFromPos) * smooth);
+            if (elapsed >= _easeDurationMs)
+                _easing = false;
+        }
+
+        if (index + 1 < _actions.Count)
+        {
+            int amplitude = Math.Abs(nextPos - currentPos);
+            _score?.AddStroke(amplitude);
+        }
+
+        if (_outputMode == OutputMode.Serial)
+        {
+            var serial = _serial;
+
+            if (serial == null || !serial.SerialConnected)
+                return;
+
+            if (index + 1 >= _actions.Count)
+                return;
+
+            double targetNormalised = nextPos / 100.0;
+            uint durationMs = (uint)Math.Max(1, (int)(_actions[index + 1].AtMs - _actions[index].AtMs));
+            serial.SendLinear(durationMs, targetNormalised);
+
+            return;
+        }
+
+        var bp = _buttplug;
+        if (bp == null || !bp.BpConnected || _deviceIndex < 0)
+            return;
+
+        if (_isLinearDevice == true)
+        {
+            if (index + 1 >= _actions.Count)
+                return;
+
+            double targetNormalised = nextPos / 100.0;
+            uint durationMs = (uint)Math.Max(1, (int)(_actions[index + 1].AtMs - _actions[index].AtMs));
+            bp.SendLinear(_deviceIndex, durationMs, targetNormalised);
+        }
+        else
+        {
+            // Vibrators have no stroke direction — just hold the current keyframe intensity.
+            bp.SendVibrate(_deviceIndex, currentPos / 100.0);
+        }
+    }
+
+    private static bool HasBlockEffect(Godot.Collections.Array effects)
+    {
+        foreach (var e in effects)
+        {
+            var d = e.AsGodotDictionary();
+            if (d.ContainsKey("kind") && d["kind"].AsString() == "block")
+                return true;
+        }
+        return false;
+    }
+
+    // Scale around centre, then remap into clamp range. Multiple effects of the
+    // same kind stack multiplicatively (scale) or successively (clamp).
+    private static int TransformPos(int rawPos, Godot.Collections.Array effects)
+    {
+        if (effects == null || effects.Count == 0) 
+            return rawPos;
+
+        float pos = rawPos;
+        foreach (var effect in effects)
+        {
+            var effectProp = effect.AsGodotDictionary();
+            if (effectProp.ContainsKey("kind") && effectProp["kind"].AsString() == "scale" && effectProp.ContainsKey("factor"))
+            {
+                float factor = effectProp["factor"].AsSingle();
+                pos = 50f + (pos - 50f) * factor;
+            }
+        }
+
+        foreach (var effect in effects)
+        {
+            var effectProp = effect.AsGodotDictionary();
+            if (effectProp.ContainsKey("kind") && effectProp["kind"].AsString() == "clamp")
+            {
+                float minV = effectProp.ContainsKey("min") ? effectProp["min"].AsSingle() : 0f;
+                float maxV = effectProp.ContainsKey("max") ? effectProp["max"].AsSingle() : 100f;
+                pos = minV + Math.Clamp(pos, 0f, 100f) / 100f * (maxV - minV);
+            }
+        }
+
+        pos = Math.Clamp(pos, 0f, 100f);
+
+        return (int)Math.Round(pos);
+    }
 }

@@ -79,8 +79,10 @@ public partial class ButtplugService : Node
 	{
 		if (what != NotificationWMCloseRequest && what != NotificationExitTree)
 			return;
+
 		if (_client?.Connected != true)
 			return;
+
 		try
 		{
 			await _client.DisconnectAsync();

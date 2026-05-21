@@ -106,6 +106,7 @@ public partial class GameState : Node
 		var item = CurrentItem();
 		if (item.ContainsKey("type") && item["type"].AsString() == "round")
 			return item["data"].AsGodotDictionary();
+
 		return new Dictionary();
 	}
 
@@ -115,6 +116,7 @@ public partial class GameState : Node
 		var item = CurrentItem();
 		if (item.ContainsKey("type") && item["type"].AsString() == "fork")
 			return item["data"].AsGodotDictionary();
+
 		return new Dictionary();
 	}
 
@@ -124,6 +126,7 @@ public partial class GameState : Node
 		var item = CurrentItem();
 		if (item.ContainsKey("type") && item["type"].AsString() == "shop")
 			return item["data"].AsGodotDictionary();
+
 		return new Dictionary();
 	}
 
@@ -133,6 +136,7 @@ public partial class GameState : Node
 		var item = CurrentItem();
 		if (item.ContainsKey("type") && item["type"].AsString() == "storyboard")
 			return item["data"].AsGodotDictionary();
+
 		return new Dictionary();
 	}
 
@@ -152,7 +156,7 @@ public partial class GameState : Node
 		if (pathIndex < 0 || pathIndex >= paths.Count)
 			pathIndex = 0;
 
-		var chosen       = paths[pathIndex].AsGodotDictionary();
+		var chosen = paths[pathIndex].AsGodotDictionary();
 
 		// Record this choice in the play log so the end screen can show the path taken.
 		// Depth is captured BEFORE incrementing so the header aligns with where the fork
@@ -165,37 +169,37 @@ public partial class GameState : Node
 			["depth"]      = _forkDepth,
 		});
 
-		var chosenRounds      = chosen.ContainsKey("rounds")      ? chosen["rounds"].AsGodotArray()      : new Array();
-		var chosenShops       = chosen.ContainsKey("shops")       ? chosen["shops"].AsGodotArray()       : new Array();
+		var chosenRounds = chosen.ContainsKey("rounds")  ? chosen["rounds"].AsGodotArray() : new Array();
+		var chosenShops = chosen.ContainsKey("shops") ? chosen["shops"].AsGodotArray() : new Array();
 		var chosenStoryboards = chosen.ContainsKey("storyboards") ? chosen["storyboards"].AsGodotArray() : new Array();
-		var chosenForks       = chosen.ContainsKey("forks")       ? chosen["forks"].AsGodotArray()       : new Array();
+		var chosenForks = chosen.ContainsKey("forks")  ? chosen["forks"].AsGodotArray() : new Array();
 
 		// Interleave path rounds, shops, storyboards, and nested forks by the same sort-key
 		// scheme as BuildSequence so authoring order is preserved on resolution.
 		var subItems = new List<(int SortKey, Dictionary Data)>();
-		foreach (var r in chosenRounds)
+		foreach (var chosenRound in chosenRounds)
 		{
-			var rd = r.AsGodotDictionary();
-			int order = rd.ContainsKey("order") ? rd["order"].AsInt32() : 0;
-			subItems.Add((order * 3, new Dictionary { ["type"] = "round", ["data"] = rd }));
+			var roundData = chosenRound.AsGodotDictionary();
+			int order = roundData.ContainsKey("order") ? roundData["order"].AsInt32() : 0;
+			subItems.Add((order * 3, new Dictionary { ["type"] = "round", ["data"] = roundData }));
 		}
-		foreach (var sb in chosenStoryboards)
+		foreach (var choseStoryboard in chosenStoryboards)
 		{
-			var sbd = sb.AsGodotDictionary();
-			int order = sbd.ContainsKey("order") ? sbd["order"].AsInt32() : 0;
-			subItems.Add((order * 3, new Dictionary { ["type"] = "storyboard", ["data"] = sbd }));
+			var storyboardData = choseStoryboard.AsGodotDictionary();
+			int order = storyboardData.ContainsKey("order") ? storyboardData["order"].AsInt32() : 0;
+			subItems.Add((order * 3, new Dictionary { ["type"] = "storyboard", ["data"] = storyboardData }));
 		}
-		foreach (var s in chosenShops)
+		foreach (var chosenShop in chosenShops)
 		{
-			var sd = s.AsGodotDictionary();
-			int afterOrder = sd.ContainsKey("after_order") ? sd["after_order"].AsInt32() : 0;
-			subItems.Add((afterOrder * 3 + 1, new Dictionary { ["type"] = "shop", ["data"] = sd }));
+			var shopData = chosenShop.AsGodotDictionary();
+			int afterOrder = shopData.ContainsKey("after_order") ? shopData["after_order"].AsInt32() : 0;
+			subItems.Add((afterOrder * 3 + 1, new Dictionary { ["type"] = "shop", ["data"] = shopData }));
 		}
-		foreach (var nf in chosenForks)
+		foreach (var chosenFork in chosenForks)
 		{
-			var nfd = nf.AsGodotDictionary();
-			int afterOrder = nfd.ContainsKey("after_order") ? nfd["after_order"].AsInt32() : 0;
-			subItems.Add((afterOrder * 3 + 2, new Dictionary { ["type"] = "fork", ["data"] = nfd }));
+			var chosenForkData = chosenFork.AsGodotDictionary();
+			int afterOrder = chosenForkData.ContainsKey("after_order") ? chosenForkData["after_order"].AsInt32() : 0;
+			subItems.Add((afterOrder * 3 + 2, new Dictionary { ["type"] = "fork", ["data"] = chosenForkData }));
 		}
 		subItems.Sort((a, b) => a.SortKey.CompareTo(b.SortKey));
 
@@ -216,9 +220,7 @@ public partial class GameState : Node
 		_seqIndex++;
 		// Consume any fork_end sentinels, decrementing depth for each one.
 		// This correctly handles back-to-back sentinel runs when nested forks end together.
-		while (_seqIndex < _sequence.Count &&
-		       _sequence[_seqIndex].ContainsKey("type") &&
-		       _sequence[_seqIndex]["type"].AsString() == "fork_end")
+		while (_seqIndex < _sequence.Count && _sequence[_seqIndex].ContainsKey("type") &&  _sequence[_seqIndex]["type"].AsString() == "fork_end")
 		{
 			_forkDepth = _forkDepth > 0 ? _forkDepth - 1 : 0;
 			_seqIndex++;
@@ -274,6 +276,7 @@ public partial class GameState : Node
 		var result = new Array();
 		foreach (var entry in _playLog)
 			result.Add(entry);
+
 		return result;
 	}
 

@@ -235,11 +235,11 @@ public partial class InventoryService : Node
 
 	public Array GetActiveEffects()
 	{
-		var arr = new Array();
+		var activeEffects = new Array();
 		foreach (var fx in _active)
-			arr.Add(fx);
+			activeEffects.Add(fx);
 
-		return arr;
+		return activeEffects;
 	}
 
 	// Remaining seconds for the chip countdown text. Returns 0 if expired.
