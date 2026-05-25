@@ -356,14 +356,22 @@ static func find_cover_image(path: String) -> String:
 	var media_path: String = path + "/media"
 	var media_dir: DirAccess = DirAccess.open(media_path)
 	if media_dir != null:
+		# Scan once: prefer a file named "cover.*" — fork/storyboard/boss images
+		# are also stored in media/ and must not be mistaken for the journey cover.
+		var fallback: String = ""
 		media_dir.list_dir_begin()
 		var mfname: String = media_dir.get_next()
 		while mfname != "":
 			if not media_dir.current_is_dir() and mfname.get_extension().to_lower() in IMAGE_EXTS:
-				media_dir.list_dir_end()
-				return media_path + "/" + mfname
+				if mfname.get_basename().to_lower() == "cover":
+					media_dir.list_dir_end()
+					return media_path + "/" + mfname
+				elif fallback == "":
+					fallback = media_path + "/" + mfname
 			mfname = media_dir.get_next()
 		media_dir.list_dir_end()
+		if fallback != "":
+			return fallback
 
 	# Fallback: old journeys stored the cover at the journey root.
 	var dir: DirAccess = DirAccess.open(path)

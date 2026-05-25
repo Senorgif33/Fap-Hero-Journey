@@ -13,6 +13,7 @@ config_version=5
 config/name="Fap Hero Journey"
 run/main_scene="uid://2kqlt5tkvd2b"
 config/features=PackedStringArray("4.6", "C#", "Forward Plus")
+config/icon="uid://cirsabclr0k0e"
 
 [autoload]
 
