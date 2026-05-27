@@ -471,8 +471,17 @@ func _on_save_pressed() -> void:
 		return
 
 	var folder_name: String = JourneyData.sanitize_folder_name(journey_name)
-	var journey_dir: String = JOURNEYS_DIR + "/" + folder_name
-	var abs_dir: String     = ProjectSettings.globalize_path(journey_dir)
+	var final_journey_dir: String = JOURNEYS_DIR + "/" + folder_name
+	var final_abs_dir: String     = ProjectSettings.globalize_path(final_journey_dir)
+
+	# Stage the whole save to a sibling temp folder so a mid-save failure or
+	# user cancel can roll back cleanly — the existing journey on disk is never
+	# touched until the swap at the end. The dot prefix makes JourneyScanner
+	# skip leftover staging folders if the app crashes before the swap.
+	var staging_journey_dir: String = JOURNEYS_DIR + "/.~save_" + folder_name
+	var abs_dir: String             = ProjectSettings.globalize_path(staging_journey_dir)
+	if DirAccess.dir_exists_absolute(abs_dir):
+		JourneyData.delete_dir_recursive(abs_dir)
 	DirAccess.make_dir_recursive_absolute(abs_dir)
 
 	# All images (cover + storyboard backgrounds + line images + fork path
@@ -609,6 +618,7 @@ func _on_save_pressed() -> void:
 					var ok: bool = await _transcode_video(vid_src, vid_dst, info["duration"], modal)
 					if not ok:
 						if modal: modal.queue_free()
+						JourneyData.delete_dir_recursive(abs_dir)
 						_show_status("Transcoding cancelled. Journey not saved.", true)
 						_save_btn.disabled = false
 						return
@@ -628,19 +638,17 @@ func _on_save_pressed() -> void:
 							func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot))
 						if not copy_ok:
 							if modal: modal.queue_free()
+							JourneyData.delete_dir_recursive(abs_dir)
 							_show_status("Save cancelled. Journey not saved." if _transcode_cancel \
 								else "Failed to copy video for round \"%s\"." % round_name, true)
 							_save_btn.disabled = false
 							return
 						_delete_stale_files(round_dir, vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
 
-			# If this round was renamed, remove the old folder now that all files
-			# have been written to the new one.
-			var orig_folder: String = item.get("original_folder", "")
-			if orig_folder != "":
-				var orig_abs: String = ProjectSettings.globalize_path(orig_folder)
-				if orig_abs != round_dir and DirAccess.dir_exists_absolute(orig_abs):
-					JourneyData.delete_dir_recursive(orig_abs)
+			# (Renamed-round cleanup happens implicitly at swap time: the old
+			# journey folder is deleted wholesale, taking any stale round
+			# subfolders with it. Touching the live folder mid-save would break
+			# the staging rollback on a later failure.)
 
 			rounds_json.append({
 				"Name":           round_name,
@@ -663,6 +671,7 @@ func _on_save_pressed() -> void:
 			# A cancelled video copy deep inside a fork path unwinds to here.
 			if _save_aborted:
 				if modal: modal.queue_free()
+				JourneyData.delete_dir_recursive(abs_dir)
 				_show_status("Save cancelled. Journey not saved.", true)
 				_save_btn.disabled = false
 				return
@@ -682,20 +691,27 @@ func _on_save_pressed() -> void:
 		"Storyboards": storyboards_json,
 	}
 
-	var f: FileAccess = FileAccess.open(journey_dir + "/journey.json", FileAccess.WRITE)
+	var f: FileAccess = FileAccess.open(staging_journey_dir + "/journey.json", FileAccess.WRITE)
 	if f == null:
+		JourneyData.delete_dir_recursive(abs_dir)
 		_show_status("Failed to write journey.json — check folder permissions.", true)
 		_save_btn.disabled = false
 		return
 	f.store_string(JSON.stringify(data, "\t"))
 	f.close()
 
-	# If editing renamed the journey, the save wrote a new folder — remove the
-	# stale original (its old journey.json, media/, and any leftover subfolders).
+	# Swap staging → final. The save wrote everything to a temp sibling folder,
+	# so the existing journey is still on disk and untouched. Now: clear the
+	# final target (in-place edit) and the old-name folder (journey rename),
+	# then rename staging into place. Per-round renames don't need explicit
+	# cleanup — they're subdirs that vanish along with the old journey folder.
+	if DirAccess.dir_exists_absolute(final_abs_dir):
+		JourneyData.delete_dir_recursive(final_abs_dir)
 	if _original_journey_folder != "":
 		var old_abs: String = ProjectSettings.globalize_path(_original_journey_folder)
-		if old_abs != abs_dir and DirAccess.dir_exists_absolute(old_abs):
+		if old_abs != final_abs_dir and DirAccess.dir_exists_absolute(old_abs):
 			JourneyData.delete_dir_recursive(old_abs)
+	DirAccess.rename_absolute(abs_dir, final_abs_dir)
 
 	_show_status("Journey saved! Returning to catalogue...", false)
 	await get_tree().create_timer(1.5).timeout
@@ -854,11 +870,9 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 						var pr_boss_dst_name: String = pr_name + "_boss." + pr_boss_src.get_extension()
 						_copy_file(pr_boss_src, pr_dir + "/" + pr_boss_dst_name)
 						pr_boss_image_rel = pr_name + "/" + pr_boss_dst_name
-				var pr_orig_folder: String = pi_item.get("original_folder", "")
-				if pr_orig_folder != "":
-					var pr_orig_abs: String = ProjectSettings.globalize_path(pr_orig_folder)
-					if pr_orig_abs != pr_dir and DirAccess.dir_exists_absolute(pr_orig_abs):
-						JourneyData.delete_dir_recursive(pr_orig_abs)
+				# (Renamed-round cleanup is implicit at swap time — see the
+				# top-level round save above. Deleting the live original mid-
+				# save would break the staging rollback if a later step fails.)
 				path_entry["Rounds"].append({
 					"Name":          pr_name,
 					"Order":         pr_order,
