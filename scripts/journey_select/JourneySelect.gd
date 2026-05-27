@@ -20,7 +20,8 @@ const MODAL_MIN_HEIGHT: int = 600
 const MODAL_COVER_W:    int = 280
 const BORDER_WIDTH:     int = 3
 
-const JOURNEYS_DIR: String = "user://journeys"
+# Journeys root is configurable via Options → Journey Storage Location.
+# Read via SettingsService.get_journeys_dir() so changes take effect next scan.
 
 # Difficulty list is owned by JourneyData (canonical schema) — JourneyData.DIFFICULTIES.
 
@@ -470,7 +471,7 @@ func _confirm_delete() -> void:
 
 # Scanning + journey.json parsing lives in JourneyScanner (RefCounted helper).
 func _scan_journeys() -> void:
-	_journeys = JourneyScanner.scan_all(JOURNEYS_DIR)
+	_journeys = JourneyScanner.scan_all(SettingsService.get_journeys_dir())
 
 
 # ---------------------------------------------------------------------------

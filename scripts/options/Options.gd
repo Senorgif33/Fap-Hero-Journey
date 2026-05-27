@@ -50,6 +50,12 @@ const RESOLUTIONS: Array = [
 
 @onready var _open_folder_btn:      Button       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/JourneysSection/JourneysRow/OpenFolderBtn
 
+# Built dynamically in _build_journey_location_row(). The path label shows the
+# current storage location and updates when the user picks a new folder.
+var _journeys_path_label: Label  = null
+var _journeys_browse_btn: Button = null
+var _journeys_reset_btn:  Button = null
+
 @onready var _output_mode_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeDropdown
 
 @onready var _serial_port_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialPortRow/SerialPortDropdown
@@ -681,6 +687,9 @@ func _apply_layout() -> void:
 	_style_label(filler_hint, UITheme.SEPARATOR, 11, false)
 	filler_section.add_child(filler_hint)
 
+	# ── Journey storage location row (inserted into JourneysSection) ──────────
+	_build_journey_location_row()
+
 	# ── Credits section ───────────────────────────────────────────────────────
 	var credits_section: VBoxContainer = VBoxContainer.new()
 	credits_section.add_theme_constant_override("separation", 12)
@@ -1237,10 +1246,296 @@ func _connect_signals() -> void:
 
 
 func _on_open_journeys_folder_pressed() -> void:
-	var abs_path: String = ProjectSettings.globalize_path("user://journeys")
+	var abs_path: String = ProjectSettings.globalize_path(SettingsService.get_journeys_dir())
 	if not DirAccess.dir_exists_absolute(abs_path):
 		DirAccess.make_dir_recursive_absolute(abs_path)
 	OS.shell_open(abs_path)
+
+
+# ---------------------------------------------------------------------------
+# Journey storage location
+# ---------------------------------------------------------------------------
+
+# Builds the "STORAGE LOCATION" row showing the current journeys folder with
+# Browse + Reset buttons, then slots it into JourneysSection above the
+# existing "Open Journeys Folder" row.
+func _build_journey_location_row() -> void:
+	var journeys_section: VBoxContainer = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/JourneysSection
+
+	var loc_row: HBoxContainer = HBoxContainer.new()
+	loc_row.add_theme_constant_override("separation", 12)
+	journeys_section.add_child(loc_row)
+
+	var loc_label: Label = Label.new()
+	loc_label.text = "STORAGE LOCATION"
+	loc_label.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(loc_label, UITheme.WHITE_SOFT, 14, false)
+	loc_row.add_child(loc_label)
+
+	_journeys_path_label = Label.new()
+	_journeys_path_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_journeys_path_label.clip_text = true
+	_style_label(_journeys_path_label, UITheme.PURPLE_BRIGHT, 12, false)
+	loc_row.add_child(_journeys_path_label)
+	_refresh_journeys_path_label()
+
+	_journeys_browse_btn = Button.new()
+	_journeys_browse_btn.text = "📁 BROWSE"
+	_style_button(_journeys_browse_btn, UITheme.PURPLE_MID)
+	_journeys_browse_btn.pressed.connect(_on_journeys_browse_pressed)
+	loc_row.add_child(_journeys_browse_btn)
+
+	_journeys_reset_btn = Button.new()
+	_journeys_reset_btn.text = "↺ RESET"
+	_style_button(_journeys_reset_btn, UITheme.PURPLE_MID)
+	_journeys_reset_btn.pressed.connect(_on_journeys_reset_pressed)
+	loc_row.add_child(_journeys_reset_btn)
+
+	# Slot above the existing Open-Folder row so the location text is visible
+	# first (the open button is the action that uses it).
+	var open_row: Node = journeys_section.get_node("JourneysRow")
+	journeys_section.move_child(loc_row, open_row.get_index())
+
+
+func _refresh_journeys_path_label() -> void:
+	if _journeys_path_label == null:
+		return
+	var path: String = ProjectSettings.globalize_path(SettingsService.get_journeys_dir())
+	_journeys_path_label.text         = path
+	_journeys_path_label.tooltip_text = path
+
+
+func _on_journeys_browse_pressed() -> void:
+	var dialog: FileDialog = FileDialog.new()
+	dialog.access    = FileDialog.ACCESS_FILESYSTEM
+	dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	dialog.title     = "Select Journey Storage Folder"
+	var current_abs: String = ProjectSettings.globalize_path(SettingsService.get_journeys_dir())
+	if DirAccess.dir_exists_absolute(current_abs):
+		dialog.current_dir = current_abs
+	add_child(dialog)
+	dialog.popup_centered(Vector2i(900, 600))
+	dialog.dir_selected.connect(func(picked: String) -> void:
+		dialog.queue_free()
+		_apply_new_journeys_dir(picked)
+	)
+	dialog.canceled.connect(func() -> void: dialog.queue_free())
+
+
+func _on_journeys_reset_pressed() -> void:
+	_apply_new_journeys_dir(ProjectSettings.globalize_path(SettingsService.DEFAULT_JOURNEYS_DIR))
+
+
+# Confirms the change with the user, moves any existing journeys from the old
+# location to the new one, and persists the setting. Same-volume moves use a
+# fast directory rename; cross-volume moves fall back to recursive copy + delete.
+func _apply_new_journeys_dir(new_dir_abs: String) -> void:
+	var old_dir_abs: String = ProjectSettings.globalize_path(SettingsService.get_journeys_dir())
+	if new_dir_abs == old_dir_abs:
+		return  # No-op when the user picks the same folder.
+
+	# Guard against picking a folder nested inside the current one (or vice
+	# versa) — moving a tree into itself would create infinite recursion and
+	# clobber the source as we copy. globalize_path returns forward-slash form.
+	if new_dir_abs.begins_with(old_dir_abs + "/") \
+			or old_dir_abs.begins_with(new_dir_abs + "/"):
+		var alert: AcceptDialog = AcceptDialog.new()
+		alert.title       = "INVALID FOLDER"
+		alert.dialog_text = "Cannot move journeys into a folder nested inside the current location (or vice versa).\n\nPlease choose a separate folder."
+		add_child(alert)
+		alert.popup_centered()
+		alert.confirmed.connect(func() -> void: alert.queue_free())
+		alert.canceled.connect(func() -> void: alert.queue_free())
+		return
+
+	# Ensure the new folder exists (and its parents).
+	DirAccess.make_dir_recursive_absolute(new_dir_abs)
+
+	var existing: Array = _list_journey_subfolders(old_dir_abs)
+	if existing.is_empty():
+		# Nothing to move — just persist the setting.
+		SettingsService.set_journeys_dir(new_dir_abs)
+		SettingsService.save()
+		_refresh_journeys_path_label()
+		return
+
+	# Confirm with the user before moving — cross-volume moves can take a while.
+	var msg: String = "Move %d journey%s\nfrom %s\nto %s?\n\nLarge journeys may take a while if the drive is different." % [
+		existing.size(),
+		"s" if existing.size() != 1 else "",
+		old_dir_abs,
+		new_dir_abs,
+	]
+	var confirmed: bool = await _show_move_confirm(msg)
+	if not confirmed:
+		return
+
+	# Show modal while moving.
+	var modal: Control = _create_move_modal()
+	add_child(modal)
+
+	var moved:   int = 0
+	var skipped: int = 0
+	var idx:     int = 0
+	for sub_name: String in existing:
+		idx += 1
+		_update_move_modal(modal, "Moving %d / %d — %s" % [idx, existing.size(), sub_name])
+		await get_tree().process_frame
+		var src: String = old_dir_abs + "/" + sub_name
+		var dst: String = new_dir_abs + "/" + sub_name
+		# Collision-safe: don't clobber a journey already at the destination.
+		if DirAccess.dir_exists_absolute(dst):
+			skipped += 1
+			continue
+		if _move_dir(src, dst):
+			moved += 1
+		else:
+			skipped += 1
+
+	modal.queue_free()
+
+	SettingsService.set_journeys_dir(new_dir_abs)
+	SettingsService.save()
+	_refresh_journeys_path_label()
+
+
+# Returns subfolder names in `dir_abs` that look like journey folders —
+# directories, excluding dot-prefixed staging temps and hidden entries.
+func _list_journey_subfolders(dir_abs: String) -> Array:
+	var result: Array = []
+	if not DirAccess.dir_exists_absolute(dir_abs):
+		return result
+	var dir: DirAccess = DirAccess.open(dir_abs)
+	if dir == null:
+		return result
+	dir.list_dir_begin()
+	var fname: String = dir.get_next()
+	while fname != "":
+		if dir.current_is_dir() and not fname.begins_with("."):
+			result.append(fname)
+		fname = dir.get_next()
+	dir.list_dir_end()
+	return result
+
+
+# Fast rename when possible (same volume), otherwise recursive copy + delete.
+func _move_dir(src_abs: String, dst_abs: String) -> bool:
+	if DirAccess.rename_absolute(src_abs, dst_abs) == OK:
+		return true
+	# Cross-volume rename fails — fall back to a streaming copy.
+	if not _copy_dir_recursive(src_abs, dst_abs):
+		# Partial copy left behind — clean it up so we don't leave junk.
+		JourneyData.delete_dir_recursive(dst_abs)
+		return false
+	JourneyData.delete_dir_recursive(src_abs)
+	return true
+
+
+# Recursively copies src_abs → dst_abs. Returns false on any I/O failure.
+func _copy_dir_recursive(src_abs: String, dst_abs: String) -> bool:
+	DirAccess.make_dir_recursive_absolute(dst_abs)
+	var dir: DirAccess = DirAccess.open(src_abs)
+	if dir == null:
+		return false
+	dir.list_dir_begin()
+	var fname: String = dir.get_next()
+	while fname != "":
+		var src_child: String = src_abs + "/" + fname
+		var dst_child: String = dst_abs + "/" + fname
+		if dir.current_is_dir():
+			if not _copy_dir_recursive(src_child, dst_child):
+				dir.list_dir_end()
+				return false
+		else:
+			if DirAccess.copy_absolute(src_child, dst_child) != OK:
+				dir.list_dir_end()
+				return false
+		fname = dir.get_next()
+	dir.list_dir_end()
+	return true
+
+
+# Confirmation dialog for the move action. Returns true on Move, false on Cancel.
+func _show_move_confirm(message: String) -> bool:
+	var popup: ConfirmationDialog = ConfirmationDialog.new()
+	popup.title              = "MOVE JOURNEYS"
+	popup.dialog_text        = message
+	popup.ok_button_text     = "MOVE"
+	popup.cancel_button_text = "CANCEL"
+	add_child(popup)
+	popup.popup_centered()
+	var done:   Array = [false]   # boxed so lambdas can mutate via reference
+	var result: Array = [false]
+	popup.confirmed.connect(func() -> void:
+		result[0] = true
+		done[0]   = true
+	)
+	popup.canceled.connect(func() -> void:
+		result[0] = false
+		done[0]   = true
+	)
+	while not done[0]:
+		await get_tree().process_frame
+	popup.queue_free()
+	return result[0]
+
+
+# Builds the "MOVING JOURNEYS" modal shown during a move operation. The status
+# label inside is updated via _update_move_modal as each journey is processed.
+func _create_move_modal() -> Control:
+	var modal: Control = Control.new()
+	modal.anchor_right  = 1.0
+	modal.anchor_bottom = 1.0
+	modal.mouse_filter  = Control.MOUSE_FILTER_STOP
+
+	var backdrop: ColorRect = ColorRect.new()
+	backdrop.color = Color(0.0, 0.0, 0.0, 0.85)
+	backdrop.anchor_right  = 1.0
+	backdrop.anchor_bottom = 1.0
+	modal.add_child(backdrop)
+
+	var panel: PanelContainer = PanelContainer.new()
+	var ps: StyleBoxFlat = StyleBoxFlat.new()
+	ps.bg_color              = UITheme.PANEL_BG
+	ps.border_color          = UITheme.PURPLE_BRIGHT
+	ps.border_width_left     = 2;  ps.border_width_right    = 2
+	ps.border_width_top      = 2;  ps.border_width_bottom   = 2
+	ps.content_margin_left   = 32; ps.content_margin_right  = 32
+	ps.content_margin_top    = 24; ps.content_margin_bottom = 24
+	panel.add_theme_stylebox_override("panel", ps)
+	panel.anchor_left = 0.5; panel.anchor_right  = 0.5
+	panel.anchor_top  = 0.5; panel.anchor_bottom = 0.5
+	panel.offset_left = -300; panel.offset_right  = 300
+	panel.offset_top  = -80;  panel.offset_bottom = 80
+	modal.add_child(panel)
+
+	var vb: VBoxContainer = VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 14)
+	panel.add_child(vb)
+
+	var title: Label = Label.new()
+	title.text = "MOVING JOURNEYS"
+	_style_label(title, UITheme.PURPLE_BRIGHT, 16, true)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title)
+
+	var status: Label = Label.new()
+	status.name = "Status"
+	status.text = "Starting…"
+	_style_label(status, UITheme.WHITE_SOFT, 13, false)
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+	vb.add_child(status)
+
+	return modal
+
+
+func _update_move_modal(modal: Control, status_text: String) -> void:
+	if modal == null:
+		return
+	var lbl: Label = modal.find_child("Status", true, false) as Label
+	if lbl:
+		lbl.text = status_text
 
 
 func _on_back_pressed() -> void:

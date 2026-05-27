@@ -44,6 +44,7 @@ const DEFAULT_FILLER_ENABLED:    bool   = false
 const DEFAULT_FILLER_HALF_CYCLE: int    = 2000
 const DEFAULT_FILLER_LO:         int    = 0
 const DEFAULT_FILLER_HI:         int    = 100
+const DEFAULT_JOURNEYS_DIR:      String = "user://journeys"
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -133,6 +134,13 @@ func get_filler_lo() -> int:
 func get_filler_hi() -> int:
 	return int(_config.get_value("storyboard_filler", "hi", DEFAULT_FILLER_HI))
 
+# Root folder for journey content. Either the default Godot user-data path
+# (`user://journeys`) or an OS-absolute path the user picked via Options →
+# Journey Storage Location. Consumers that need an OS path can pass the result
+# through `ProjectSettings.globalize_path` — it's a no-op for absolute paths.
+func get_journeys_dir() -> String:
+	return str(_config.get_value("storage", "journeys_dir", DEFAULT_JOURNEYS_DIR))
+
 
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
@@ -208,6 +216,9 @@ func set_filler_lo(value: int) -> void:
 
 func set_filler_hi(value: int) -> void:
 	_config.set_value("storyboard_filler", "hi", value)
+
+func set_journeys_dir(value: String) -> void:
+	_config.set_value("storage", "journeys_dir", value)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────

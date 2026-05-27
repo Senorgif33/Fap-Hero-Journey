@@ -12,7 +12,10 @@ extends Control
 # Globals/UITheme.gd. Local references use UITheme.<COLOR_NAME> / UITheme.style_*.
 
 const TOP_BAR_HEIGHT:  int = 64
-const JOURNEYS_DIR:    String = "user://journeys"
+
+# Journeys root is configurable via Options → Journey Storage Location.
+# Always read via SettingsService.get_journeys_dir() so a path change takes
+# effect on the next save without restarting the scene.
 
 # Difficulty list and file-extension sets live in JourneyData (canonical schema).
 # Referenced here as JourneyData.DIFFICULTIES / JourneyData.IMAGE_EXTENSIONS etc.
@@ -470,15 +473,16 @@ func _on_save_pressed() -> void:
 		_save_btn.disabled = false
 		return
 
-	var folder_name: String = JourneyData.sanitize_folder_name(journey_name)
-	var final_journey_dir: String = JOURNEYS_DIR + "/" + folder_name
+	var journeys_root: String     = SettingsService.get_journeys_dir()
+	var folder_name: String       = JourneyData.sanitize_folder_name(journey_name)
+	var final_journey_dir: String = journeys_root + "/" + folder_name
 	var final_abs_dir: String     = ProjectSettings.globalize_path(final_journey_dir)
 
 	# Stage the whole save to a sibling temp folder so a mid-save failure or
 	# user cancel can roll back cleanly — the existing journey on disk is never
 	# touched until the swap at the end. The dot prefix makes JourneyScanner
 	# skip leftover staging folders if the app crashes before the swap.
-	var staging_journey_dir: String = JOURNEYS_DIR + "/.~save_" + folder_name
+	var staging_journey_dir: String = journeys_root + "/.~save_" + folder_name
 	var abs_dir: String             = ProjectSettings.globalize_path(staging_journey_dir)
 	if DirAccess.dir_exists_absolute(abs_dir):
 		JourneyData.delete_dir_recursive(abs_dir)
