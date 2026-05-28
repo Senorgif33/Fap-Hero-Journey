@@ -233,10 +233,13 @@ public partial class FunscriptPlayer : Node
     {
         if (_maxStrokeSpeed <= 0)
             return durationMs;
+
         int distance = Math.Abs(toPos - fromPos);
+
         if (distance == 0)
             return durationMs;
         uint minMs = (uint)Math.Ceiling(distance * 1000.0 / _maxStrokeSpeed);
+
         return Math.Max(durationMs, minMs);
     }
 
@@ -246,18 +249,21 @@ public partial class FunscriptPlayer : Node
     {
         var state = new AxisState();
         string absPath = ProjectSettings.GlobalizePath(path);
+
         using var funscriptFile = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
         if (funscriptFile == null)
         {
             GD.PrintErr($"FunscriptPlayer: cannot open axis script {path}");
             return;
         }
+
         var parser = new Json();
         if (parser.Parse(funscriptFile.GetAsText()) != Error.Ok)
         {
             GD.PrintErr($"FunscriptPlayer: JSON parse error in axis script {path}");
             return;
         }
+
         var funscript = parser.Data.AsGodotDictionary();
         var rawActions = funscript.ContainsKey("actions") ? funscript["actions"].AsGodotArray() : new Godot.Collections.Array();
         foreach (var rawAction in rawActions)
