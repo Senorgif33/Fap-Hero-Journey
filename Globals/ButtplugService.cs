@@ -145,20 +145,20 @@ public partial class ButtplugService : Node
 	}
 
 	// Treats a device as "linear" (a stroker) if it advertises either of the two
-	// Buttplug v3 linear output types:
-	//   • PositionWithDuration — the classic LinearCmd (target + duration). Used
-	//     by The Handy, OSR2/SR6 via Intiface, Kiiroo Keon, and basically every
-	//     funscript-driven stroker in the wild.
+	// linear output types in Buttplug.Core.Messages.OutputType:
+	//   • HwPositionWithDuration — the classic LinearCmd (target + duration).
+	//     Used by The Handy, OSR2/SR6 via Intiface, Kiiroo Keon, and basically
+	//     every funscript-driven stroker in the wild.
 	//   • Position — newer "go to absolute position immediately" command used by
 	//     a small number of next-gen devices.
-	// Checking only one of the two used to drop the Handy onto the vibrator code
+	// Checking only `Position` used to drop the Handy onto the vibrator code
 	// path, so SendVibrate was sent to a device with no vibrate actuator and
 	// playback was silently dropped.
 	public bool DeviceSupportsLinear(int deviceIndex)
 	{
 		var device = GetDeviceAt(deviceIndex);
 		return device != null && (
-			device.HasOutput(OutputType.PositionWithDuration) ||
+			device.HasOutput(OutputType.HwPositionWithDuration) ||
 			device.HasOutput(OutputType.Position)
 		);
 	}
