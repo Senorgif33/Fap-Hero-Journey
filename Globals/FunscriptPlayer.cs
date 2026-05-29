@@ -402,6 +402,19 @@ public partial class FunscriptPlayer : Node
     // Begin the storyboard filler: alternating hi→lo→hi strokes at the given
     // half-cycle speed. Respects the device range clamp but not inventory effects.
     // lo/hi are in the same 0–100 scale as funscript positions.
+    // Live setter for filler parameters. Used by the Options overlay so a user
+    // tweaking the storyboard-filler sliders during an active storyboard sees
+    // the device respond immediately rather than having to wait for the next
+    // storyboard's filler to start. Safe to call any time; if filler isn't
+    // running these values are seeded for the next StartFiller call.
+    public void SetFillerParams(int lo, int hi, int halfCycleMs)
+    {
+        _fillerLo = lo;
+        _fillerHi = hi;
+        _fillerHalfCycleMs = Math.Max(100, halfCycleMs);
+    }
+
+
     public void StartFiller(int lo, int hi, int halfCycleMs)
     {
         _fillerLo = lo;

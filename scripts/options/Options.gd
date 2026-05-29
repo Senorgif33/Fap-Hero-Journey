@@ -671,6 +671,9 @@ func _apply_layout() -> void:
 	_filler_range_slider.range_changed.connect(func(lo: float, hi: float) -> void:
 		_filler_range_min_lbl.text = "MIN: %d" % roundi(lo)
 		_filler_range_max_lbl.text = "MAX: %d" % roundi(hi)
+		# Apply live so an active storyboard's filler picks up the new range
+		# immediately, not just on the next storyboard.
+		FunscriptPlayer.SetFillerParams(roundi(lo), roundi(hi), _filler_speed_input.text.to_int())
 		_save_settings()
 	)
 	_filler_toggle.toggled.connect(func(pressed: bool) -> void:
@@ -678,6 +681,11 @@ func _apply_layout() -> void:
 		_save_settings()
 	)
 	_filler_speed_input.text_changed.connect(func(_t: String) -> void:
+		# Same live-apply for half-cycle changes.
+		FunscriptPlayer.SetFillerParams(
+			roundi(_filler_range_slider.lo),
+			roundi(_filler_range_slider.hi),
+			_filler_speed_input.text.to_int())
 		_save_settings()
 	)
 

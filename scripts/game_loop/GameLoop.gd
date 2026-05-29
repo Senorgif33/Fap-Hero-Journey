@@ -53,6 +53,13 @@ const BOSS_EFFECT_NAMES: Dictionary = {
 @onready var _options_btn: Button            = $HUD/HUDBar/HUDLayout/OptionsBtn
 @onready var _chips_row:   HBoxContainer     = $HUD/EffectChipsRow
 @onready var _hide_timer:  Timer             = $HUD/HideTimer
+
+# Persistent banner shown at top of screen whenever the *currently selected*
+# output device drops its connection during play. Built dynamically in
+# _apply_layout so the scene file doesn't need a new node. Lives outside the
+# auto-hiding HUD so it stays visible even when the rest of the HUD fades.
+var _device_warning_banner: PanelContainer = null
+var _device_warning_label:  Label          = null
 @onready var _end_timer:   Timer             = $EndTimer
 @onready var _transition:  ColorRect         = $TransitionLayer/TransitionOverlay
 
@@ -431,6 +438,22 @@ func _build_beat_bar() -> void:
 	add_child(_beat_bar)
 
 
+# Brings the beat bar into sync with the current setting. Called after the
+# Options overlay closes so toggling "Beat Bar" mid-game takes effect on the
+# active round instead of requiring the user to exit and re-enter.
+func _refresh_beat_bar_visibility() -> void:
+	var should_show: bool = SettingsService.get_beat_bar_enabled()
+	if should_show and _beat_bar == null:
+		_build_beat_bar()
+		# Seed the new bar with the current round's beats if a round is loaded
+		# so it doesn't start blank.
+		if _beat_bar != null and FunscriptPlayer.ActionCount > 0:
+			_beat_bar.set_beats(FunscriptPlayer.GetBeats())
+	elif not should_show and _beat_bar != null:
+		_beat_bar.queue_free()
+		_beat_bar = null
+
+
 func _build_boss_frame() -> void:
 	_boss_frame = Panel.new()
 	_boss_frame.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -659,6 +682,12 @@ func _on_options_closed() -> void:
 		_video.paused = false
 		FunscriptPlayer.Resume()
 		InventoryService.SetPaused(false)
+	# Output mode may have changed in Options — re-evaluate the disconnect
+	# banner against whatever backend is now selected.
+	_refresh_device_warning()
+	# Beat-bar visibility setting may have toggled — create or destroy the bar
+	# to match the new state without requiring the user to exit the journey.
+	_refresh_beat_bar_visibility()
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +778,46 @@ func _connect_signals() -> void:
 	ScoreService.ScoreChanged.connect(_on_score_changed)
 	CoinService.BalanceChanged.connect(_on_coin_balance_changed)
 	InventoryService.ActiveEffectsChanged.connect(_refresh_effect_chips)
+
+	# Device-connection signals — surface a banner when the currently selected
+	# output device drops its connection, and clear it on reconnect. We watch
+	# both backends so an output-mode change in Options mid-game also picks up
+	# the correct state via _refresh_device_warning().
+	ButtplugService.connect("Connected",      _refresh_device_warning)
+	ButtplugService.connect("Disconnected",   _refresh_device_warning)
+	SerialDeviceService.connect("Connected",    _refresh_device_warning)
+	SerialDeviceService.connect("Disconnected", _refresh_device_warning)
+	_refresh_device_warning()
+
+
+# ---------------------------------------------------------------------------
+# Device connection state
+# ---------------------------------------------------------------------------
+
+# Updates the disconnect banner to reflect the currently selected output mode
+# and that mode's connection state. Called from connect/disconnect signals on
+# both backends, plus once at startup so a session that's already disconnected
+# when the game scene loads still shows the warning.
+#
+# Visible when: output_mode = buttplug and ButtplugService is not connected,
+# OR output_mode = serial and SerialDeviceService is not connected.
+# Hidden when the selected backend is connected (the other backend's state
+# is irrelevant — switching output modes via Options re-runs this check).
+func _refresh_device_warning() -> void:
+	if _device_warning_banner == null:
+		return
+	var mode: String = SettingsService.get_output_mode()
+	var disconnected: bool = false
+	var label_text: String = ""
+	if mode == "serial":
+		disconnected = not SerialDeviceService.SerialConnected
+		label_text   = "●  SERIAL DEVICE DISCONNECTED  —  RECONNECT IN OPTIONS"
+	else:
+		disconnected = not ButtplugService.BpConnected
+		label_text   = "●  DEVICE DISCONNECTED  —  RECONNECT IN OPTIONS"
+	if disconnected:
+		_device_warning_label.text = label_text
+	_device_warning_banner.visible = disconnected
 
 
 # ---------------------------------------------------------------------------
@@ -895,6 +964,38 @@ func _apply_layout() -> void:
 	_chips_row.alignment     = BoxContainer.ALIGNMENT_CENTER
 	_chips_row.add_theme_constant_override("separation", 8)
 	_chips_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	# Device-disconnected banner — pinned to the top edge of the viewport,
+	# centred horizontally, hidden by default. Lives outside _hud so the
+	# auto-hide timer doesn't fade it away.
+	_device_warning_banner = PanelContainer.new()
+	_device_warning_banner.anchor_left   = 0.5
+	_device_warning_banner.anchor_right  = 0.5
+	_device_warning_banner.anchor_top    = 0.0
+	_device_warning_banner.anchor_bottom = 0.0
+	_device_warning_banner.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_device_warning_banner.offset_top    = 12
+	_device_warning_banner.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	_device_warning_banner.visible       = false
+	add_child(_device_warning_banner)
+
+	var banner_style: StyleBoxFlat = StyleBoxFlat.new()
+	banner_style.bg_color              = Color(UITheme.ERROR_SOFT.r, UITheme.ERROR_SOFT.g, UITheme.ERROR_SOFT.b, 0.92)
+	banner_style.border_color          = UITheme.ERROR_SOFT
+	banner_style.border_width_left     = 2; banner_style.border_width_right  = 2
+	banner_style.border_width_top      = 2; banner_style.border_width_bottom = 2
+	banner_style.content_margin_left   = 18; banner_style.content_margin_right  = 18
+	banner_style.content_margin_top    = 8;  banner_style.content_margin_bottom = 8
+	banner_style.corner_radius_top_left     = 6; banner_style.corner_radius_top_right    = 6
+	banner_style.corner_radius_bottom_left  = 6; banner_style.corner_radius_bottom_right = 6
+	_device_warning_banner.add_theme_stylebox_override("panel", banner_style)
+
+	_device_warning_label = Label.new()
+	_device_warning_label.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	_device_warning_label.add_theme_font_size_override("font_size", 13)
+	_device_warning_label.uppercase = true
+	_device_warning_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_device_warning_banner.add_child(_device_warning_label)
 
 
 # ---------------------------------------------------------------------------
