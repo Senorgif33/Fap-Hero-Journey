@@ -1474,3 +1474,5 @@ func _delete_saved_image(path: String) -> void:
 	var user_data: String = ProjectSettings.globalize_path("user://")
 	if abs_path.begins_with(user_data) and FileAccess.file_exists(abs_path):
 		DirAccess.remove_absolute(abs_path)
+
+

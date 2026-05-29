@@ -120,8 +120,13 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 	)
 
 	for raw: Dictionary in raw_rounds:
-		var round_name: String   = raw.get("Name", "Round")
-		var round_folder: String = path + "/" + round_name
+		var round_name: String = raw.get("Name", "Round")
+		# New journeys persist the on-disk folder slug (short, collision-free)
+		# in "FolderName". Old journeys used the human-readable Name as the
+		# folder, so fall back to that when FolderName is absent — keeps the
+		# entire pre-rXXX catalogue loading without migration.
+		var folder_slug: String  = raw.get("FolderName", round_name)
+		var round_folder: String = path + "/" + folder_slug
 
 		var funscript_stats: Dictionary = _resolve_round_stats(raw, path, round_folder)
 
@@ -213,7 +218,10 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 		var raw_pr_rounds: Array = raw_path.get("Rounds", raw_path.get("rounds", []))
 		for raw_pr: Dictionary in raw_pr_rounds:
 			var pr_name: String   = raw_pr.get("Name", raw_pr.get("name", "Round"))
-			var pr_folder: String = journey_path + "/" + pr_name
+			# Fall back to Name for pre-rXXX journeys; new journeys persist the
+			# short folder slug in FolderName.
+			var pr_slug: String   = raw_pr.get("FolderName", raw_pr.get("folder_name", pr_name))
+			var pr_folder: String = journey_path + "/" + pr_slug
 
 			var pr_fs: Dictionary = _resolve_round_stats(raw_pr, journey_path, pr_folder)
 

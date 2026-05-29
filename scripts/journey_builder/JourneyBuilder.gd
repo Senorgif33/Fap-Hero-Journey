@@ -75,6 +75,21 @@ var _transcode_pid:    int  = -1
 # can abort the whole save cleanly.
 var _save_aborted: bool = false
 
+# Detailed failure info captured during a fork-path copy so the top-level
+# handler can produce a specific error message instead of a generic "save
+# cancelled". Shape: {"reason": String, "item": String, "detail": String}.
+# Reset to {} at the start of every save.
+var _save_abort_error: Dictionary = {}
+
+# Save-wide counter that yields short, unique, filesystem-safe folder names
+# for every round (top-level + every fork path at every nesting depth). Bounds
+# the on-disk path length regardless of how long the user's round names are,
+# and eliminates the round-name-collision bug where two rounds in different
+# fork paths sharing a name landed in the same folder. The human-readable
+# round name is preserved in journey.json's "Name" field; the slug ends up in
+# the new "FolderName" field and is what the catalogue reads on load.
+var _round_folder_counter: int = 0
+
 # Streaming-copy tuning. Chunks are read/written 1 MB at a time; the main thread
 # yields one frame only after COPY_FRAME_BUDGET_MS of accumulated work — frequent
 # enough that the window stays responsive, rare enough that the frame-wait tax
@@ -95,6 +110,11 @@ func _ready() -> void:
 		_load_journey(edit_journey)
 		edit_journey = {}
 	_side_renderer.show_journey_info_panel()
+	# Check for leftover staging folders from interrupted saves (crash, force-
+	# kill, power loss). They take disk space and the user has no way to know
+	# they exist otherwise — the dot prefix hides them from the catalogue.
+	# Deferred so the dialog appears over the fully-rendered builder.
+	call_deferred("_check_for_stale_staging_folders")
 
 
 # Builds the GraphView inside the GraphHost slot, wires its selection / insert
@@ -408,47 +428,29 @@ func _show_status(msg: String, is_error: bool) -> void:
 
 
 func _on_save_pressed() -> void:
-	_save_btn.disabled  = true
-	_status_lbl.visible = false
-	_transcode_cancel   = false
-	_save_aborted       = false
+	_save_btn.disabled       = true
+	_status_lbl.visible      = false
+	_transcode_cancel        = false
+	_save_aborted            = false
+	_save_abort_error        = {}
+	_round_folder_counter    = 0
+
+	# Pre-save validation pass. Walks the entire journey (top-level items plus
+	# every fork path, recursively) and collects every problem in one shot —
+	# missing source files, invalid round/path names, paths that would exceed
+	# Windows MAX_PATH, etc. — so the user sees all issues at once instead of
+	# fixing-and-retrying repeatedly.
+	var presave_issues: Array = _collect_presave_issues()
+	if not presave_issues.is_empty():
+		var headline: String = "Found %d issue%s that prevent saving. Fix the items below and try again." % [
+			presave_issues.size(),
+			"s" if presave_issues.size() != 1 else "",
+		]
+		_show_save_error_modal("CANNOT SAVE JOURNEY", headline, presave_issues)
+		_save_btn.disabled = false
+		return
 
 	var journey_name: String = _journey_name.strip_edges()
-	if journey_name == "":
-		_show_status("Journey name is required.", true)
-		_save_btn.disabled = false
-		return
-
-	var has_any_round: bool = _items.any(func(item: Dictionary) -> bool: return item.get("type","round") == "round")
-	if not has_any_round:
-		_show_status("Add at least one round before saving.", true)
-		_save_btn.disabled = false
-		return
-
-	var round_count: int = 0
-	for i in _items.size():
-		var item: Dictionary = _items[i]
-		var item_type: String = item.get("type", "round")
-		if item_type == "round":
-			round_count += 1
-			if (item.get("name","") as String).strip_edges() == "":
-				_show_status("Round %d needs a name." % round_count, true)
-				_save_btn.disabled = false
-				return
-			if item.get("funscript_path","") == "":
-				_show_status("Round %d needs a funscript file." % round_count, true)
-				_save_btn.disabled = false
-				return
-		elif item_type == "shop" or item_type == "storyboard":
-			# Shops and storyboards have no required fields for save.
-			pass
-		else:
-			# Fork (top-level or nested via recursion).
-			var err: String = JourneyData.validate_fork(item, "fork after round %d" % round_count)
-			if err != "":
-				_show_status(err, true)
-				_save_btn.disabled = false
-				return
 
 	# Walks items[] (and nested forks) looking for any round with a video.
 	var any_video: bool = JourneyData.items_have_any_video(_items)
@@ -469,7 +471,12 @@ func _on_save_pressed() -> void:
 			main_round_idx += 1
 
 	if not transcode_plan.is_empty() and not ffmpeg_ok:
-		_show_status("Videos need transcoding (non-H.264) but ffmpeg is not on PATH. Install ffmpeg and restart Godot.", true)
+		_show_save_error_single(
+			"CANNOT SAVE JOURNEY",
+			"ffmpeg_missing",
+			"Journey",
+			"%d video(s) use a codec other than H.264 and need transcoding, but ffmpeg is not available." % transcode_plan.size(),
+			"Install ffmpeg into the project's bin/ folder (or onto your system PATH) and restart the editor. Alternatively, swap the offending video(s) for H.264 .mp4 files.")
 		_save_btn.disabled = false
 		return
 
@@ -519,6 +526,11 @@ func _on_save_pressed() -> void:
 	var total_main_rounds: int = _items.filter(func(item: Dictionary) -> bool: return item.get("type","round") == "round").size()
 
 	for i in _items.size():
+		# Early bail: a previous iteration's _copy_file (funscript / axis /
+		# vib / boss image / storyboard image) may have failed and set
+		# _save_aborted. The error is surfaced after the loop.
+		if _save_aborted:
+			break
 		var item: Dictionary = _items[i]
 		var item_type: String = item.get("type","round")
 		if item_type == "shop":
@@ -566,16 +578,18 @@ func _on_save_pressed() -> void:
 			rorder += 1
 			last_rorder = rorder
 
+			# Human-readable name kept in journey.json's "Name" for display.
+			# Short slug (r001, r002, …) is the actual on-disk folder. This
+			# bounds path length and prevents same-name fork rounds from
+			# colliding into one folder.
 			var round_name: String = (item.get("name","") as String).strip_edges()
-			var round_dir: String  = abs_dir + "/" + round_name
+			var round_slug: String = _next_round_folder_slug()
+			var round_dir: String  = abs_dir + "/" + round_slug
 			DirAccess.make_dir_recursive_absolute(round_dir)
 
 			var fs_src: String = item.get("funscript_path","")
-			var fs_dst_name: String = round_name + "." + fs_src.get_extension()
+			var fs_dst_name: String = "script." + fs_src.get_extension()
 			_copy_file(fs_src, round_dir + "/" + fs_dst_name)
-			# L0-only stale cleanup: skips secondary-axis scripts in this folder.
-			_delete_stale_l0_files(round_dir, fs_dst_name)
-			# Cache action count + length so the catalogue scan never re-parses this.
 			var fs_stats: Dictionary = JourneyData.read_funscript_stats(round_dir + "/" + fs_dst_name)
 
 			# Copy secondary-axis scripts and collect relative paths for the JSON.
@@ -585,10 +599,9 @@ func _on_save_pressed() -> void:
 				var ax_src: String = axis_scripts_in[axis]
 				if ax_src == "":
 					continue
-				var ax_dst_name: String = round_name + "_" + axis + "." + ax_src.get_extension()
+				var ax_dst_name: String = "axis_" + axis + "." + ax_src.get_extension()
 				_copy_file(ax_src, round_dir + "/" + ax_dst_name)
-				_delete_stale_axis_files(round_dir, axis, ax_dst_name)
-				axis_scripts_rel[axis] = round_name + "/" + ax_dst_name
+				axis_scripts_rel[axis] = round_slug + "/" + ax_dst_name
 
 			# Copy vibrator-channel scripts and collect relative paths for the JSON.
 			var vib_scripts_in: Dictionary = item.get("vib_scripts", {})
@@ -597,10 +610,9 @@ func _on_save_pressed() -> void:
 				var vib_src: String = vib_scripts_in[ch_key]
 				if vib_src == "":
 					continue
-				var vib_dst_name: String = round_name + "_" + ch_key + "." + vib_src.get_extension()
+				var vib_dst_name: String = "vib_" + ch_key + "." + vib_src.get_extension()
 				_copy_file(vib_src, round_dir + "/" + vib_dst_name)
-				_delete_stale_vib_files(round_dir, ch_key, vib_dst_name)
-				vib_scripts_rel[ch_key] = round_name + "/" + vib_dst_name
+				vib_scripts_rel[ch_key] = round_slug + "/" + vib_dst_name
 
 			# Boss-round config — copy the optional intro image into the round folder.
 			var round_type: String = item.get("round_type", "normal")
@@ -608,46 +620,62 @@ func _on_save_pressed() -> void:
 			if round_type == "boss":
 				var boss_src: String = item.get("boss_image", "")
 				if boss_src != "":
-					var boss_dst_name: String = round_name + "_boss." + boss_src.get_extension()
+					var boss_dst_name: String = "boss." + boss_src.get_extension()
 					_copy_file(boss_src, round_dir + "/" + boss_dst_name)
-					boss_image_rel = round_name + "/" + boss_dst_name
+					boss_image_rel = round_slug + "/" + boss_dst_name
 
 			var vid_src: String = item.get("video_path","")
 			if vid_src != "":
 				if i in transcode_plan:
 					var info: Dictionary = transcode_plan[i]
-					var vid_dst_name: String = vid_src.get_file().get_basename() + ".mp4"
+					# Fixed short name regardless of the source — transcoded videos
+					# are always h264 .mp4, and the original filename is irrelevant
+					# (the round is addressed by folder slug).
+					var vid_dst_name: String = "video.mp4"
 					var vid_dst: String      = round_dir + "/" + vid_dst_name
 					_update_modal_round(modal, rorder, total_main_rounds, round_name, info["codec"])
 					var ok: bool = await _transcode_video(vid_src, vid_dst, info["duration"], modal)
 					if not ok:
 						if modal: modal.queue_free()
 						JourneyData.delete_dir_recursive(abs_dir)
-						_show_status("Transcoding cancelled. Journey not saved.", true)
+						# _transcode_cancel distinguishes user cancel from ffmpeg
+						# failure (e.g. bad input file). Same return-value path,
+						# different remediation.
+						if _transcode_cancel:
+							_show_save_error_single(
+								"SAVE CANCELLED",
+								"cancelled",
+								"Round %d \"%s\"" % [rorder, round_name],
+								"You cancelled the transcode while round \"%s\" was being processed." % round_name,
+								"Press Save again to retry. Nothing on disk was changed.")
+						else:
+							_show_save_error_single(
+								"SAVE FAILED",
+								"transcode_failed",
+								"Round %d \"%s\"" % [rorder, round_name],
+								"ffmpeg failed to transcode video \"%s\" (codec %s → h264)." % [vid_src.get_file(), info["codec"]],
+								"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round.")
 						_save_btn.disabled = false
 						return
-					_delete_stale_files(round_dir, vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
 				else:
-					var vid_dst_name: String = vid_src.get_file()
+					# Short standard filename keyed off the source extension.
+					var vid_dst_name: String = "video." + vid_src.get_extension()
 					var vid_dst_path: String = round_dir + "/" + vid_dst_name
-					# Guard: if the source already lives at the destination (the user
-					# only changed the funscript and kept the same video), opening the
-					# destination for WRITE would truncate it to 0 KB before the read
-					# handle can consume it. Skip the copy entirely in that case.
+					# Source-equals-destination guard is now impossible (staging
+					# writes to a fresh sibling folder) but harmless to keep as
+					# defense-in-depth.
 					var vid_src_abs: String = ProjectSettings.globalize_path(vid_src)
 					if vid_src_abs != vid_dst_path:
 						_update_modal_label(modal, "Round %d / %d — %s  (copying video)" % [rorder, total_main_rounds, round_name])
-						var copy_ok: bool = await _copy_file_chunked(
+						var copy_result: Dictionary = await _copy_file_chunked(
 							vid_src, vid_dst_path,
 							func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot))
-						if not copy_ok:
+						if not copy_result["ok"]:
 							if modal: modal.queue_free()
 							JourneyData.delete_dir_recursive(abs_dir)
-							_show_status("Save cancelled. Journey not saved." if _transcode_cancel \
-								else "Failed to copy video for round \"%s\"." % round_name, true)
+							_show_copy_failure_modal(copy_result, "Round %d \"%s\"" % [rorder, round_name])
 							_save_btn.disabled = false
 							return
-						_delete_stale_files(round_dir, vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
 
 			# (Renamed-round cleanup happens implicitly at swap time: the old
 			# journey folder is deleted wholesale, taking any stale round
@@ -656,13 +684,14 @@ func _on_save_pressed() -> void:
 
 			rounds_json.append({
 				"Name":           round_name,
+				"FolderName":     round_slug,
 				"Order":          rorder,
 				"CoinsAwarded":   item.get("coins",0) as int,
 				"RoundType":      "Boss" if round_type == "boss" else "Normal",
 				"BossImage":      boss_image_rel,
 				"BossTagline":    item.get("boss_tagline", ""),
 				"BossModifiers":  _boss_modifiers_json(item.get("boss_modifiers", [])),
-				"FunscriptPath":  round_name + "/" + fs_dst_name,
+				"FunscriptPath":  round_slug + "/" + fs_dst_name,
 				"AxisScripts":    axis_scripts_rel,
 				"VibScripts":     vib_scripts_rel,
 				"ActionCount":    fs_stats["count"],
@@ -672,16 +701,32 @@ func _on_save_pressed() -> void:
 			# Fork — recursively save the fork and all nested forks.
 			var slug_prefix: String = "fork%d" % forks_json.size()
 			forks_json.append(await _save_fork(item, abs_dir, abs_media_dir, last_rorder, slug_prefix, copied_images, modal))
-			# A cancelled video copy deep inside a fork path unwinds to here.
+			# A failed video copy deep inside a fork path unwinds to here. Use
+			# the stashed failure info so the modal shows the actual cause
+			# (cancel vs source unreadable vs destination unwritable) and the
+			# specific fork-path round that failed.
 			if _save_aborted:
 				if modal: modal.queue_free()
 				JourneyData.delete_dir_recursive(abs_dir)
-				_show_status("Save cancelled. Journey not saved.", true)
+				var stashed_result: Dictionary = _save_abort_error.get("result", {"reason": "unknown_copy_error"})
+				var stashed_item: String       = _save_abort_error.get("item",   "Fork path video")
+				_show_copy_failure_modal(stashed_result, stashed_item)
 				_save_btn.disabled = false
 				return
 
 	if modal:
 		modal.queue_free()
+
+	# Catches _save_aborted set by a non-video _copy_file (funscript / axis /
+	# vib / boss / storyboard image) during top-level iteration. Fork-path
+	# failures already returned via the inline `if _save_aborted:` block above.
+	if _save_aborted:
+		JourneyData.delete_dir_recursive(abs_dir)
+		var stashed_result: Dictionary = _save_abort_error.get("result", {"reason": "unknown_copy_error"})
+		var stashed_item: String       = _save_abort_error.get("item",   "File copy")
+		_show_copy_failure_modal(stashed_result, stashed_item)
+		_save_btn.disabled = false
+		return
 
 	var data: Dictionary = {
 		"Name":        journey_name,
@@ -698,7 +743,12 @@ func _on_save_pressed() -> void:
 	var f: FileAccess = FileAccess.open(staging_journey_dir + "/journey.json", FileAccess.WRITE)
 	if f == null:
 		JourneyData.delete_dir_recursive(abs_dir)
-		_show_status("Failed to write journey.json — check folder permissions.", true)
+		_show_save_error_single(
+			"SAVE FAILED",
+			"dst_unwritable",
+			"journey.json",
+			"Could not create %s." % (staging_journey_dir + "/journey.json"),
+			"Check that the journeys folder drive isn't full or write-protected, and that no antivirus is blocking the editor. You can change the journeys folder in Options → Storage Location.")
 		_save_btn.disabled = false
 		return
 	f.store_string(JSON.stringify(data, "\t"))
@@ -746,8 +796,13 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 	var img_src: String  = path_data.get("image_path", "")
 	var img_fname: String = ""
 	if img_src != "":
-		var safe_name: String = JourneyData.sanitize_folder_name(path_data.get("name", slug_prefix))
-		var img_f: String = _copy_image_deduped(img_src, abs_media_dir, safe_name + "_cover." + img_src.get_extension().to_lower(), copied_images)
+		# Use slug_prefix ("fork0_p0", "fork0_p1_f0_p0", …) for the filename so
+		# two paths sharing a name (e.g. "Yes" / "No" branches across multiple
+		# nested forks) can't overwrite each other's card image. The human-
+		# readable Name lives in journey.json's Image field via the resolved
+		# media/<slug>_cover.<ext> path, but the filename itself is collision-
+		# free regardless of what the user calls each path.
+		var img_f: String = _copy_image_deduped(img_src, abs_media_dir, slug_prefix + "_cover." + img_src.get_extension().to_lower(), copied_images)
 		img_fname = "media/" + img_f if img_f != "" else ""
 
 	var path_entry: Dictionary = {
@@ -815,77 +870,83 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				if _save_aborted:
 					return path_entry
 			_:
-				# Round
+				# Round (inside a fork path). Same scheme as top-level rounds:
+				# short slug for the folder, short standard filenames inside,
+				# human-readable name kept only in journey.json.
 				pr_order += 1
 				pr_last_order = pr_order
 				var pr_name: String = (pi_item.get("name","") as String).strip_edges()
-				var pr_dir: String  = abs_dir + "/" + pr_name
+				var pr_slug: String = _next_round_folder_slug()
+				var pr_dir: String  = abs_dir + "/" + pr_slug
 				DirAccess.make_dir_recursive_absolute(pr_dir)
 				var pr_fs: String = pi_item.get("funscript_path","")
 				var pr_fs_dst_name: String = ""
 				var pr_fs_stats: Dictionary = {"count": 0, "length_ms": 0}
 				if pr_fs != "":
-					pr_fs_dst_name = pr_name + "." + pr_fs.get_extension()
+					pr_fs_dst_name = "script." + pr_fs.get_extension()
 					_copy_file(pr_fs, pr_dir + "/" + pr_fs_dst_name)
-					_delete_stale_l0_files(pr_dir, pr_fs_dst_name)
 					pr_fs_stats = JourneyData.read_funscript_stats(pr_dir + "/" + pr_fs_dst_name)
 				var pr_vid: String = pi_item.get("video_path","")
 				if pr_vid != "":
-					var pr_vid_dst_name: String = pr_vid.get_file()
+					var pr_vid_dst_name: String = "video." + pr_vid.get_extension()
 					var pr_vid_dst_path: String = pr_dir + "/" + pr_vid_dst_name
 					# Same src==dst guard as the top-level round copy: skip when the
 					# video is already at its destination to avoid a 0 KB truncation.
 					var pr_vid_src_abs: String = ProjectSettings.globalize_path(pr_vid)
 					if pr_vid_src_abs != pr_vid_dst_path:
 						_update_modal_label(modal, "Fork round — %s  (copying video)" % pr_name)
-						var pr_copy_ok: bool = await _copy_file_chunked(
+						var pr_copy_result: Dictionary = await _copy_file_chunked(
 							pr_vid, pr_vid_dst_path,
 							func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot))
-						if not pr_copy_ok:
-							# Cancelled / failed — unwind the recursive save.
+						if not pr_copy_result["ok"]:
+							# Cancelled / failed — unwind the recursive save and stash
+							# the detailed failure so the top-level handler can show
+							# a specific error instead of a generic message.
 							_save_aborted = true
+							_save_abort_error = {
+								"result": pr_copy_result,
+								"item":   "%s → Round \"%s\"" % [slug_prefix, pr_name],
+							}
 							return path_entry
-						_delete_stale_files(pr_dir, pr_vid_dst_name, JourneyData.VIDEO_EXTENSIONS)
 				var pr_axis_in: Dictionary = pi_item.get("axis_scripts", {})
 				var pr_axis_rel: Dictionary = {}
 				for axis: String in pr_axis_in:
 					var ax_src: String = pr_axis_in[axis]
 					if ax_src == "":
 						continue
-					var ax_dst_name: String = pr_name + "_" + axis + "." + ax_src.get_extension()
+					var ax_dst_name: String = "axis_" + axis + "." + ax_src.get_extension()
 					_copy_file(ax_src, pr_dir + "/" + ax_dst_name)
-					_delete_stale_axis_files(pr_dir, axis, ax_dst_name)
-					pr_axis_rel[axis] = pr_name + "/" + ax_dst_name
+					pr_axis_rel[axis] = pr_slug + "/" + ax_dst_name
 				var pr_vib_in: Dictionary = pi_item.get("vib_scripts", {})
 				var pr_vib_rel: Dictionary = {}
 				for ch_key: String in pr_vib_in:
 					var vib_src: String = pr_vib_in[ch_key]
 					if vib_src == "":
 						continue
-					var vib_dst_name: String = pr_name + "_" + ch_key + "." + vib_src.get_extension()
+					var vib_dst_name: String = "vib_" + ch_key + "." + vib_src.get_extension()
 					_copy_file(vib_src, pr_dir + "/" + vib_dst_name)
-					_delete_stale_vib_files(pr_dir, ch_key, vib_dst_name)
-					pr_vib_rel[ch_key] = pr_name + "/" + vib_dst_name
+					pr_vib_rel[ch_key] = pr_slug + "/" + vib_dst_name
 				var pr_round_type: String = pi_item.get("round_type", "normal")
 				var pr_boss_image_rel: String = ""
 				if pr_round_type == "boss":
 					var pr_boss_src: String = pi_item.get("boss_image", "")
 					if pr_boss_src != "":
-						var pr_boss_dst_name: String = pr_name + "_boss." + pr_boss_src.get_extension()
+						var pr_boss_dst_name: String = "boss." + pr_boss_src.get_extension()
 						_copy_file(pr_boss_src, pr_dir + "/" + pr_boss_dst_name)
-						pr_boss_image_rel = pr_name + "/" + pr_boss_dst_name
+						pr_boss_image_rel = pr_slug + "/" + pr_boss_dst_name
 				# (Renamed-round cleanup is implicit at swap time — see the
 				# top-level round save above. Deleting the live original mid-
 				# save would break the staging rollback if a later step fails.)
 				path_entry["Rounds"].append({
 					"Name":          pr_name,
+					"FolderName":    pr_slug,
 					"Order":         pr_order,
 					"CoinsAwarded":  pi_item.get("coins",0) as int,
 					"RoundType":     "Boss" if pr_round_type == "boss" else "Normal",
 					"BossImage":     pr_boss_image_rel,
 					"BossTagline":   pi_item.get("boss_tagline", ""),
 					"BossModifiers": _boss_modifiers_json(pi_item.get("boss_modifiers", [])),
-					"FunscriptPath": pr_name + "/" + pr_fs_dst_name if pr_fs_dst_name != "" else "",
+					"FunscriptPath": pr_slug + "/" + pr_fs_dst_name if pr_fs_dst_name != "" else "",
 					"AxisScripts":   pr_axis_rel,
 					"VibScripts":    pr_vib_rel,
 					"ActionCount":   pr_fs_stats["count"],
@@ -1209,19 +1270,43 @@ func _copy_image_deduped(src: String, abs_dir: String, candidate_fname: String, 
 
 # Synchronous whole-file copy. Use only for small files (funscripts, images) —
 # for video use _copy_file_chunked so the main thread doesn't freeze.
+#
+# On failure (source unreadable or destination unwritable), sets _save_aborted
+# and _save_abort_error so the next `if _save_aborted:` checkpoint in the save
+# loop can surface a specific error modal. This matches the existing fork-path
+# unwind pattern, so callers don't need to inspect the result individually.
 func _copy_file(src: String, dst: String) -> void:
 	var src_file: FileAccess = FileAccess.open(src, FileAccess.READ)
 	if src_file == null:
 		printerr("JourneyBuilder: cannot read: " + src)
+		_save_aborted = true
+		_save_abort_error = {
+			"result": {"ok": false, "reason": "src_unreadable", "detail": src},
+			"item":   "File copy",
+		}
 		return
 	var bytes: PackedByteArray = src_file.get_buffer(src_file.get_length())
 	src_file.close()
 	var dst_file: FileAccess = FileAccess.open(dst, FileAccess.WRITE)
 	if dst_file == null:
 		printerr("JourneyBuilder: cannot write: " + dst)
+		_save_aborted = true
+		_save_abort_error = {
+			"result": {"ok": false, "reason": "dst_unwritable", "detail": dst},
+			"item":   "File copy",
+		}
 		return
 	dst_file.store_buffer(bytes)
 	dst_file.close()
+
+
+# Returns the next short folder slug for a round and bumps the counter.
+# Format: "r" + zero-padded 3-digit index ("r001", "r002", …). Three digits
+# comfortably fits any journey (max real-world rounds is well under 1000;
+# the format gracefully handles overflow by growing to 4+ digits).
+func _next_round_folder_slug() -> String:
+	_round_folder_counter += 1
+	return "r%03d" % _round_folder_counter
 
 
 # Streaming file copy for large files (video). Reads/writes in COPY_CHUNK_SIZE
@@ -1229,17 +1314,24 @@ func _copy_file(src: String, dst: String) -> void:
 # up — so the window stays responsive and the modal can repaint, without paying
 # a full frame-wait per chunk. `progress` (optional) is called as
 # progress.call(copied_bytes, total_bytes). Honours the modal's cancel button
-# via _transcode_cancel. Returns false on I/O error or cancellation.
-func _copy_file_chunked(src: String, dst: String, progress: Callable = Callable()) -> bool:
+# via _transcode_cancel.
+#
+# Returns a Dictionary describing the outcome:
+#   {"ok": true,  "reason": "ok"}
+#   {"ok": false, "reason": "src_unreadable", "detail": <path>}
+#   {"ok": false, "reason": "dst_unwritable", "detail": <path>}
+#   {"ok": false, "reason": "cancelled",      "detail": ""}
+# Callers use `reason` to pick a specific error message + remediation hint.
+func _copy_file_chunked(src: String, dst: String, progress: Callable = Callable()) -> Dictionary:
 	var src_file: FileAccess = FileAccess.open(src, FileAccess.READ)
 	if src_file == null:
 		printerr("JourneyBuilder: cannot read: " + src)
-		return false
+		return {"ok": false, "reason": "src_unreadable", "detail": src}
 	var dst_file: FileAccess = FileAccess.open(dst, FileAccess.WRITE)
 	if dst_file == null:
 		printerr("JourneyBuilder: cannot write: " + dst)
 		src_file.close()
-		return false
+		return {"ok": false, "reason": "dst_unwritable", "detail": dst}
 
 	var total: int = src_file.get_length()
 	var copied: int = 0
@@ -1249,7 +1341,7 @@ func _copy_file_chunked(src: String, dst: String, progress: Callable = Callable(
 		if _transcode_cancel:
 			src_file.close()
 			dst_file.close()
-			return false
+			return {"ok": false, "reason": "cancelled", "detail": ""}
 		var chunk: PackedByteArray = src_file.get_buffer(COPY_CHUNK_SIZE)
 		if chunk.is_empty():
 			break
@@ -1263,7 +1355,7 @@ func _copy_file_chunked(src: String, dst: String, progress: Callable = Callable(
 
 	src_file.close()
 	dst_file.close()
-	return true
+	return {"ok": true, "reason": "ok"}
 
 
 # Removes files inside `dir_path` whose extension is in `extensions` but whose
@@ -1376,3 +1468,600 @@ func _delete_stale_vib_files(dir_path: String, ch_key: String, keep_filename: St
 	da.list_dir_end()
 	for p: String in to_delete:
 		DirAccess.remove_absolute(p)
+
+
+# ---------------------------------------------------------------------------
+# Save error reporting
+# ---------------------------------------------------------------------------
+#
+# Every save problem flows through a "SaveError" Dictionary with this shape:
+#   {
+#     "cause":  String   – short machine code, see SAVE_ERROR_CAUSES below
+#     "item":   String   – user-facing label, e.g. 'Round 3 "Boss Fight"'
+#                          or 'Fork 1 → Path "Adventure" → Round 2'
+#     "detail": String   – the specific failure (path, error, etc.)
+#     "hint":   String   – one-line remediation suggestion
+#   }
+#
+# Pre-save validation collects ALL problems before any file is touched so the
+# user sees them in one pass. Mid-save failures (cancel, copy error, transcode
+# error) build one SaveError and route through the same modal.
+
+# Returns true if the given source-file path exists on disk. Used by validation
+# instead of FileAccess.file_exists so user:// paths and absolute paths both work.
+func _save_source_exists(path: String) -> bool:
+	if path == "":
+		return false
+	return FileAccess.file_exists(ProjectSettings.globalize_path(path))
+
+
+# Walks the entire journey tree (top-level + every fork path recursively) and
+# returns an Array of SaveError dicts for all problems found. An empty array
+# means the journey is safe to save.
+func _collect_presave_issues() -> Array:
+	var issues: Array = []
+
+	# Journey-level checks.
+	var jn: String = _journey_name.strip_edges()
+	if jn == "":
+		issues.append({
+			"cause":  "bad_name",
+			"item":   "Journey",
+			"detail": "Journey name is required.",
+			"hint":   "Enter a name in the Journey Info panel (right-side, no node selected).",
+		})
+	else:
+		# Rename-collision guard. If the sanitized name maps to a folder that
+		# already exists AND it's not the journey we're editing, the swap at
+		# the end of save would wipe that other journey's data. Refuse here.
+		var sanitized_jn: String      = JourneyData.sanitize_folder_name(jn)
+		var target_journey_dir: String = SettingsService.get_journeys_dir() + "/" + sanitized_jn
+		var target_abs: String        = ProjectSettings.globalize_path(target_journey_dir)
+		var original_abs: String      = ""
+		if _original_journey_folder != "":
+			original_abs = ProjectSettings.globalize_path(_original_journey_folder)
+		if target_abs != original_abs and DirAccess.dir_exists_absolute(target_abs):
+			issues.append({
+				"cause":  "name_collision",
+				"item":   "Journey",
+				"detail": "A journey already exists at: %s" % target_abs,
+				"hint":   "Saving with this name would replace that other journey. Pick a different name, or delete the existing journey from the catalogue first.",
+			})
+	if _cover_path != "" and not _save_source_exists(_cover_path):
+		issues.append({
+			"cause":  "missing_source",
+			"item":   "Journey cover image",
+			"detail": "Cover image no longer exists at: %s" % _cover_path,
+			"hint":   "Re-drag the cover image into the Journey Info panel, or remove it.",
+		})
+
+	var has_round: bool = _items.any(func(item: Dictionary) -> bool: return item.get("type", "round") == "round")
+	if not has_round:
+		issues.append({
+			"cause":  "no_rounds",
+			"item":   "Journey",
+			"detail": "A journey needs at least one round at the top level.",
+			"hint":   "Add a round from the side panel.",
+		})
+
+	_save_collect_items_issues(_items, "Top level", issues)
+	return issues
+
+
+# Recursively scans an items[] array (used at both top level and inside fork
+# paths). `context` is a human-readable trail like
+# 'Fork 1 → Path "Adventure"' so issue messages can pinpoint the location.
+func _save_collect_items_issues(items: Array, context: String, issues: Array) -> void:
+	var round_num: int = 0
+	var sb_num:    int = 0
+	var fork_num:  int = 0
+	for item: Dictionary in items:
+		var item_type: String = item.get("type", "round")
+		match item_type:
+			"round":
+				round_num += 1
+				_save_check_round(item, "%s, Round %d" % [context, round_num], issues)
+			"storyboard":
+				sb_num += 1
+				_save_check_storyboard(item, "%s, Storyboard %d" % [context, sb_num], issues)
+			"fork":
+				fork_num += 1
+				_save_check_fork(item, "%s, Fork %d" % [context, fork_num], issues)
+			"shop":
+				# Shops write no filesystem paths and have no source files.
+				pass
+
+
+func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> void:
+	var name: String = (round_data.get("name", "") as String).strip_edges()
+	var label: String = "%s \"%s\"" % [ctx, name] if name != "" else ctx
+
+	# Names are display-only now (see short-folder slug scheme). Any character
+	# is fine — only empty names need to be flagged, since the name is the
+	# user's identifier for the round in journey.json and the editor.
+	if name == "":
+		issues.append({
+			"cause":  "bad_name",
+			"item":   ctx,
+			"detail": "Round name is empty.",
+			"hint":   "Give the round a name in the side-panel editor.",
+		})
+
+	# Required: funscript.
+	var fs: String = round_data.get("funscript_path", "")
+	if fs == "":
+		issues.append({
+			"cause":  "missing_source",
+			"item":   label,
+			"detail": "No funscript file selected.",
+			"hint":   "Drag a .funscript or .json file into the Funscript field for this round.",
+		})
+	elif not _save_source_exists(fs):
+		issues.append({
+			"cause":  "missing_source",
+			"item":   label,
+			"detail": "Funscript file no longer exists at: %s" % fs,
+			"hint":   "The source file may have been moved or deleted. Re-drag it into the editor.",
+		})
+
+	# Optional: video.
+	var vid: String = round_data.get("video_path", "")
+	if vid != "" and not _save_source_exists(vid):
+		issues.append({
+			"cause":  "missing_source",
+			"item":   label,
+			"detail": "Video file no longer exists at: %s" % vid,
+			"hint":   "The source file may have been moved or deleted. Re-drag it into the editor or remove the video.",
+		})
+
+	# Secondary axis scripts.
+	var axis_scripts: Dictionary = round_data.get("axis_scripts", {})
+	for axis: String in axis_scripts:
+		var p: String = axis_scripts[axis]
+		if p != "" and not _save_source_exists(p):
+			issues.append({
+				"cause":  "missing_source",
+				"item":   label,
+				"detail": "%s axis funscript no longer exists at: %s" % [axis, p],
+				"hint":   "Re-drag the %s funscript in the Extra Axes section." % axis,
+			})
+
+	# Vibrator-channel scripts.
+	var vib_scripts: Dictionary = round_data.get("vib_scripts", {})
+	for ch_key: String in vib_scripts:
+		var p: String = vib_scripts[ch_key]
+		if p != "" and not _save_source_exists(p):
+			issues.append({
+				"cause":  "missing_source",
+				"item":   label,
+				"detail": "%s vibrator funscript no longer exists at: %s" % [ch_key, p],
+				"hint":   "Re-drag the %s funscript in the Vibrator Scripts section." % ch_key,
+			})
+
+	# Boss intro image.
+	var boss_image: String = round_data.get("boss_image", "")
+	if boss_image != "" and not _save_source_exists(boss_image):
+		issues.append({
+			"cause":  "missing_source",
+			"item":   label,
+			"detail": "Boss intro image no longer exists at: %s" % boss_image,
+			"hint":   "Re-drag the boss image in the Boss Round section, or disable boss mode.",
+		})
+
+	# (Path-length check used to live here. Removed once round folder names
+	# became fixed-length slugs — a round folder is always exactly 4 chars
+	# (`rNNN`) and the longest filename inside is `axis_<XY>.funscript` (~22
+	# chars), so the only path-length lever left is the journey name itself,
+	# which would need to be hundreds of characters to come close to MAX_PATH.)
+
+
+func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> void:
+	var default_img: String = sb_data.get("image", "")
+	if default_img != "" and not _save_source_exists(default_img):
+		issues.append({
+			"cause":  "missing_source",
+			"item":   ctx,
+			"detail": "Default image no longer exists at: %s" % default_img,
+			"hint":   "Re-drag the default image into the storyboard, or remove it.",
+		})
+	var lines: Array = sb_data.get("lines", [])
+	for li in lines.size():
+		var line: Dictionary = lines[li]
+		var img: String = line.get("image", "")
+		if img != "" and not _save_source_exists(img):
+			issues.append({
+				"cause":  "missing_source",
+				"item":   "%s, Line %d" % [ctx, li + 1],
+				"detail": "Speaker image no longer exists at: %s" % img,
+				"hint":   "Re-drag the speaker image into this line, or remove it.",
+			})
+
+
+func _save_check_fork(fork_data: Dictionary, ctx: String, issues: Array) -> void:
+	var paths: Array = fork_data.get("paths", [])
+	if paths.size() < 2:
+		issues.append({
+			"cause":  "fork_underfilled",
+			"item":   ctx,
+			"detail": "Fork has only %d path(s); needs at least 2." % paths.size(),
+			"hint":   "Add a second path in the fork editor.",
+		})
+	for pi in paths.size():
+		var p: Dictionary = paths[pi]
+		var pname: String = (p.get("name", "") as String).strip_edges()
+		var path_ctx: String = "%s → Path %d \"%s\"" % [ctx, pi + 1, pname] if pname != "" \
+			else "%s → Path %d" % [ctx, pi + 1]
+
+		# Names are display-only now (see fork-path slug scheme for the card
+		# image filename and round-folder slugs for rounds inside the path).
+		# Any character is fine — only empty names need to be flagged, since
+		# the name is what the player sees on the fork choice screen.
+		if pname == "":
+			issues.append({
+				"cause":  "bad_name",
+				"item":   path_ctx,
+				"detail": "Path name is empty.",
+				"hint":   "Give the path a name (e.g. \"Adventure\" or \"Reward\", or even \"What's next?\").",
+			})
+
+		var img: String = p.get("image_path", "")
+		if img != "" and not _save_source_exists(img):
+			issues.append({
+				"cause":  "missing_source",
+				"item":   path_ctx,
+				"detail": "Card image no longer exists at: %s" % img,
+				"hint":   "Re-drag the card image for this path, or remove it.",
+			})
+
+		var sub_items: Array = p.get("items", [])
+		var has_round: bool = sub_items.any(func(it: Dictionary) -> bool: return it.get("type", "round") == "round")
+		if not has_round:
+			issues.append({
+				"cause":  "no_rounds",
+				"item":   path_ctx,
+				"detail": "This fork path has no rounds.",
+				"hint":   "Add at least one round to the path.",
+			})
+		_save_collect_items_issues(sub_items, path_ctx, issues)
+
+
+
+
+# ---------------------------------------------------------------------------
+# Error modal
+# ---------------------------------------------------------------------------
+
+# Shows a centred modal listing one or more SaveError dicts. Closeable via the
+# OK button or backdrop. "Copy details" copies a plain-text version of every
+# issue to the clipboard so users can paste it into a bug report.
+func _show_save_error_modal(title: String, headline: String, errors: Array) -> void:
+	if errors.is_empty():
+		return
+
+	var modal: Control = Control.new()
+	modal.name = "SaveErrorModal"
+	modal.anchor_right  = 1.0
+	modal.anchor_bottom = 1.0
+	modal.mouse_filter  = Control.MOUSE_FILTER_STOP
+
+	var backdrop: ColorRect = ColorRect.new()
+	backdrop.color = Color(0.0, 0.0, 0.0, 0.85)
+	backdrop.anchor_right  = 1.0
+	backdrop.anchor_bottom = 1.0
+	modal.add_child(backdrop)
+
+	var panel: PanelContainer = PanelContainer.new()
+	var ps: StyleBoxFlat = StyleBoxFlat.new()
+	ps.bg_color              = UITheme.PANEL_BG
+	ps.border_color          = UITheme.ERROR_SOFT
+	ps.border_width_left     = 2;  ps.border_width_right    = 2
+	ps.border_width_top      = 2;  ps.border_width_bottom   = 2
+	ps.content_margin_left   = 28; ps.content_margin_right  = 28
+	ps.content_margin_top    = 22; ps.content_margin_bottom = 22
+	panel.add_theme_stylebox_override("panel", ps)
+	panel.anchor_left = 0.5; panel.anchor_right  = 0.5
+	panel.anchor_top  = 0.5; panel.anchor_bottom = 0.5
+	panel.offset_left = -360; panel.offset_right  = 360
+	panel.offset_top  = -260; panel.offset_bottom = 260
+	modal.add_child(panel)
+
+	var vb: VBoxContainer = VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	panel.add_child(vb)
+
+	var title_lbl: Label = Label.new()
+	title_lbl.text = title
+	UITheme.style_label(title_lbl, UITheme.ERROR_SOFT, 16, true)
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title_lbl)
+
+	var headline_lbl: Label = Label.new()
+	headline_lbl.text = headline
+	UITheme.style_label(headline_lbl, UITheme.WHITE_SOFT, 13, false)
+	headline_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	headline_lbl.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+	vb.add_child(headline_lbl)
+
+	var scroll: ScrollContainer = ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	vb.add_child(scroll)
+
+	var list: VBoxContainer = VBoxContainer.new()
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list.add_theme_constant_override("separation", 10)
+	scroll.add_child(list)
+
+	for err: Dictionary in errors:
+		list.add_child(_make_save_error_row(err))
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 12)
+	vb.add_child(btn_row)
+
+	var copy_btn: Button = Button.new()
+	copy_btn.text = "⎘  COPY DETAILS"
+	copy_btn.custom_minimum_size = Vector2(160, 0)
+	UITheme.style_button(copy_btn, UITheme.PURPLE_MID)
+	copy_btn.pressed.connect(func() -> void:
+		DisplayServer.clipboard_set(_save_errors_to_text(title, errors))
+		copy_btn.text = "✓  COPIED"
+	)
+	btn_row.add_child(copy_btn)
+
+	var ok_btn: Button = Button.new()
+	ok_btn.text = "OK"
+	ok_btn.custom_minimum_size = Vector2(120, 0)
+	UITheme.style_button(ok_btn, UITheme.PURPLE_BRIGHT)
+	ok_btn.pressed.connect(func() -> void: modal.queue_free())
+	btn_row.add_child(ok_btn)
+
+	add_child(modal)
+
+
+# Builds one row for a single SaveError dict. The item label is the most
+# prominent line; cause+detail explain what; hint suggests a fix.
+func _make_save_error_row(err: Dictionary) -> Control:
+	var row: PanelContainer = PanelContainer.new()
+	var rs: StyleBoxFlat = StyleBoxFlat.new()
+	rs.bg_color              = UITheme.CARD_BG
+	rs.border_color          = Color(UITheme.ERROR_SOFT.r, UITheme.ERROR_SOFT.g, UITheme.ERROR_SOFT.b, 0.45)
+	rs.border_width_left     = 1; rs.border_width_right  = 1
+	rs.border_width_top      = 1; rs.border_width_bottom = 1
+	rs.content_margin_left   = 10; rs.content_margin_right  = 10
+	rs.content_margin_top    = 8;  rs.content_margin_bottom = 8
+	row.add_theme_stylebox_override("panel", rs)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	row.add_child(col)
+
+	var item_lbl: Label = Label.new()
+	item_lbl.text = (err.get("item", "") as String).to_upper()
+	UITheme.style_label(item_lbl, UITheme.PURPLE_BRIGHT, 12, true)
+	col.add_child(item_lbl)
+
+	var detail_lbl: Label = Label.new()
+	detail_lbl.text = err.get("detail", "")
+	detail_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	UITheme.style_label(detail_lbl, UITheme.WHITE_SOFT, 12, false)
+	col.add_child(detail_lbl)
+
+	var hint_text: String = err.get("hint", "")
+	if hint_text != "":
+		var hint_lbl: Label = Label.new()
+		hint_lbl.text = "→  " + hint_text
+		hint_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		UITheme.style_label(hint_lbl, UITheme.SEPARATOR, 11, false)
+		col.add_child(hint_lbl)
+
+	return row
+
+
+# Serialises a list of SaveErrors into a plain-text block users can paste
+# into a bug report. Format mirrors what the modal displays.
+func _save_errors_to_text(title: String, errors: Array) -> String:
+	var out: String = title + "\n" + "=".repeat(title.length()) + "\n\n"
+	for i in errors.size():
+		var err: Dictionary = errors[i]
+		out += "%d. %s\n" % [i + 1, err.get("item", "")]
+		out += "   Cause:  %s — %s\n" % [err.get("cause", ""), err.get("detail", "")]
+		var hint: String = err.get("hint", "")
+		if hint != "":
+			out += "   Hint:   %s\n" % hint
+		out += "\n"
+	return out
+
+
+# Builds a one-off SaveError list and shows the modal. Used by mid-save
+# failures that produce a single specific error (copy failed, transcode
+# failed, journey.json write failed, etc.).
+func _show_save_error_single(title: String, cause: String, item: String, detail: String, hint: String) -> void:
+	_show_save_error_modal(title, "Save failed.", [{
+		"cause":  cause,
+		"item":   item,
+		"detail": detail,
+		"hint":   hint,
+	}])
+
+
+# Maps a _copy_file_chunked result dict to the right save-error modal call.
+# `item` is the user-facing label (e.g. 'Round 4 "Boss Fight"' or
+# 'Fork → Path A → Round 2 "Reward"'). Files the modal and is otherwise silent
+# on success.
+func _show_copy_failure_modal(copy_result: Dictionary, item: String) -> void:
+	match copy_result.get("reason", ""):
+		"cancelled":
+			_show_save_error_single(
+				"SAVE CANCELLED",
+				"cancelled",
+				item,
+				"You cancelled the copy while %s was being processed." % item,
+				"Press Save again to retry. Nothing on disk was changed.")
+		"src_unreadable":
+			_show_save_error_single(
+				"SAVE FAILED",
+				"src_unreadable",
+				item,
+				"Source file became unreadable: %s" % copy_result.get("detail", "?"),
+				"The file may have been moved, deleted, or its drive disconnected since you opened the editor. Re-drag it into this round and try again.")
+		"dst_unwritable":
+			_show_save_error_single(
+				"SAVE FAILED",
+				"dst_unwritable",
+				item,
+				"Could not create the destination file: %s" % copy_result.get("detail", "?"),
+				"Check that the journeys folder drive isn't full or write-protected, and that no antivirus is blocking the editor. You can change the journeys folder in Options → Storage Location.")
+		_:
+			_show_save_error_single(
+				"SAVE FAILED",
+				"unknown_copy_error",
+				item,
+				"An unexpected copy failure occurred while processing %s." % item,
+				"Try saving again. If the problem persists, check the Godot debug output for details.")
+
+
+# ---------------------------------------------------------------------------
+# Stale staging folder recovery
+# ---------------------------------------------------------------------------
+#
+# Save uses a `.~save_<journey_name>` sibling folder for staging (so a mid-save
+# failure can be rolled back atomically — see `_on_save_pressed`). On a clean
+# save the staging folder is renamed into place; on a clean cancel/failure it
+# is deleted. But an unclean exit (app crash, power loss, force-kill) leaves
+# the staging folder behind. The catalogue scanner hides it (dot prefix) so
+# the user has no in-app way to discover or remove it.
+#
+# On builder startup we scan for these and offer to clean them up. We show
+# the dialog only when there's something to act on — first-time users with
+# no leftovers see nothing.
+
+# Returns absolute paths to every `.~save_*` folder currently sitting in the
+# journeys root. Empty if nothing to recover.
+func _find_stale_staging_folders() -> Array:
+	var result: Array = []
+	var journeys_abs: String = ProjectSettings.globalize_path(SettingsService.get_journeys_dir())
+	var dir: DirAccess = DirAccess.open(journeys_abs)
+	if dir == null:
+		return result
+	dir.list_dir_begin()
+	var entry: String = dir.get_next()
+	while entry != "":
+		if dir.current_is_dir() and entry.begins_with(".~save_"):
+			result.append(journeys_abs + "/" + entry)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	return result
+
+
+# Called once per builder launch via call_deferred. Shows a non-blocking
+# dialog when any staging folders are found, with options to delete them or
+# leave them in place.
+func _check_for_stale_staging_folders() -> void:
+	var stale: Array = _find_stale_staging_folders()
+	if stale.is_empty():
+		return
+	_show_stale_staging_dialog(stale)
+
+
+# Built dynamically (rather than as a static .tscn) since this is a once-in-
+# a-blue-moon flow and doesn't justify a scene file. Mirrors the SaveError
+# modal style so it feels native.
+func _show_stale_staging_dialog(stale: Array) -> void:
+	var modal: Control = Control.new()
+	modal.anchor_right  = 1.0
+	modal.anchor_bottom = 1.0
+	modal.mouse_filter  = Control.MOUSE_FILTER_STOP
+
+	var backdrop: ColorRect = ColorRect.new()
+	backdrop.color = Color(0.0, 0.0, 0.0, 0.85)
+	backdrop.anchor_right  = 1.0
+	backdrop.anchor_bottom = 1.0
+	modal.add_child(backdrop)
+
+	var panel: PanelContainer = PanelContainer.new()
+	var ps: StyleBoxFlat = StyleBoxFlat.new()
+	ps.bg_color              = UITheme.PANEL_BG
+	ps.border_color          = UITheme.AMBER
+	ps.border_width_left     = 2;  ps.border_width_right    = 2
+	ps.border_width_top      = 2;  ps.border_width_bottom   = 2
+	ps.content_margin_left   = 28; ps.content_margin_right  = 28
+	ps.content_margin_top    = 22; ps.content_margin_bottom = 22
+	panel.add_theme_stylebox_override("panel", ps)
+	panel.anchor_left = 0.5; panel.anchor_right  = 0.5
+	panel.anchor_top  = 0.5; panel.anchor_bottom = 0.5
+	panel.offset_left = -340; panel.offset_right  = 340
+	panel.offset_top  = -220; panel.offset_bottom = 220
+	modal.add_child(panel)
+
+	var vb: VBoxContainer = VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	panel.add_child(vb)
+
+	var title: Label = Label.new()
+	title.text = "UNFINISHED SAVES FOUND"
+	UITheme.style_label(title, UITheme.PURPLE_BRIGHT, 16, true)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title)
+
+	var headline: Label = Label.new()
+	headline.text = ("Found %d leftover save folder%s from a previous session that didn't finish (crash, power loss, or force-quit). They take disk space and are normally safe to delete." % [
+		stale.size(), "s" if stale.size() != 1 else "",
+	])
+	headline.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+	headline.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(headline, UITheme.WHITE_SOFT, 13, false)
+	vb.add_child(headline)
+
+	var scroll: ScrollContainer = ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	vb.add_child(scroll)
+
+	var list: VBoxContainer = VBoxContainer.new()
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list.add_theme_constant_override("separation", 6)
+	scroll.add_child(list)
+
+	for path: String in stale:
+		# Strip the .~save_ prefix to give the user the human-readable name
+		# (it's the journey-folder name that would have resulted).
+		var journey_name: String = (path.get_file() as String).substr(len(".~save_"))
+		var row: Label = Label.new()
+		row.text = "•  %s\n   %s" % [journey_name, path]
+		row.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		UITheme.style_label(row, UITheme.PURPLE_BRIGHT, 12, false)
+		list.add_child(row)
+
+	var recover_hint: Label = Label.new()
+	recover_hint.text = "Advanced: to recover one manually, rename its folder to remove the `.~save_` prefix using your file manager. The journey will reappear in the catalogue. Most of the time, just deleting them is fine."
+	recover_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	UITheme.style_label(recover_hint, UITheme.SEPARATOR, 11, false)
+	vb.add_child(recover_hint)
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 12)
+	vb.add_child(btn_row)
+
+	var keep_btn: Button = Button.new()
+	keep_btn.text = "KEEP"
+	keep_btn.custom_minimum_size = Vector2(140, 0)
+	UITheme.style_button(keep_btn, UITheme.PURPLE_MID)
+	keep_btn.pressed.connect(func() -> void: modal.queue_free())
+	btn_row.add_child(keep_btn)
+
+	var delete_btn: Button = Button.new()
+	delete_btn.text = "✕  DELETE ALL"
+	delete_btn.custom_minimum_size = Vector2(180, 0)
+	UITheme.style_button(delete_btn, UITheme.MAGENTA)
+	delete_btn.pressed.connect(func() -> void:
+		for path: String in stale:
+			JourneyData.delete_dir_recursive(path)
+		modal.queue_free()
+	)
+	btn_row.add_child(delete_btn)
+
+	add_child(modal)
