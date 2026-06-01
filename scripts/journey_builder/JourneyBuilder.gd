@@ -612,26 +612,32 @@ func _move_selection(delta: int) -> void:
 	_graph.set_selection(_selected_items, _selected_arr)
 
 
-# Ctrl+V — pastes fresh deep duplicates of the clipboard after the current
-# selection (same branch), or appends to the top level when nothing's selected.
-# The pasted block becomes the new selection so a wrong drop is easy to fix.
-func _paste_clipboard_after_selection() -> void:
+# Inserts fresh deep duplicates of the clipboard into `arr` at `idx`, as one undo
+# step, and selects the pasted block. The single paste primitive shared by every
+# entry point (Ctrl+V, the insert-menu Paste, and top-level Paste).
+func _paste_clipboard_into(arr: Array, idx: int) -> void:
 	if _clipboard_items.is_empty():
 		_show_status("Clipboard is empty. Copy a module first (Ctrl+C).", true)
 		return
 	_push_undo()
+	for i in _clipboard_items.size():
+		arr.insert(idx + i, _clipboard_items[i].duplicate(true))
+	_refresh_graph()
+	var pasted: Array = []
+	for i in _clipboard_items.size():
+		pasted.append(arr[idx + i])
+	_graph.call_deferred("set_selection", pasted, arr)
+
+
+# Ctrl+V — pastes after the current selection (same branch), or appends to the
+# top level when nothing's selected.
+func _paste_clipboard_after_selection() -> void:
 	var arr: Array = _items
 	var base: int  = _items.size()
 	if not _selected_items.is_empty():
 		arr  = _selected_arr
 		base = _selected_indices_sorted()[-1] + 1
-	for i in _clipboard_items.size():
-		arr.insert(base + i, _clipboard_items[i].duplicate(true))
-	_refresh_graph()
-	var pasted: Array = []
-	for i in _clipboard_items.size():
-		pasted.append(arr[base + i])
-	_graph.call_deferred("set_selection", pasted, arr)
+	_paste_clipboard_into(arr, base)
 
 
 # Records the current journey structure so the next mutation can be undone.
@@ -1232,46 +1238,71 @@ func _validate_presave() -> bool:
 	return false
 
 
-# Populates _transcode_plan by walking every video source in the tree. Returns
-# false (and shows the ffmpeg_missing modal) when ffmpeg is unavailable AND
-# the tree contains videos that probably need transcoding (non-.mp4).
+# Pixel formats the runtime decoder (EIRTeam.FFmpeg) handles: 8-bit 4:2:0, both
+# the standard (`yuv420p`) and full-range JPEG (`yuvj420p`) variants. Anything
+# else (10-bit, 4:2:2, 4:4:4) is re-encoded when auto-transcode is on, even if
+# the codec is already H.264 — these are the "it's h264 but still won't play"
+# cases. Kept broad to avoid needless re-encodes.
+const SAFE_PIX_FMTS: Array[String] = ["yuv420p", "yuvj420p"]
+
+
+# Populates _transcode_plan by probing every video source in the tree. With
+# auto-transcode off, the plan stays empty (everything is copied as-is). With it
+# on, a source is planned for transcoding when its codec isn't H.264, or it's
+# H.264 in a pixel format the decoder can't handle. Returns false — and shows a
+# clear, actionable modal — when auto-transcode is on but ffmpeg can't be run,
+# so the save never produces a silently-unplayable video.
 func _build_transcode_plan() -> bool:
 	_transcode_plan = {}
-	var any_video: bool = JourneyData.items_have_any_video(_items)
-	var ffmpeg_ok: bool = _ffmpeg_available() if any_video else false
+	if not JourneyData.items_have_any_video(_items):
+		return true
+
+	# Auto-transcode disabled: copy every video verbatim and require nothing of
+	# ffmpeg. The author has opted to manage compatibility themselves (and this
+	# is the escape hatch for setups where ffmpeg can't run, e.g. some Wine).
+	if not SettingsService.get_auto_transcode():
+		return true
+
+	# Honest fallback: without ffprobe we can neither verify nor convert videos.
+	# Rather than silently copy and hope (the old behavior, which produced
+	# unplayable rounds), stop with guidance — including the new custom-path
+	# option, which is the usual fix under Wine. (Turning off auto-transcode is
+	# the other way out.)
+	if not _ffmpeg_available():
+		_show_save_error_single(
+			"CANNOT SAVE JOURNEY",
+			CAUSE_FFMPEG_MISSING,
+			"Journey",
+			"ffmpeg / ffprobe could not be run, so videos can't be verified or converted to a format the player can decode.",
+			"Set a custom ffmpeg location in Options → Transcoding (a folder containing ffmpeg and ffprobe), or install ffmpeg on your PATH. If your videos are already H.264, you can instead turn off Auto-Transcode in Options → Transcoding to use them as-is. (Under Wine, the bundled Windows ffmpeg may not launch — a system ffmpeg path usually fixes this.)")
+		return false
 
 	var all_video_sources: Array = []
 	_collect_video_sources(_items, all_video_sources)
 
-	if ffmpeg_ok:
-		# Probe every unique source. Same source dragged into multiple rounds
-		# is identity-by-path so the transcode runs once and the result is
-		# reused at both top-level and fork-path save sites.
-		for src: String in all_video_sources:
-			if _transcode_plan.has(src):
-				continue
-			var codec: String = _get_video_codec(src)
-			if codec != "" and not (codec in H264_NAMES):
-				_transcode_plan[src] = {"codec": codec, "duration": _video_duration_seconds(src)}
-		return true
-
-	# No ffprobe → can't verify codecs. Be conservative: any non-.mp4
-	# extension is treated as "needs transcoding". .mp4 files are trusted to
-	# be H.264 (the common case); a .mp4 with a non-H.264 codec will fail at
-	# runtime but we have no way to detect that here.
-	var non_mp4_sources: Array = []
+	# Probe every unique source. Same source used in multiple rounds is identity-
+	# by-path so we only probe once; the plan is consulted at every save site.
+	# A source is transcoded when its codec isn't H.264, or it's H.264 in a pixel
+	# format the runtime decoder can't handle (10-bit, 4:2:2, …).
 	for src: String in all_video_sources:
-		if src.get_extension().to_lower() != "mp4" and not (src in non_mp4_sources):
-			non_mp4_sources.append(src)
-	if non_mp4_sources.is_empty():
-		return true
-	_show_save_error_single(
-		"CANNOT SAVE JOURNEY",
-		CAUSE_FFMPEG_MISSING,
-		"Journey",
-		"%d video(s) use a non-.mp4 container that likely needs transcoding to H.264, but ffmpeg is not available." % non_mp4_sources.size(),
-		"Install ffmpeg into the project's bin/ folder (or onto your system PATH) and restart the editor. Alternatively, transcode the offending video(s) to H.264 .mp4 outside the editor and re-drag them.")
-	return false
+		if _transcode_plan.has(src):
+			continue
+		var info: Dictionary = _get_video_stream_info(src)
+		var codec: String = info["codec"]
+		var pix:   String = info["pix_fmt"]
+
+		var reason: String = ""
+		if codec == "":
+			reason = "unverifiable"                      # couldn't read — re-encode to be safe
+		elif not (codec in H264_NAMES):
+			reason = codec                               # wrong codec (HEVC/AV1/VP9/…)
+		elif pix != "" and not (pix in SAFE_PIX_FMTS):
+			reason = "%s %s" % [codec, pix]              # h264 but undecodable profile
+
+		if reason != "":
+			_transcode_plan[src] = {"codec": reason, "duration": _video_duration_seconds(src)}
+
+	return true
 
 
 # Computes both staging and final folder paths, creates the staging tree
@@ -1864,27 +1895,20 @@ func _collect_video_sources(items: Array, sources: Array) -> void:
 
 
 func _ffmpeg_binary(name: String) -> String:
-	var exe: String = name + ".exe" if OS.get_name() == "Windows" else name
-
-	if OS.has_feature("editor"):
-		# Editor: res://bin/ is a real filesystem directory — execute directly.
-		var bundled: String = ProjectSettings.globalize_path("res://bin/" + exe)
-		if FileAccess.file_exists(bundled):
-			return bundled
-	else:
-		# Exported build: res://bin/ is inside the PCK and cannot be executed
-		# directly. Extract to user://bin/ on first use, then run from there.
+	# Resolution order (custom folder → bundled → PATH) lives in
+	# SettingsService.resolve_ffmpeg_binary so the Options "Test" button shares
+	# it. The one builder-only concern: in an exported build res://bin/ is inside
+	# the PCK and can't be executed, so extract to user://bin/ on first use. Only
+	# bother when resolution otherwise falls through to a bare PATH name (i.e. no
+	# custom folder and nothing extracted yet).
+	var path: String = SettingsService.resolve_ffmpeg_binary(name)
+	if path == name and not OS.has_feature("editor"):
+		var exe: String = name + ".exe" if OS.get_name() == "Windows" else name
 		var user_abs: String = ProjectSettings.globalize_path("user://bin/" + exe)
 		if not FileAccess.file_exists(user_abs):
 			_extract_ffmpeg_binary("res://bin/" + exe, user_abs)
-		if FileAccess.file_exists(user_abs):
-			return user_abs
-		# Fallback: bin/ folder placed alongside the exported executable.
-		var next_to_app: String = OS.get_executable_path().get_base_dir() + "/bin/" + exe
-		if FileAccess.file_exists(next_to_app):
-			return next_to_app
-
-	return name  # last resort: PATH lookup
+		path = SettingsService.resolve_ffmpeg_binary(name)
+	return path
 
 
 # Copies a binary from the PCK (res://) to an absolute filesystem path so it
@@ -1912,25 +1936,33 @@ func _ffmpeg_available() -> bool:
 	return OS.execute(_ffmpeg_binary("ffprobe"), ["-version"], out, true, false) == 0
 
 
-func _get_video_codec(path: String) -> String:
+
+
+# Probes a video's primary stream for both codec name and pixel format in one
+# ffprobe call. Returns {"codec": String, "pix_fmt": String} (lowercased; empty
+# strings when the probe fails). Used by the transcode planner.
+func _get_video_stream_info(path: String) -> Dictionary:
 	var out: Array = []
 	var args: PackedStringArray = [
 		"-v", "error",
 		"-select_streams", "v:0",
-		"-show_entries", "stream=codec_name",
+		"-show_entries", "stream=codec_name,pix_fmt",
 		"-of", "csv=p=0",
 		ProjectSettings.globalize_path(path),
 	]
 	if OS.execute(_ffmpeg_binary("ffprobe"), args, out, true, false) != 0 or out.is_empty():
-		return ""
-	# out[0] may contain multiple lines (stderr is merged in with read_stderr=true,
-	# and some ffprobe versions emit extra lines). Take only the first non-empty
-	# line so "h264\n..." doesn't fail the H264_NAMES membership check.
+		return {"codec": "", "pix_fmt": ""}
+	# csv=p=0 yields "codec_name,pix_fmt" on the first non-empty line. Take the
+	# first non-empty line (stderr is merged in with read_stderr=true).
 	for raw_line: String in (out[0] as String).split("\n"):
 		var line: String = raw_line.strip_edges().to_lower()
-		if line != "":
-			return line
-	return ""
+		if line == "":
+			continue
+		var parts: PackedStringArray = line.split(",")
+		var codec: String   = parts[0].strip_edges() if parts.size() > 0 else ""
+		var pix_fmt: String = parts[1].strip_edges() if parts.size() > 1 else ""
+		return {"codec": codec, "pix_fmt": pix_fmt}
+	return {"codec": "", "pix_fmt": ""}
 
 
 func _video_duration_seconds(path: String) -> float:

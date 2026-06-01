@@ -26,6 +26,10 @@ const INSERT_BTN_SIZE: float = 22.0
 const ZOOM_MIN:    float = 0.15
 const ZOOM_MAX:    float = 4.0
 const ZOOM_STEP:   float = 0.1
+# Screen-space top margin when framing the graph at the top-center of the view.
+const VIEW_TOP_MARGIN: float = 40.0
+# Padding kept around the content when fit-to-view frames the whole graph.
+const FIT_PADDING:     float = 60.0
 
 var _items:           Array      = []
 # Multi-selection: the selected item dicts (by reference) plus the single parent
@@ -114,7 +118,7 @@ func _center_initial_view() -> void:
 	# In case size hasn't been finalised yet, wait one more frame.
 	if size.x <= 0.0:
 		await get_tree().process_frame
-	_pan_offset = Vector2(size.x * 0.5, 40.0)
+	_pan_offset = Vector2(size.x * 0.5, VIEW_TOP_MARGIN)
 	_apply_transform()
 
 
@@ -792,8 +796,7 @@ func fit_to_view() -> void:
 		reset_view()
 		return
 
-	var pad: float = 60.0
-	var avail: Vector2 = size - Vector2(pad * 2.0, pad * 2.0)
+	var avail: Vector2 = size - Vector2(FIT_PADDING * 2.0, FIT_PADDING * 2.0)
 	var z: float = clamp(min(avail.x / content.x, avail.y / content.y), ZOOM_MIN, ZOOM_MAX)
 	_zoom = z
 	# Map the content's center to the viewport center.
@@ -805,7 +808,7 @@ func fit_to_view() -> void:
 # Restores the default zoom + top-center framing.
 func reset_view() -> void:
 	_zoom = 1.0
-	_pan_offset = Vector2(size.x * 0.5, 40.0)
+	_pan_offset = Vector2(size.x * 0.5, VIEW_TOP_MARGIN)
 	_apply_transform()
 
 

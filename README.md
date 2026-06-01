@@ -17,6 +17,8 @@ A Godot 4.6 application for creating and playing structured, interactive fap-her
 - **Score system** — stroke amplitude scoring per round, tallied on the end screen
 - **Coin economy** — rounds award coins; shops let you spend them on inventory items
 - **Inventory panel** — slide-in view of active effects with live countdown timers
+- **Save & Resume** — one save slot per journey; created at author-marked Checkpoint rounds or by buying "The Safe Word" item. Single-use (consumed on resume) and reset when the journey is re-saved or completed
+- **Device status banner** — surfaces connection problems mid-game (Intiface disconnected, no device, selected device unavailable with fallback, serial port closed)
 
 ### Device Support
 - **Buttplug / Intiface Central** — linear (stroker) and vibrator devices; auto-connect option
@@ -26,16 +28,17 @@ A Godot 4.6 application for creating and playing structured, interactive fap-her
 - **Position clamp** — hard min/max range applied to all output, adjustable in Options
 - **Storyboard filler** — keeps the device active during cutscenes with a configurable alternating stroke
 
-### Journey Builder
-- **Graph-based editor** — pan/zoom node graph for authoring the full round sequence
-- **Round nodes** — drag-and-drop funscript and video assignment; multi-file drop imports all axis scripts at once
-- **Multi-axis scripts** — per-axis drop zones (L1, L2, R0, R1, R2) under each round node
-- **Fork nodes** — branching paths with per-path cover image, name, and description
-- **Shop nodes** — insert purchasable modifier screens between rounds
-- **Storyboard nodes** — dialogue scenes with speaker, text, and optional images
+- **Graph-based editor** — pan/zoom node graph for authoring the full round sequence, with a **Fit-to-view** button and a built-in **shortcuts reference**
+- **Bulk import** — drop a batch of files (or a whole folder, scanned recursively) and the builder creates one round per video, pairing each with its matching funscript by file name
+- **Auto-fill & auto-route** — set a video and the matching funscript + secondary axis/vib scripts (`name_L1.funscript`, `name.vib1.funscript`, …) are pulled in automatically
+- **Copy / Cut / Paste / Duplicate** — move whole modules (including storyboards with all their images, or entire nested forks) between branches
+- **Multi-select** — marquee-drag or Ctrl+click to select several nodes, then copy/cut/delete/reorder them as a group
+- **Undo / Redo** — every structural change is reversible
+- **Live validation badges** — nodes flag missing funscripts, underfilled forks, or moved files before you save
+- **Fork / Shop / Storyboard nodes** — branching paths with per-path image/name/description, purchasable modifier screens, and dialogue cutscenes
 - **Tags** — toggle content tags per journey; defined in `data/tags.json` (no recompile needed)
 - **Difficulty** — Easy / Medium / Hard / Very Hard / Extreme / Insane
-- **Non-destructive save** — videos are copied (or transcoded to H.264 via bundled ffmpeg if needed) with a live progress modal; cancel-safe
+- **Non-destructive save** — staged to a temp folder then atomically swapped in, so a cancel or failure never touches the existing journey; videos are copied (or transcoded — see [Transcoding](#transcoding)) with a live, cancel-safe progress modal
 - **Edit existing journeys** — rename, reorder, change funscripts without re-importing videos
 
 ---
@@ -46,7 +49,7 @@ A Godot 4.6 application for creating and playing structured, interactive fap-her
 |---|---|
 | **Godot 4.6 (.NET)** | Required to open or build the project |
 | **EIRTeam.FFmpeg** | Required for MP4/MKV/WebM playback. [Releases →](https://github.com/EIRTeam/EIRTeam.FFmpeg/releases) |
-| **ffmpeg + ffprobe** | Required for video transcoding in the builder. Place in `bin/` (see below) |
+| **ffmpeg + ffprobe** | Used by the builder to transcode non-H.264 video. Bundled in `bin/`; a custom path can be set in Options, or auto-transcode can be turned off entirely (see [Transcoding](#transcoding)) |
 | **Intiface Central** | Required for Buttplug device support. [Download →](https://intiface.com/central/) |
 
 ---
@@ -65,6 +68,18 @@ A Godot 4.6 application for creating and playing structured, interactive fap-her
 
 ---
 
+## Transcoding
+
+The runtime decoder (EIRTeam.FFmpeg) only plays **H.264**, so the builder converts incompatible video on save. All of this is in **Options → Transcoding**:
+
+- **Auto-Transcode Videos** (on by default) — when on, the builder transcodes non-H.264 video, and re-encodes H.264 that's in a pixel format the decoder can't handle (10-bit, 4:2:2/4:4:4) to 8-bit 4:2:0. Turn it **off** to copy videos as-is — useful if you prepare your own H.264 files, and it removes the ffmpeg requirement entirely.
+- **FFmpeg Folder** — point the app at a folder containing `ffmpeg` and `ffprobe` if the bundled binaries can't run. A **Test** button confirms they launch.
+- When auto-transcode is on but ffmpeg can't run, the save **stops with a clear message** rather than producing an unplayable round.
+
+Transcodes use `libx264 -preset fast -crf 22 -pix_fmt yuv420p` with AAC audio.
+
+---
+
 ## Building & Exporting
 
 1. Open the project in **Godot 4.6 (.NET)**
@@ -80,36 +95,45 @@ Testers receive a single folder containing the `.exe`, `.pck`, and a `bin/` subf
 
 ## Journey File Format
 
-Journeys are stored as folders inside `user://journeys/` (accessible via **Options → Open Journeys Folder**).
+Journeys are stored as folders inside the journeys directory (default `user://journeys/`, configurable in **Options → Storage Location**; open it via **Options → Open Journeys Folder**).
+
+Rounds are written to short, fixed-length **slug folders** (`r001`, `r002`, …) with standard filenames inside. This bounds path length on Windows and prevents same-named rounds in different fork paths from colliding. The human-readable name lives in `journey.json`; the slug lives in each round's `FolderName`.
 
 ```
-user://journeys/
-└── My Journey/
-	├── journey.json          ← metadata, round list, tags, difficulty
-	├── media/                ← cover image and storyboard images
-	├── Round 1/
-	│   ├── Round 1.funscript
-	│   ├── Round 1_L1.funscript   ← optional secondary axis
-	│   └── video.mp4
-	└── Round 2/
+<journeys>/
+└── My Journey/                  ← folder = sanitized journey name
+	├── journey.json             ← metadata, round list, forks, shops, storyboards
+	├── media/                   ← cover, storyboard images, fork-path images
+	├── r001/
+	│   ├── script.funscript     ← main stroke script
+	│   ├── video.mp4            ← copied or transcoded to H.264
+	│   ├── axis_L1.funscript    ← optional secondary axis
+	│   ├── vib_vib1.funscript   ← optional vibrator channel
+	│   └── boss.png             ← optional boss intro image
+	└── r002/
 		└── ...
 ```
 
-`journey.json` schema (abbreviated):
+`journey.json` schema (abbreviated — keys are PascalCase):
 ```json
 {
-  "Title": "My Journey",
+  "Name": "My Journey",
   "Author": "Author Name",
   "Description": "...",
   "Difficulty": "Medium",
   "Tags": ["straight", "real"],
-  "CoverPath": "media/cover.jpg",
-  "Rounds": [...],
+  "Rounds": [
+    { "Name": "Round 1", "FolderName": "r001", "Order": 1,
+      "CoinsAwarded": 10, "RoundType": "Normal", "IsCheckpoint": false,
+      "FunscriptPath": "r001/script.funscript", "AxisScripts": {}, "VibScripts": {} }
+  ],
   "Forks": [...],
   "Shops": [...],
   "Storyboards": [...]
 }
 ```
+
+> The cover image isn't stored as a JSON key — it's auto-detected from `media/cover.*` when the catalogue scans the folder.
 
 ---
 
@@ -130,10 +154,10 @@ Each entry requires `id` (lowercase, URL-safe), `label` (display text), and `col
 
 ## Multi-Axis T-code
 
-Secondary axes (L1, L2, R0, R1, R2) are supported for serial T-code devices. To use them:
+Secondary axes (L1, L2, R0, R1, R2) and vibrator channels (vib1, vib2) are supported for serial T-code devices. To use them:
 
-1. In the Journey Builder, expand the **Extra Axes (Serial Only)** section under a round node
-2. Drop the corresponding `.funscript` file onto each axis drop zone
+1. **Easiest:** name the files with the axis/channel suffix (`scene_L1.funscript`, `scene.vib1.funscript`, …) and drop them alongside the main video/funscript — the builder routes each to the right slot automatically (on bulk import, single-round drops, or via auto-fill)
+2. **Manual:** expand the Extra Axes / Vibrator Scripts sections under a round and drop a `.funscript` onto each slot directly
 3. On single-axis devices, secondary axis commands are silently ignored per the T-code spec
 
 All axes ease in together from neutral at round start and ease out together on pause or stop.
@@ -157,10 +181,16 @@ All axes ease in together from neutral at round start and ease out together on p
 | Key | Action |
 |---|---|
 | `Ctrl + S` | Save journey |
+| `Ctrl + C` / `Ctrl + X` / `Ctrl + V` | Copy / Cut / Paste selected module(s) |
+| `Ctrl + Z` / `Ctrl + Y` | Undo / Redo (`Ctrl + Shift + Z` also redoes) |
+| `Backspace` / `Delete` | Delete selected module(s) |
+| `Left Click` (node) | Select node and open its editor |
+| `Ctrl + Click` (node) | Add / remove a node from the selection |
+| `Drag` (empty canvas) | Marquee-select nodes in one branch |
 | `Middle Mouse + Drag` | Pan the graph canvas |
 | `Scroll Wheel` | Zoom the graph canvas in / out |
-| `Left Click` (node) | Select node and open its editor in the side panel |
-| `Left Click` (empty canvas) | Deselect |
+
+> Editing shortcuts (copy/cut/paste/undo/redo/delete) defer to normal text editing while a text field is focused. A full reference is also available via the **⌨ Shortcuts** button in the builder.
 
 ---
 
@@ -170,14 +200,19 @@ Settings are stored in `user://settings.cfg` and managed through the in-app Opti
 
 | Setting | Description |
 |---|---|
-| Master Volume | Overall audio level |
+| Master / Music Volume | Audio levels |
 | Fullscreen | Exclusive fullscreen toggle |
 | Resolution | Window size when not fullscreen |
+| UI Scale | Scales the whole interface — raise it on high-resolution / 4K displays |
+| HUD Auto-Hide | Delay before the in-game HUD fades |
+| Beat Bar | Show upcoming stroke beats during play |
 | Output Mode | Buttplug (Intiface) or Serial T-code |
 | Intiface Address | WebSocket address for Intiface Central (default: `ws://localhost:12345`) |
 | Serial Port / Baud | COM port and baud rate for T-code serial devices |
 | Position Clamp | Hard min/max range applied to all device output |
 | Storyboard Filler | Keep device active during cutscenes; configurable speed and range |
+| Storage Location | Folder where journeys are stored; existing journeys move automatically |
+| Auto-Transcode / FFmpeg Folder | Video transcoding controls (see [Transcoding](#transcoding)) |
 
 ---
 

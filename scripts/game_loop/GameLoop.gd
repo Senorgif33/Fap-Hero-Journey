@@ -65,7 +65,6 @@ var _device_warning_label:  Label          = null
 
 var _paused: bool = false
 var _inventory_panel: Control = null
-var _cover_applied: bool = false
 
 # True while a full-screen overlay (shop / fork / storyboard) is active.
 # Used to suppress gameplay hotkeys that should not fire through an overlay.
@@ -581,7 +580,6 @@ func _fit_video_cover() -> void:
 	var video_size := texture.get_size()
 	if video_size.x <= 0.0 or video_size.y <= 0.0:
 		return
-	_cover_applied = true
 	var screen := get_viewport_rect().size
 	var video_ar := video_size.x / video_size.y
 	var screen_ar := screen.x / screen.y
@@ -614,7 +612,6 @@ func _find_video(folder: String) -> String:
 
 
 func _load_video(path: String) -> void:
-	_cover_applied = false
 	_video.position = Vector2.ZERO
 	_video.size = get_viewport_rect().size
 	if path == "":

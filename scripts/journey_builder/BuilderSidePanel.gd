@@ -98,12 +98,8 @@ func show_insert_popup(overlay: Control, graph: Control, arr: Array, insert_idx:
 		paste_btn.custom_minimum_size = Vector2(180, 0)
 		UITheme.style_button(paste_btn, UITheme.AMBER)
 		paste_btn.pressed.connect(func() -> void:
-			_owner._push_undo()
-			for i in _owner._clipboard_items.size():
-				arr.insert(insert_idx + i, _owner._clipboard_items[i].duplicate(true))
+			_owner._paste_clipboard_into(arr, insert_idx)
 			popup.queue_free()
-			graph.call_deferred("set_items", _owner._items)
-			graph.call_deferred("select_item", arr, insert_idx)
 		)
 		vbox.add_child(paste_btn)
 
@@ -310,11 +306,7 @@ func show_journey_info_panel() -> void:
 		paste_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		UITheme.style_button(paste_btn, UITheme.AMBER)
 		paste_btn.pressed.connect(func() -> void:
-			_owner._push_undo()
-			for clip: Dictionary in _owner._clipboard_items:
-				_owner._items.append(clip.duplicate(true))
-			_owner._refresh_graph()
-			_owner._graph.call_deferred("select_item", _owner._items, _owner._items.size() - 1)
+			_owner._paste_clipboard_into(_owner._items, _owner._items.size())
 		)
 		side_vbox.add_child(paste_btn)
 
@@ -532,20 +524,9 @@ func _side_section_separator() -> Control:
 	return spacer
 
 
-# Short uppercase label for an item type. Used in clipboard status messages and
-# paste-button captions so the author knows what they copied / are pasting.
-func _item_type_label(item: Dictionary) -> String:
-	match item.get("type", "round"):
-		"round":      return "ROUND"
-		"shop":       return "SHOP"
-		"storyboard": return "STORYBOARD"
-		"fork":       return "FORK"
-	return "ITEM"
-
-
 # Bottom action block used by every side-panel editor: a clipboard row
-# (Copy / Duplicate) stacked above the move/delete row. Returns a VBox so all
-# four item editors get the same controls from one place.
+# (Copy / Cut / Duplicate) stacked above the move/delete row. Returns a VBox so
+# all four item editors get the same controls from one place.
 func _side_action_row(arr: Array, idx: int, graph: Control, reselect: Callable) -> Control:
 	var block: VBoxContainer = VBoxContainer.new()
 	block.add_theme_constant_override("separation", 6)
@@ -555,28 +536,18 @@ func _side_action_row(arr: Array, idx: int, graph: Control, reselect: Callable) 
 	var clip_row: HBoxContainer = HBoxContainer.new()
 	clip_row.add_theme_constant_override("separation", 6)
 
+	# Copy / Cut route through the owner's set-based ops (this single-node editor
+	# is just the one-item selection), so keyboard and button paths stay identical.
 	var copy_btn: Button = UITheme.make_icon_btn("⧉ COPY", false, UITheme.PURPLE_BRIGHT)
 	copy_btn.custom_minimum_size = Vector2(0, 0)
 	copy_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	copy_btn.pressed.connect(func() -> void:
-		# Deep duplicate so later edits to the live item don't mutate the copy.
-		_owner._clipboard_items = [(arr[idx] as Dictionary).duplicate(true)]
-		_owner._show_status("Copied %s — press Ctrl+V, or click any + then Paste." % _item_type_label(arr[idx]), false)
-	)
+	copy_btn.pressed.connect(func() -> void: _owner._copy_selection())
 	clip_row.add_child(copy_btn)
 
-	# Cut = copy to clipboard + remove (one undo step). Mirrors Ctrl+X.
 	var cut_btn: Button = UITheme.make_icon_btn("✂ CUT", false, UITheme.MAGENTA)
 	cut_btn.custom_minimum_size = Vector2(0, 0)
 	cut_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cut_btn.pressed.connect(func() -> void:
-		var label: String = _item_type_label(arr[idx])
-		_owner._clipboard_items = [(arr[idx] as Dictionary).duplicate(true)]
-		_owner._push_undo()
-		arr.remove_at(idx)
-		reselect.call(-1)
-		_owner._show_status("Cut %s — press Ctrl+V to paste it elsewhere (Ctrl+Z to undo)." % label, false)
-	)
+	cut_btn.pressed.connect(func() -> void: _owner._cut_selection())
 	clip_row.add_child(cut_btn)
 
 	# Duplicate = copy + drop a clone directly after this item, then select it.

@@ -56,6 +56,11 @@ var _journeys_path_label: Label  = null
 var _journeys_browse_btn: Button = null
 var _journeys_reset_btn:  Button = null
 
+# Built dynamically in _build_transcode_section().
+var _ffmpeg_path_label:   Label  = null
+var _ffmpeg_status_label: Label  = null
+var _auto_transcode_toggle: Button = null
+
 @onready var _output_mode_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeDropdown
 
 @onready var _serial_port_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialPortRow/SerialPortDropdown
@@ -102,9 +107,10 @@ var _filler_range_max_lbl: Label       = null
 # Tab bar + references to the three code-built sections, needed so tab
 # switching can toggle their visibility alongside the scene-built sections.
 var _tab_bar:         TabBar        = null
-var _range_section:   VBoxContainer = null
-var _filler_section:  VBoxContainer = null
-var _credits_section: VBoxContainer = null
+var _range_section:    VBoxContainer = null
+var _filler_section:   VBoxContainer = null
+var _transcode_section: VBoxContainer = null
+var _credits_section:  VBoxContainer = null
 
 
 func _ready() -> void:
@@ -744,6 +750,9 @@ func _apply_layout() -> void:
 	# ── Journey storage location row (inserted into JourneysSection) ──────────
 	_build_journey_location_row()
 
+	# ── Transcoding section (built entirely in code) ─────────────────────────
+	_build_transcode_section()
+
 	# ── Credits section ───────────────────────────────────────────────────────
 	var credits_section: VBoxContainer = VBoxContainer.new()
 	credits_section.add_theme_constant_override("separation", 12)
@@ -814,7 +823,7 @@ func _on_tab_changed(idx: int) -> void:
 	const VBOX: String = "ContentPanel/ContentScroll/MarginWrapper/ContentVBox/"
 	var pages: Array = [
 		# GENERAL
-		[get_node(VBOX + "JourneysSection"), get_node(VBOX + "AudioSection"), get_node(VBOX + "DisplaySection")],
+		[get_node(VBOX + "JourneysSection"), get_node(VBOX + "AudioSection"), get_node(VBOX + "DisplaySection"), _transcode_section],
 		# CONNECTION
 		[get_node(VBOX + "OutputSection"), get_node(VBOX + "IntifaceSection"), get_node(VBOX + "SerialSection")],
 		# DEVICE
@@ -1321,6 +1330,154 @@ func _on_open_journeys_folder_pressed() -> void:
 # Builds the "STORAGE LOCATION" row showing the current journeys folder with
 # Browse + Reset buttons, then slots it into JourneysSection above the
 # existing "Open Journeys Folder" row.
+# Builds the Transcoding section: a custom ffmpeg-folder picker (with a Test
+# button), and the auto-transcode master toggle. Appended to the
+# content column like the other code-built sections.
+func _build_transcode_section() -> void:
+	var section: VBoxContainer = VBoxContainer.new()
+	section.add_theme_constant_override("separation", 12)
+	_content_vbox.add_child(section)
+	_transcode_section = section
+
+	var header: Label = Label.new()
+	header.text = "TRANSCODING"
+	_style_label(header, UITheme.PURPLE_BRIGHT, 13, true)
+	section.add_child(header)
+
+	var divider: HSeparator = HSeparator.new()
+	divider.add_theme_stylebox_override("separator", _make_separator_style())
+	section.add_child(divider)
+
+	# ffmpeg folder row: label · path · Browse · Test · Use Bundled
+	var path_row: HBoxContainer = HBoxContainer.new()
+	path_row.add_theme_constant_override("separation", 12)
+	section.add_child(path_row)
+
+	var path_lbl: Label = Label.new()
+	path_lbl.text = "FFMPEG FOLDER"
+	path_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(path_lbl, UITheme.WHITE_SOFT, 14, false)
+	path_row.add_child(path_lbl)
+
+	_ffmpeg_path_label = Label.new()
+	_ffmpeg_path_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_ffmpeg_path_label.clip_text = true
+	_style_label(_ffmpeg_path_label, UITheme.PURPLE_BRIGHT, 12, false)
+	path_row.add_child(_ffmpeg_path_label)
+
+	var browse_btn: Button = Button.new()
+	browse_btn.text = "📁 BROWSE"
+	_style_button(browse_btn, UITheme.PURPLE_MID)
+	browse_btn.pressed.connect(_on_ffmpeg_browse_pressed)
+	path_row.add_child(browse_btn)
+
+	var test_btn: Button = Button.new()
+	test_btn.text = "TEST"
+	_style_button(test_btn, UITheme.PURPLE_MID)
+	test_btn.pressed.connect(_run_ffmpeg_test)
+	path_row.add_child(test_btn)
+
+	var clear_btn: Button = Button.new()
+	clear_btn.text = "↺ USE BUNDLED"
+	_style_button(clear_btn, UITheme.PURPLE_MID)
+	clear_btn.pressed.connect(func() -> void:
+		SettingsService.set_ffmpeg_dir("")
+		SettingsService.save()
+		_refresh_ffmpeg_path_label()
+		if _ffmpeg_status_label != null:
+			_ffmpeg_status_label.text = ""
+	)
+	path_row.add_child(clear_btn)
+
+	_refresh_ffmpeg_path_label()
+
+	_ffmpeg_status_label = Label.new()
+	_ffmpeg_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(_ffmpeg_status_label, UITheme.SEPARATOR, 11, false)
+	section.add_child(_ffmpeg_status_label)
+
+	# Auto-transcode master toggle.
+	var auto_row: HBoxContainer = HBoxContainer.new()
+	auto_row.add_theme_constant_override("separation", 16)
+	section.add_child(auto_row)
+
+	var auto_lbl: Label = Label.new()
+	auto_lbl.text = "AUTO-TRANSCODE VIDEOS"
+	auto_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(auto_lbl, UITheme.WHITE_SOFT, 14, false)
+	auto_row.add_child(auto_lbl)
+
+	_auto_transcode_toggle = Button.new()
+	_auto_transcode_toggle.toggle_mode = true
+	_auto_transcode_toggle.focus_mode  = Control.FOCUS_NONE
+	var auto_on: bool = SettingsService.get_auto_transcode()
+	_auto_transcode_toggle.button_pressed = auto_on
+	_style_toggle(_auto_transcode_toggle, auto_on)
+	_auto_transcode_toggle.toggled.connect(func(pressed: bool) -> void:
+		_style_toggle(_auto_transcode_toggle, pressed)
+		SettingsService.set_auto_transcode(pressed)
+		SettingsService.save()
+	)
+	auto_row.add_child(_auto_transcode_toggle)
+
+	var hint: Label = Label.new()
+	hint.text = "On (recommended): videos are converted on save so they'll play — non-H.264 is transcoded, and H.264 in formats the player can't decode (10-bit, 4:2:2) is re-encoded. Off: videos are copied as-is and ffmpeg isn't needed — only use this if you prepare H.264 videos yourself. Leave FFmpeg Folder empty to use the bundled copy; set it only if the bundled ffmpeg won't run (e.g. under Wine)."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(hint, UITheme.SEPARATOR, 11, false)
+	section.add_child(hint)
+
+
+func _refresh_ffmpeg_path_label() -> void:
+	if _ffmpeg_path_label == null:
+		return
+	var dir: String = SettingsService.get_ffmpeg_dir()
+	if dir == "":
+		_ffmpeg_path_label.text = "(bundled / system PATH)"
+		_ffmpeg_path_label.tooltip_text = ""
+	else:
+		_ffmpeg_path_label.text = dir
+		_ffmpeg_path_label.tooltip_text = dir
+
+
+func _on_ffmpeg_browse_pressed() -> void:
+	var dialog: FileDialog = FileDialog.new()
+	dialog.access    = FileDialog.ACCESS_FILESYSTEM
+	dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	dialog.title     = "Select Folder Containing ffmpeg and ffprobe"
+	var cur: String = SettingsService.get_ffmpeg_dir()
+	if cur != "" and DirAccess.dir_exists_absolute(cur):
+		dialog.current_dir = cur
+	add_child(dialog)
+	dialog.popup_centered(Vector2i(900, 600))
+	dialog.dir_selected.connect(func(picked: String) -> void:
+		dialog.queue_free()
+		SettingsService.set_ffmpeg_dir(picked)
+		SettingsService.save()
+		_refresh_ffmpeg_path_label()
+		_run_ffmpeg_test()
+	)
+	dialog.canceled.connect(func() -> void: dialog.queue_free())
+
+
+# Runs `ffprobe -version` from the resolved location and reports the result, so
+# users (especially on Wine) can confirm their ffmpeg actually launches.
+func _run_ffmpeg_test() -> void:
+	if _ffmpeg_status_label == null:
+		return
+	var out: Array = []
+	# Same resolver the builder's save path uses, so the test reflects reality.
+	var code: int = OS.execute(SettingsService.resolve_ffmpeg_binary("ffprobe"), ["-version"], out, true, false)
+	if code == 0:
+		var ver: String = ""
+		if not out.is_empty():
+			ver = (out[0] as String).strip_edges().split("\n")[0]
+		_ffmpeg_status_label.add_theme_color_override("font_color", UITheme.SUCCESS)
+		_ffmpeg_status_label.text = "✓ ffmpeg works.  %s" % ver
+	else:
+		_ffmpeg_status_label.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+		_ffmpeg_status_label.text = "✗ Could not run ffprobe from this location. Pick the folder that contains ffmpeg and ffprobe (or install ffmpeg on your PATH)."
+
+
 func _build_journey_location_row() -> void:
 	var journeys_section: VBoxContainer = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/JourneysSection
 

@@ -46,6 +46,8 @@ const DEFAULT_FILLER_HALF_CYCLE: int    = 2000
 const DEFAULT_FILLER_LO:         int    = 0
 const DEFAULT_FILLER_HI:         int    = 100
 const DEFAULT_JOURNEYS_DIR:      String = "user://journeys"
+const DEFAULT_FFMPEG_DIR:        String = ""    # "" = bundled binary / PATH
+const DEFAULT_AUTO_TRANSCODE:    bool   = true
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -147,6 +149,48 @@ func get_filler_hi() -> int:
 func get_journeys_dir() -> String:
 	return str(_config.get_value("storage", "journeys_dir", DEFAULT_JOURNEYS_DIR))
 
+# Optional folder holding ffmpeg + ffprobe. Empty = use the bundled binaries (or
+# the system PATH). Lets users on Wine / unusual setups point at a working
+# ffmpeg when the bundled one can't run.
+func get_ffmpeg_dir() -> String:
+	return str(_config.get_value("transcode", "ffmpeg_dir", DEFAULT_FFMPEG_DIR))
+
+# Resolves an ffmpeg tool ("ffmpeg" / "ffprobe") to a runnable path: custom
+# folder → bundled (res:// in the editor, user:// or next-to-app in exports) →
+# bare name (system PATH). Pure lookup — no PCK extraction (the builder handles
+# that). Single source of truth so the builder and the Options "Test" button
+# can't drift apart.
+func resolve_ffmpeg_binary(name: String) -> String:
+	var exe: String = name + ".exe" if OS.get_name() == "Windows" else name
+	var dir: String = get_ffmpeg_dir()
+	if dir != "":
+		# Try the platform-suffixed name and the bare name (covers a folder of
+		# Linux-style binaries used from a Windows build).
+		for cand_name: String in [exe, name]:
+			var cand: String = dir.path_join(cand_name)
+			if FileAccess.file_exists(cand):
+				return cand
+	if OS.has_feature("editor"):
+		var bundled: String = ProjectSettings.globalize_path("res://bin/" + exe)
+		if FileAccess.file_exists(bundled):
+			return bundled
+	else:
+		var user_abs: String = ProjectSettings.globalize_path("user://bin/" + exe)
+		if FileAccess.file_exists(user_abs):
+			return user_abs
+		var next_to_app: String = OS.get_executable_path().get_base_dir() + "/bin/" + exe
+		if FileAccess.file_exists(next_to_app):
+			return next_to_app
+	return name  # last resort: PATH lookup
+
+# When true (default), the builder automatically converts videos on save so they
+# play: non-H.264 codecs are transcoded, and H.264 in a pixel format the runtime
+# decoder can't handle (10-bit, 4:2:2/4:4:4) is re-encoded to 8-bit 4:2:0. When
+# false, NO transcoding happens — videos are copied as-is (the author takes
+# responsibility for compatibility, and ffmpeg isn't required).
+func get_auto_transcode() -> bool:
+	return bool(_config.get_value("transcode", "auto_transcode", DEFAULT_AUTO_TRANSCODE))
+
 
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
@@ -238,6 +282,12 @@ func set_filler_hi(value: int) -> void:
 
 func set_journeys_dir(value: String) -> void:
 	_config.set_value("storage", "journeys_dir", value)
+
+func set_ffmpeg_dir(value: String) -> void:
+	_config.set_value("transcode", "ffmpeg_dir", value)
+
+func set_auto_transcode(value: bool) -> void:
+	_config.set_value("transcode", "auto_transcode", value)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
