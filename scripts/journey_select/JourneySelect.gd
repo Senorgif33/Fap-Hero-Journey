@@ -67,6 +67,11 @@ const JourneyCardScene = preload("res://scenes/journey_select/JourneyCard.tscn")
 @onready var _edit_btn:     Button          = $DetailModal/ModalPanel/ModalLayout/DetailsColumn/ActionRow/EditButton
 @onready var _delete_btn:   Button          = $DetailModal/ModalPanel/ModalLayout/DetailsColumn/ActionRow/DeleteButton
 
+# Dynamically created in _populate_modal when the current journey has a save.
+# Inserted as the first child of the ActionRow so it sits before Play. Removed
+# (and Play recoloured) when the modal switches to a journey without a save.
+var _resume_btn: Button = null
+
 var _journeys:        Array      = []
 var _sort_field:      String     = "name"
 var _sort_asc:        bool       = true
@@ -426,8 +431,23 @@ func _on_backdrop_input(event: InputEvent) -> void:
 func _on_play_pressed() -> void:
 	if _current_journey.is_empty():
 		return
-	GameState.StartJourney(_current_journey)
-	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
+	# When a save exists, "Play" means New Run — confirm overwrite first so
+	# the user doesn't lose progress they may have forgotten about.
+	var folder_name: String = _current_journey.get("folder_name", "")
+	if JourneySaveService.has_save(folder_name):
+		var title: String = _current_journey.get("title", "this journey")
+		var dialog: ConfirmationDialog = ConfirmationDialog.new()
+		dialog.title = "Start a New Run?"
+		dialog.dialog_text = "You have a saved run for \"%s\". Starting a new run will permanently delete that save.\n\nUse the Resume button instead to continue where you left off." % title
+		dialog.ok_button_text = "DELETE SAVE & PLAY"
+		dialog.cancel_button_text = "CANCEL"
+		dialog.get_ok_button().add_theme_color_override("font_color", UITheme.DANGER)
+		dialog.confirmed.connect(_on_play_pressed_unguarded)
+		dialog.canceled.connect(func() -> void: dialog.queue_free())
+		add_child(dialog)
+		dialog.popup_centered()
+		return
+	_on_play_pressed_unguarded()
 
 
 func _on_edit_pressed() -> void:
@@ -459,6 +479,10 @@ func _confirm_delete() -> void:
 	var folder: String = _current_journey.get("folder", "")
 	if folder != "":
 		JourneyData.delete_dir_recursive(folder)
+	# Also drop the save file — a deleted journey shouldn't leave orphan saves
+	# in user://journey_saves/ that would resurface if the user creates a new
+	# journey with the same folder name.
+	JourneySaveService.delete_save(_current_journey.get("folder_name", ""))
 	_journeys.erase(_current_journey)
 	_current_journey = {}
 	_close_modal()
@@ -673,6 +697,88 @@ func _populate_modal(journey: Dictionary) -> void:
 		forks_data,
 		0
 	)
+
+	# Resume vs Play UI. When a save exists for this journey, surface a Resume
+	# button as the primary action and recolour Play to make it clear it'll
+	# start a fresh run (overwriting the save). When no save exists, the
+	# button row is the original Play / Edit / Delete trio.
+	_refresh_resume_button(journey)
+
+
+# Creates or removes the Resume button based on whether the current journey
+# has a save. Idempotent — safe to call every time the modal opens.
+func _refresh_resume_button(journey: Dictionary) -> void:
+	var folder_name: String = journey.get("folder_name", "")
+	var has_save: bool = JourneySaveService.has_save(folder_name)
+
+	if has_save:
+		if _resume_btn == null:
+			_resume_btn = Button.new()
+			_resume_btn.text = "▶  RESUME"
+			_style_button(_resume_btn, UITheme.AMBER)
+			_resume_btn.pressed.connect(_on_resume_pressed)
+			var action_row: HBoxContainer = _play_btn.get_parent()
+			action_row.add_child(_resume_btn)
+			action_row.move_child(_resume_btn, _play_btn.get_index())
+		_play_btn.text = "↻  NEW RUN"
+		_style_button(_play_btn, UITheme.PURPLE_MID)
+	else:
+		if _resume_btn != null:
+			_resume_btn.queue_free()
+			_resume_btn = null
+		_play_btn.text = "▶  PLAY"
+		_style_button(_play_btn, UITheme.PURPLE_BRIGHT)
+
+
+# Loads the save file for the current journey, restores game state into the
+# autoload services, and transitions to the gameplay scene. Bypasses the
+# normal StartJourney path so the saved sequence (including any fork choices
+# already made) is preserved.
+#
+# Saves are single-use by design: the file is deleted as part of the resume
+# so the player has to actively earn a new save point (reach a checkpoint
+# round or use The Safe Word) before they can quit-and-resume again. This
+# keeps the save model thematically consistent — checkpoints are recoveries
+# you commit to, not safety nets you indefinitely fall back on.
+func _on_resume_pressed() -> void:
+	if _current_journey.is_empty():
+		return
+	var folder_name: String = _current_journey.get("folder_name", "")
+	var save_data: Dictionary = JourneySaveService.read_save(folder_name)
+	if save_data.is_empty():
+		# Save vanished between modal open and Resume click (deleted in another
+		# window?). Fall back to a fresh start so the user isn't stuck.
+		push_warning("JourneySelect: save missing or unreadable — starting fresh")
+		_on_play_pressed_unguarded()
+		return
+
+	GameState.LoadFromSave(_current_journey, save_data)
+	CoinService.SetBalance(int(save_data.get("coins", 0)))
+	ScoreService.LoadFromSave({
+		"score":   save_data.get("score", 0),
+		"strokes": save_data.get("total_actions", 0),
+	})
+	# Restore the round-names log so the end-screen breakdown is complete.
+	var names: PackedStringArray = PackedStringArray()
+	for n in (save_data.get("round_names", []) as Array):
+		names.append(str(n))
+	GameState.set_meta("_round_names", names)
+
+	# Consume the save NOW (before the transition). If the player quits at any
+	# point in the resumed run without writing a fresh save, the journey is
+	# back to fresh-start state in the catalogue.
+	JourneySaveService.delete_save(folder_name)
+
+	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
+
+
+# Internal: starts a fresh journey without any save-overwrite check. Used by
+# both the new-run path (after the user confirms overwrite) and the fallback
+# path when a save is unreadable.
+func _on_play_pressed_unguarded() -> void:
+	JourneySaveService.delete_save(_current_journey.get("folder_name", ""))
+	GameState.StartJourney(_current_journey)
+	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
 
 
 # ---------------------------------------------------------------------------

@@ -107,5 +107,14 @@
 		"price":        20,
 		"duration_ms":  30000,
 		"kind":         "wildcard"
+	},
+	{
+		"id":           "safe_word",
+		"name":         "The Safe Word",
+		"description":  "Saves your run at the start of the current round. One-time save — used up when you resume.",
+		"category":     "utility",
+		"price":        120,
+		"duration_ms":  0,
+		"kind":         "save_now"
 	}
 ]

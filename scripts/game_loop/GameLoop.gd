@@ -158,7 +158,7 @@ func _on_storyboard_completed(coins: int) -> void:
 		CoinService.AddCoins(coins)
 	GameState.Advance()
 	if GameState.IsSequenceDone():
-		Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
+		_transition_to_end_screen()
 		return
 	await _transition_swap(func() -> void:
 		_video.paused = false
@@ -181,7 +181,7 @@ func _on_shop_closed() -> void:
 	_is_overlay_open = false
 	GameState.Advance()
 	if GameState.IsSequenceDone():
-		Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
+		_transition_to_end_screen()
 		return
 	await _transition_swap(func() -> void:
 		_video.paused = false
@@ -233,7 +233,12 @@ func _load_current_round() -> void:
 	else:
 		_round_lbl.text = "ROUND %d / %d  —  %s" % [num, total,
 			(round.get("name", "") as String).to_upper()]
-		_begin_round(round)
+		# Author-marked checkpoint rounds offer a Save & Quit opt-in before
+		# round playback. Continuing dismisses the banner and plays normally.
+		if round.get("is_checkpoint", false):
+			_show_checkpoint_banner(round)
+		else:
+			_begin_round(round)
 
 
 # Loads the round's scripts + video and starts playback. For boss rounds this
@@ -277,6 +282,65 @@ func _begin_round(round: Dictionary) -> void:
 	var folder: String = round.get("folder", "")
 	var video_path: String = _find_video(folder)
 	_load_video(video_path)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint rounds
+# ---------------------------------------------------------------------------
+
+# CHECKPOINT REACHED banner shown at the start of any round the author marked
+# as a checkpoint. Two buttons: Save & Quit (writes a save + returns to
+# catalogue) or Continue (dismisses the banner and starts the round normally).
+# Pattern mirrors _show_boss_intro since both gate round start on user input.
+func _show_checkpoint_banner(round: Dictionary) -> void:
+	_is_overlay_open = true   # suppress gameplay hotkeys while the banner is up
+
+	var parts: Dictionary    = UITheme.build_centered_modal("◆  CHECKPOINT REACHED  ◆", UITheme.AMBER, Vector2i(620, 320))
+	var modal: Control       = parts["modal"]
+	var vbox:  VBoxContainer = parts["vbox"]
+	vbox.add_theme_constant_override("separation", 18)
+
+	var subtitle: Label = Label.new()
+	subtitle.text = (round.get("name", "") as String).to_upper()
+	UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
+	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(subtitle)
+
+	var hint: Label = Label.new()
+	hint.text = "You've reached a save point. Save & Quit to resume from this round later, or continue playing now. The save is one-time — used up when you resume."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(hint, UITheme.PURPLE_MID, 12, false)
+	vbox.add_child(hint)
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 16)
+	vbox.add_child(btn_row)
+
+	var save_btn: Button = Button.new()
+	save_btn.text = "💾  SAVE & QUIT"
+	save_btn.custom_minimum_size = Vector2(200, 0)
+	UITheme.style_button(save_btn, UITheme.AMBER)
+	save_btn.pressed.connect(func() -> void:
+		modal.queue_free()
+		_is_overlay_open = false
+		_on_save_and_quit()
+	)
+	btn_row.add_child(save_btn)
+
+	var continue_btn: Button = Button.new()
+	continue_btn.text = "▶  CONTINUE"
+	continue_btn.custom_minimum_size = Vector2(160, 0)
+	UITheme.style_button(continue_btn, UITheme.PURPLE_BRIGHT)
+	continue_btn.pressed.connect(func() -> void:
+		modal.queue_free()
+		_is_overlay_open = false
+		_begin_round(round)
+	)
+	btn_row.add_child(continue_btn)
+
+	add_child(modal)
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +693,7 @@ func _on_round_ended() -> void:
 		CoinService.AddCoins(coins)
 
 	if GameState.IsLastRound():
-		Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
+		_transition_to_end_screen()
 		return
 	await _transition_swap(func() -> void:
 		GameState.Advance()
@@ -662,6 +726,105 @@ func _go_to_menu() -> void:
 	_video.stop()
 	FunscriptPlayer.Stop()
 	Transition.change_scene("res://scenes/main/Main.tscn")
+
+
+# Called from every "journey finished" exit site. Wipes the save file so the
+# next time the player opens the journey it offers a fresh start instead of
+# a stale Resume button pointing at a completed run.
+func _transition_to_end_screen() -> void:
+	JourneySaveService.delete_save(GameState.Journey.get("folder_name", ""))
+	Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
+
+
+# ---------------------------------------------------------------------------
+# Save / Resume
+# ---------------------------------------------------------------------------
+
+# Writes a save for the current journey at the start of the current round.
+# Used by both the checkpoint banner's "Save & Quit" button and the save_now
+# inventory item. Returns true on success.
+#
+# Save point semantics: whatever round the player is *currently in* is the
+# resume point. We don't preserve mid-round position — the player restarts
+# the current round from action 0 on resume. This keeps the save model
+# simple and predictable (you replay the round you were doing).
+func _write_journey_save() -> bool:
+	var journey: Dictionary = GameState.Journey
+	var folder_name: String = journey.get("folder_name", "")
+	if folder_name == "":
+		push_warning("GameLoop: cannot save — journey has no folder_name")
+		return false
+
+	# Stitch together one payload from each service that owns part of the run.
+	var game_state_data: Dictionary = GameState.CaptureSaveData()
+	var score_data: Dictionary       = ScoreService.CaptureSaveData()
+	var payload: Dictionary = {
+		"sequence_index": game_state_data.get("sequence_index", 0),
+		"sequence":       game_state_data.get("sequence", []),
+		"fork_depth":     game_state_data.get("fork_depth", 0),
+		"coins":          CoinService.Balance,
+		"score":          score_data.get("score", 0),
+		"total_actions":  score_data.get("strokes", 0),
+		"round_names":    (GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray),
+	}
+	return JourneySaveService.write_save(folder_name, payload)
+
+
+# Triggered by the checkpoint banner's "Save & Quit" button (also by the
+# save_now item — both flow through here). Writes the save, then returns to
+# the catalogue with the same cleanup as a regular Back-to-Menu.
+func _on_save_and_quit() -> void:
+	var ok: bool = _write_journey_save()
+	if not ok:
+		push_warning("GameLoop: save failed — returning to menu without saving")
+	_go_to_menu()
+
+
+# Triggered when the save_now utility item is consumed. Unlike the checkpoint
+# banner's Save & Quit, the run keeps going — the item just writes a save the
+# player can return to later. Boss-round lockout is enforced by the inventory
+# panel which disables item use during bosses, so we don't need to check
+# round type here.
+func _on_save_item_used() -> void:
+	var ok: bool = _write_journey_save()
+	if ok:
+		_show_save_toast("✓  PROGRESS SAVED")
+	else:
+		_show_save_toast("✕  SAVE FAILED")
+
+
+# Brief auto-dismissing notification used after the save_now item fires. Keeps
+# the player in the round instead of pulling them into a modal.
+func _show_save_toast(text: String) -> void:
+	var toast: PanelContainer = PanelContainer.new()
+	toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	toast.anchor_left  = 0.5; toast.anchor_right  = 0.5
+	toast.anchor_top   = 0.0; toast.anchor_bottom = 0.0
+	toast.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	toast.offset_top = 70    # below the device-warning banner
+
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color              = Color(UITheme.AMBER.r, UITheme.AMBER.g, UITheme.AMBER.b, 0.92)
+	s.border_color          = UITheme.AMBER
+	s.border_width_left     = 2; s.border_width_right  = 2
+	s.border_width_top      = 2; s.border_width_bottom = 2
+	s.content_margin_left   = 20; s.content_margin_right  = 20
+	s.content_margin_top    = 8;  s.content_margin_bottom = 8
+	s.corner_radius_top_left    = 6; s.corner_radius_top_right    = 6
+	s.corner_radius_bottom_left = 6; s.corner_radius_bottom_right = 6
+	toast.add_theme_stylebox_override("panel", s)
+
+	var lbl: Label = Label.new()
+	lbl.text = text
+	UITheme.style_label(lbl, UITheme.WHITE_SOFT, 13, true)
+	toast.add_child(lbl)
+	add_child(toast)
+
+	# Fade out after ~2 seconds.
+	var tween: Tween = create_tween()
+	tween.tween_interval(1.6)
+	tween.tween_property(toast, "modulate:a", 0.0, 0.4)
+	tween.finished.connect(func() -> void: toast.queue_free())
 
 
 func _on_options_pressed() -> void:
@@ -778,6 +941,9 @@ func _connect_signals() -> void:
 	ScoreService.ScoreChanged.connect(_on_score_changed)
 	CoinService.BalanceChanged.connect(_on_coin_balance_changed)
 	InventoryService.ActiveEffectsChanged.connect(_refresh_effect_chips)
+	# save_now utility item: writes a save mid-round so the player can resume
+	# from the start of this round if they quit later. Doesn't end the run.
+	InventoryService.connect("SaveRequested", _on_save_item_used)
 
 	# Device-connection signals — surface a banner when the currently selected
 	# output device drops its connection, and clear it on reconnect. We watch

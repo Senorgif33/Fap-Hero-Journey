@@ -78,6 +78,38 @@ public partial class ScoreService : Node
 
 	public void SetMultiplier(double multiplier) => _multiplier = multiplier;
 
+	// Save/resume bridge. Captures totals at the moment of save so the end
+	// screen can display the same cumulative numbers after a resumed run.
+	// Counts are persisted as a single synthetic "round" rather than the
+	// per-round bucket breakdown — saves don't need that granularity for
+	// the resume case and it keeps the schema small.
+	public Godot.Collections.Dictionary CaptureSaveData()
+	{
+		return new Godot.Collections.Dictionary
+		{
+			["score"]  = TotalScore,
+			["strokes"] = TotalStrokes,
+		};
+	}
+
+	// Restores the cumulative totals captured by CaptureSaveData. Stuffs them
+	// into a single synthetic round so TotalScore / TotalStrokes still return
+	// the right numbers and the next StartRound() / EndRound() cycle continues
+	// adding on top normally.
+	public void LoadFromSave(Godot.Collections.Dictionary saveData)
+	{
+		_rounds.Clear();
+		_current = default;
+		var restored = new RoundData
+		{
+			Score        = saveData.ContainsKey("score") ? saveData["score"].AsInt32() : 0,
+			SmallStrokes = saveData.ContainsKey("strokes") ? saveData["strokes"].AsInt32() : 0,
+		};
+		_rounds.Add(restored);
+		_multiplier = 1.0;
+		EmitSignal(SignalName.ScoreChanged, TotalScore);
+	}
+
 	public void SetRoundActions(int count) => _current.ActionCount = count;
 
 	public void AddStroke(int amplitude)

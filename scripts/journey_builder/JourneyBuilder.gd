@@ -114,6 +114,13 @@ var _round_folder_counter: int = 0
 # _save_path so that videos inside fork paths get transcoded too.
 var _transcode_plan: Dictionary = {}
 
+# Count of player run-saves invalidated by this builder save (typically 0 or
+# 1, possibly 2 if both the renamed-from and renamed-to folders had saves).
+# Drives the contextual "Existing run reset" message in the success status
+# so the author isn't surprised that the Resume button disappeared from the
+# catalogue. Reset in _reset_save_state.
+var _invalidated_save_count: int = 0
+
 # Streaming-copy tuning. Chunks are read/written 1 MB at a time; the main thread
 # yields one frame only after COPY_FRAME_BUDGET_MS of accumulated work — frequent
 # enough that the window stays responsive, rare enough that the frame-wait tax
@@ -492,6 +499,7 @@ func _do_save() -> bool:
 		return false
 
 	_swap_staging_into_place(paths)
+	_invalidate_existing_run_saves(paths)
 	_finalize_save_success()
 	return true
 
@@ -500,11 +508,12 @@ func _do_save() -> bool:
 # this one (stale _save_aborted flag, leftover error stash, round counter
 # from a partial walk).
 func _reset_save_state() -> void:
-	_status_lbl.visible   = false
-	_transcode_cancel     = false
-	_save_aborted         = false
-	_save_abort_error     = {}
-	_round_folder_counter = 0
+	_status_lbl.visible        = false
+	_transcode_cancel          = false
+	_save_aborted              = false
+	_save_abort_error          = {}
+	_round_folder_counter      = 0
+	_invalidated_save_count    = 0
 
 
 # Runs the whole-tree presave validation pass. Returns false (and shows the
@@ -806,6 +815,7 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 				"Order":          rorder,
 				"CoinsAwarded":   item.get("coins",0) as int,
 				"RoundType":      "Boss" if round_type == "boss" else "Normal",
+				"IsCheckpoint":   bool(item.get("is_checkpoint", false)),
 				"BossImage":      boss_image_rel,
 				"BossTagline":    item.get("boss_tagline", ""),
 				"BossModifiers":  _boss_modifiers_json(item.get("boss_modifiers", [])),
@@ -887,11 +897,42 @@ func _swap_staging_into_place(paths: Dictionary) -> void:
 	DirAccess.rename_absolute(abs_dir, final_abs_dir)
 
 
+# Player run-saves point at a specific sequence snapshot of this journey. As
+# soon as the author re-saves with any structural changes (rounds added /
+# removed / reordered / forks reshaped), that snapshot can reference items
+# that no longer exist or skip new ones. Rather than try to detect "did the
+# structure actually change" — which is brittle and hard to be sure about —
+# treat every successful builder save as a write barrier and wipe the run
+# save. The author can always edit content (descriptions, coin values, etc.)
+# without breaking the player's run, but to be safe we invalidate anyway.
+#
+# Covers two cases:
+#   • In-place edit: same folder name → delete that folder's save.
+#   • Rename: old folder name had the save → delete it. New folder name
+#     wouldn't have one unless the user authored a duplicate elsewhere; we
+#     attempt the delete defensively (no-op when nothing's there).
+func _invalidate_existing_run_saves(paths: Dictionary) -> void:
+	var final_abs: String = paths["final_abs_dir"]
+	var new_folder_name: String = final_abs.get_file()
+	if JourneySaveService.has_save(new_folder_name):
+		JourneySaveService.delete_save(new_folder_name)
+		_invalidated_save_count += 1
+	if _original_journey_folder != "":
+		var old_folder_name: String = (_original_journey_folder as String).get_file()
+		if old_folder_name != "" and old_folder_name != new_folder_name \
+				and JourneySaveService.has_save(old_folder_name):
+			JourneySaveService.delete_save(old_folder_name)
+			_invalidated_save_count += 1
+
+
 # Final UX after a clean save: brief success message, then transition back
 # to the journey catalogue. The 1.5s delay gives the user a moment to see
 # the confirmation before the scene changes.
 func _finalize_save_success() -> void:
-	_show_status("Journey saved! Returning to catalogue...", false)
+	var message: String = "Journey saved! Returning to catalogue..."
+	if _invalidated_save_count > 0:
+		message = "Journey saved! Existing player save reset. Returning to catalogue..."
+	_show_status(message, false)
 	await get_tree().create_timer(1.5).timeout
 	Transition.change_scene("res://scenes/journey_select/JourneySelect.tscn")
 
@@ -1084,6 +1125,7 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 					"Order":         pr_order,
 					"CoinsAwarded":  pi_item.get("coins",0) as int,
 					"RoundType":     "Boss" if pr_round_type == "boss" else "Normal",
+					"IsCheckpoint":  bool(pi_item.get("is_checkpoint", false)),
 					"BossImage":     pr_boss_image_rel,
 					"BossTagline":   pi_item.get("boss_tagline", ""),
 					"BossModifiers": _boss_modifiers_json(pi_item.get("boss_modifiers", [])),

@@ -6,6 +6,10 @@ public partial class InventoryService : Node
 {
 	[Signal] public delegate void InventoryChangedEventHandler();
 	[Signal] public delegate void ActiveEffectsChangedEventHandler();
+	// Fired when a utility item with kind == "save_now" is activated.
+	// GameLoop listens and writes a journey save in response. Separate signal
+	// from ActiveEffectsChanged because save_now never enters _active.
+	[Signal] public delegate void SaveRequestedEventHandler();
 
 	// ---------------------------------------------------------------------------
 	// Item registry
@@ -184,6 +188,21 @@ public partial class InventoryService : Node
 			["duration_ms"] = 30000,
 			["kind"]        = "wildcard",
 		};
+		// Utility item — saves progress at the start of the current round and
+		// is consumed. Locked out during boss rounds (because the inventory
+		// button itself is disabled during bosses). Doesn't apply a runtime
+		// effect; GameLoop catches the SaveRequested signal and writes the
+		// save file via JourneySaveService.
+		_registry["safe_word"] = new Dictionary
+		{
+			["id"]          = "safe_word",
+			["name"]        = "The Safe Word",
+			["description"] = "Saves your run at the start of the current round. One-time save — used up when you resume.",
+			["category"]    = "utility",
+			["price"]       = 120,
+			["duration_ms"] = 0,
+			["kind"]        = "save_now",
+		};
 	}
 
 	// --- Registry access -------------------------------------------------------
@@ -295,6 +314,18 @@ public partial class InventoryService : Node
 
 		var item = _items[slotIndex];
 		_items.RemoveAt(slotIndex);
+
+		// save_now is an instantaneous utility — it doesn't enter the active-
+		// effect list, it just fires a signal for GameLoop to handle and is
+		// consumed. Boss-round lockout is enforced by the inventory UI (which
+		// disables item use during bosses) so the activation-side code doesn't
+		// need its own boss check.
+		if (item.ContainsKey("kind") && item["kind"].AsString() == "save_now")
+		{
+			EmitSignal(SignalName.SaveRequested);
+			EmitSignal(SignalName.InventoryChanged);
+			return true;
+		}
 
 		// Wildcard resolves to a random concrete modifier at activation time: the
 		// rolled effect supplies the kind + params, the displayed name reveals

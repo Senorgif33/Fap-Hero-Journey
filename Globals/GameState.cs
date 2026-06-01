@@ -256,6 +256,52 @@ public partial class GameState : Node
 		return result;
 	}
 
+	// ---------------------------------------------------------------------------
+	// Save / Resume
+	// ---------------------------------------------------------------------------
+
+	// Returns the part of the save record that lives in GameState: the spliced
+	// sequence (preserves any fork choices already made) and the current index.
+	// CoinService, ScoreService, and GameLoop add their own portions on top.
+	public Dictionary CaptureSaveData()
+	{
+		var sequenceSnapshot = new Array();
+		foreach (var item in _sequence)
+			sequenceSnapshot.Add(item);
+
+		return new Dictionary
+		{
+			["sequence_index"] = _seqIndex,
+			["sequence"]       = sequenceSnapshot,
+			["fork_depth"]     = _forkDepth,
+		};
+	}
+
+	// Loads a journey directly from a save record, bypassing the normal
+	// BuildSequence path. The journey metadata still comes from disk (cover,
+	// title, etc.) so the catalogue/end-screen display is correct; only the
+	// sequence + position are restored from the save.
+	public void LoadFromSave(Dictionary journeyData, Dictionary saveData)
+	{
+		Journey    = journeyData;
+		_seqIndex  = saveData.ContainsKey("sequence_index") ? saveData["sequence_index"].AsInt32() : 0;
+		_forkDepth = saveData.ContainsKey("fork_depth") ? saveData["fork_depth"].AsInt32() : 0;
+		_playLog.Clear();
+
+		_sequence = new List<Dictionary>();
+		if (saveData.ContainsKey("sequence"))
+		{
+			foreach (var entry in saveData["sequence"].AsGodotArray())
+				_sequence.Add(entry.AsGodotDictionary());
+		}
+
+		// Defensive: if the saved index is out of bounds (e.g. journey was edited
+		// after the save was written and is now shorter), clamp to the end so
+		// the catalogue immediately routes to the end screen rather than crash.
+		if (_seqIndex < 0) _seqIndex = 0;
+		if (_seqIndex > _sequence.Count) _seqIndex = _sequence.Count;
+	}
+
 	// Called by GameLoop after each round ends (before ScoreService.EndRound).
 	// roundName and lengthMs are passed explicitly from GDScript (where Dictionary
 	// access is known to work) to avoid C# String/StringName key-lookup mismatches.

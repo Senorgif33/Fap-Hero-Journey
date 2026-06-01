@@ -503,6 +503,9 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 	col.add_child(_make_vib_expander(arr, idx))
 
 	col.add_child(_side_section_separator())
+	col.add_child(_make_checkpoint_toggle(arr, idx))
+
+	col.add_child(_side_section_separator())
 	col.add_child(_make_boss_expander(arr, idx))
 
 	col.add_child(_side_section_separator())
@@ -1250,6 +1253,55 @@ func _make_vib_expander(arr: Array, idx: int) -> Control:
 		toggle_btn.text = ("▼  VIBRATOR SCRIPTS  (BUTTPLUG ONLY)" if pressed else "▶  VIBRATOR SCRIPTS  (BUTTPLUG ONLY)")
 		vib_panel.visible = pressed
 	)
+
+	return wrapper
+
+
+# ── Checkpoint toggle ───────────────────────────────────────────────────────
+
+# Author-marked save point. When this round starts during play, the game shows
+# a CHECKPOINT REACHED banner offering Save & Quit so the player can resume
+# the run later. Boss rounds aren't checkpoints (no save inside a boss fight),
+# so the toggle is suppressed when the round is also marked as boss; the
+# author chooses one role or the other per round.
+func _make_checkpoint_toggle(arr: Array, idx: int) -> Control:
+	if not arr[idx].has("is_checkpoint"):
+		arr[idx]["is_checkpoint"] = false
+
+	var wrapper: VBoxContainer = VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 4)
+
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", ROW_SEP)
+	wrapper.add_child(row)
+
+	var label: Label = Label.new()
+	label.text = "CHECKPOINT ROUND"
+	label.add_theme_color_override("font_color", UITheme.AMBER)
+	label.add_theme_font_size_override("font_size", 12)
+	label.uppercase = true
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(label)
+
+	var toggle: Button = Button.new()
+	toggle.toggle_mode    = true
+	toggle.button_pressed = arr[idx]["is_checkpoint"]
+	toggle.focus_mode     = Control.FOCUS_NONE
+	UITheme.style_button(toggle, UITheme.AMBER)
+	toggle.text = "✓ ON" if arr[idx]["is_checkpoint"] else "OFF"
+	toggle.toggled.connect(func(pressed: bool) -> void:
+		arr[idx]["is_checkpoint"] = pressed
+		toggle.text = "✓ ON" if pressed else "OFF"
+	)
+	row.add_child(toggle)
+
+	var hint: Label = Label.new()
+	hint.text = "PLAYERS REACHING THIS ROUND SEE A CHECKPOINT BANNER WITH A SAVE & QUIT OPTION. USE FOR NATURAL STOPPING POINTS — END OF ACT, BEFORE A BIG BOSS, BETWEEN STORY ARCS."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrapper.add_child(hint)
 
 	return wrapper
 

@@ -33,4 +33,12 @@ public partial class CoinService : Node
 	}
 
 	public bool CanAfford(int amount) => Balance >= amount;
+
+	// Used by the save/resume flow to restore a previously persisted balance.
+	// Distinct from Reset() (which zeroes) and AddCoins() (which deltas).
+	public void SetBalance(int amount)
+	{
+		Balance = amount < 0 ? 0 : amount;
+		EmitSignal(SignalName.BalanceChanged, Balance);
+	}
 }
