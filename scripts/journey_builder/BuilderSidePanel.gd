@@ -107,16 +107,10 @@ func show_insert_popup(overlay: Control, graph: Control, arr: Array, insert_idx:
 		vbox.add_child(sep)
 
 	var specs: Array = [
-		{"label": "▶ ROUND",      "color": UITheme.PURPLE_MID,    "item": {"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0, "axis_scripts": {}}},
-		{"label": "◆ SHOP",       "color": UITheme.PURPLE_BRIGHT, "item": {"type": "shop", "title": ""}},
-		{"label": "◈ STORYBOARD", "color": UITheme.STORYBOARD,    "item": {"type": "storyboard", "coins": 0, "image": "", "lines": []}},
-		{"label": "⑂ FORK",       "color": UITheme.MAGENTA,       "item": {
-			"type": "fork", "title": "", "description": "",
-			"paths": [
-				{"name": "Path A", "description": "", "image_path": "", "items": []},
-				{"name": "Path B", "description": "", "image_path": "", "items": []},
-			],
-		}},
+		{"label": "▶ ROUND",      "color": UITheme.PURPLE_MID,    "item": JourneyData.new_item("round")},
+		{"label": "◆ SHOP",       "color": UITheme.PURPLE_BRIGHT, "item": JourneyData.new_item("shop")},
+		{"label": "◈ STORYBOARD", "color": UITheme.STORYBOARD,    "item": JourneyData.new_item("storyboard")},
+		{"label": "⑂ FORK",       "color": UITheme.MAGENTA,       "item": JourneyData.new_item("fork")},
 	]
 	for spec in specs:
 		var btn: Button = Button.new()
@@ -274,16 +268,10 @@ func show_journey_info_panel() -> void:
 	side_vbox.add_child(add_lbl)
 
 	var add_specs: Array = [
-		{"label": "+ ROUND",      "color": UITheme.PURPLE_MID,    "item": {"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0, "axis_scripts": {}}},
-		{"label": "◆ SHOP",       "color": UITheme.PURPLE_BRIGHT, "item": {"type": "shop", "title": ""}},
-		{"label": "◈ STORYBOARD", "color": UITheme.STORYBOARD,    "item": {"type": "storyboard", "coins": 0, "image": "", "lines": []}},
-		{"label": "⑂ FORK",       "color": UITheme.MAGENTA,       "item": {
-			"type": "fork", "title": "", "description": "",
-			"paths": [
-				{"name": "Path A", "description": "", "image_path": "", "items": []},
-				{"name": "Path B", "description": "", "image_path": "", "items": []},
-			],
-		}},
+		{"label": "+ ROUND",      "color": UITheme.PURPLE_MID,    "item": JourneyData.new_item("round")},
+		{"label": "◆ SHOP",       "color": UITheme.PURPLE_BRIGHT, "item": JourneyData.new_item("shop")},
+		{"label": "◈ STORYBOARD", "color": UITheme.STORYBOARD,    "item": JourneyData.new_item("storyboard")},
+		{"label": "⑂ FORK",       "color": UITheme.MAGENTA,       "item": JourneyData.new_item("fork")},
 	]
 	for spec in add_specs:
 		var btn: Button = Button.new()
@@ -436,6 +424,65 @@ func show_multi_select_panel(items: Array, _arr: Array) -> void:
 	side_vbox.add_child(del_btn)
 
 
+# Shown when a fork branch (path label) is selected. New/pasted items go to the
+# top of that path. The Add / Paste buttons reuse the owner's insertion target,
+# which is the selected branch.
+func show_branch_panel(path: Dictionary) -> void:
+	var side_vbox: VBoxContainer = _owner._side_vbox
+	for c in side_vbox.get_children():
+		c.queue_free()
+
+	var hdr: Label = Label.new()
+	hdr.text = "// FORK BRANCH //"
+	hdr.add_theme_color_override("font_color", UITheme.MAGENTA)
+	hdr.add_theme_font_size_override("font_size", 14)
+	hdr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	side_vbox.add_child(hdr)
+
+	var pname: String = (path.get("name", "") as String).strip_edges()
+	var name_lbl: Label = Label.new()
+	name_lbl.text = "↳ " + (pname if pname != "" else "Unnamed path").to_upper()
+	name_lbl.add_theme_color_override("font_color", UITheme.MAGENTA)
+	name_lbl.add_theme_font_size_override("font_size", 12)
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	side_vbox.add_child(name_lbl)
+
+	var hint: Label = Label.new()
+	hint.text = "New items are added to the top of this branch.  Tip: Ctrl+1–4 to add, Ctrl+V to paste."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	side_vbox.add_child(hint)
+
+	side_vbox.add_child(_side_section_separator())
+	side_vbox.add_child(_side_field_label("ADD TO THIS BRANCH"))
+
+	var specs: Array = [
+		{"label": "+ ROUND",      "color": UITheme.PURPLE_MID,    "type": "round"},
+		{"label": "◆ SHOP",       "color": UITheme.PURPLE_BRIGHT, "type": "shop"},
+		{"label": "◈ STORYBOARD", "color": UITheme.STORYBOARD,    "type": "storyboard"},
+		{"label": "⑂ FORK",       "color": UITheme.MAGENTA,       "type": "fork"},
+	]
+	for spec: Dictionary in specs:
+		var btn: Button = Button.new()
+		btn.text = spec["label"]
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		UITheme.style_button(btn, spec["color"])
+		var t: String = spec["type"]
+		btn.pressed.connect(func() -> void: _owner._insert_new_item(t))
+		side_vbox.add_child(btn)
+
+	if not _owner._clipboard_items.is_empty():
+		var paste_btn: Button = Button.new()
+		paste_btn.text = "📋 PASTE %s" % _owner._clipboard_label().to_upper()
+		paste_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		UITheme.style_button(paste_btn, UITheme.AMBER)
+		paste_btn.pressed.connect(func() -> void: _owner._paste_clipboard_after_selection())
+		side_vbox.add_child(paste_btn)
+
+
 # Small type glyph for the multi-select listing (matches the graph node icons).
 func _type_glyph(item: Dictionary) -> String:
 	match item.get("type", "round"):
@@ -522,6 +569,28 @@ func _side_section_separator() -> Control:
 	var spacer: Control = Control.new()
 	spacer.custom_minimum_size = Vector2(0, 6)
 	return spacer
+
+
+# Fills `lbl` with a round's funscript length + action count (e.g. "4:32 · 812
+# actions"), or flags an empty/missing script. Cleared when no funscript is set.
+func _update_funscript_readout(lbl: Label, path: String) -> void:
+	if path == "":
+		lbl.text = ""
+		return
+	var stats: Dictionary = JourneyData.read_funscript_stats(path)
+	var count: int = stats["count"]
+	if count <= 0:
+		lbl.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+		lbl.text = "⚠ funscript has no actions"
+		return
+	lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	lbl.text = "%s  ·  %d actions" % [_format_duration(stats["length_ms"]), count]
+
+
+# Formats milliseconds as m:ss for the funscript readout.
+func _format_duration(ms: int) -> String:
+	var total_s: int = int(round(ms / 1000.0))
+	return "%d:%02d" % [total_s / 60, total_s % 60]
 
 
 # Bottom action block used by every side-panel editor: a clipboard row
@@ -642,7 +711,7 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 	video_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	col.add_child(video_zone)
 	if round_data.get("video_path", "") != "":
-		video_zone.call_deferred("set_file", round_data["video_path"])
+		video_zone.call_deferred("set_file", round_data["video_path"], false)
 	video_zone.file_dropped.connect(func(p: String) -> void:
 		arr[idx]["video_path"] = p
 		if (arr[idx].get("name","") as String).strip_edges() == "":
@@ -659,16 +728,34 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 
 	col.add_child(_side_section_separator())
 	col.add_child(_side_field_label("FUNSCRIPT"))
+	# Declared before the drop handler so the closure can refresh it in place.
+	var fs_stats_lbl: Label = Label.new()
+	fs_stats_lbl.add_theme_font_size_override("font_size", 11)
+	fs_stats_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	var fs_zone: PanelContainer = DropZoneScript.new()
 	fs_zone.accepted_extensions   = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
 	fs_zone.picker_title          = "Select Funscript"
 	fs_zone.picker_filters        = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
 	fs_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	col.add_child(fs_zone)
+	# Zone + inline ✕ remove (disabled until a funscript is set).
+	var fs_rm: Button = UITheme.make_icon_btn("✕", round_data.get("funscript_path", "") == "", UITheme.MAGENTA)
+	fs_rm.tooltip_text = "Remove funscript"
+	fs_rm.pressed.connect(func() -> void: fs_zone.set_file(""))
+	var fs_row: HBoxContainer = HBoxContainer.new()
+	fs_row.add_theme_constant_override("separation", 6)
+	fs_row.add_child(fs_zone)
+	fs_row.add_child(fs_rm)
+	col.add_child(fs_row)
 	if round_data.get("funscript_path", "") != "":
-		fs_zone.call_deferred("set_file", round_data["funscript_path"])
+		fs_zone.call_deferred("set_file", round_data["funscript_path"], false)
 	fs_zone.file_dropped.connect(func(p: String) -> void:
 		arr[idx]["funscript_path"] = p
+		_update_funscript_readout(fs_stats_lbl, p)
+		fs_rm.disabled = (p == "")
+		# Removal (cleared zone): nothing to auto-fill or rename — just refresh.
+		if p == "":
+			_owner._refresh_graph()
+			return
 		if (arr[idx].get("name","") as String).strip_edges() == "":
 			arr[idx]["name"] = p.get_file().get_basename()
 		# Auto-fill the video + any secondary axis / vib scripts from same-named
@@ -680,18 +767,23 @@ func _make_side_round_editor(arr: Array, idx: int, graph: Control, reselect: Cal
 		name_edit.text = arr[idx].get("name","")
 		_owner._refresh_graph()  # update the node's validation badge live
 	)
+	# Length / action-count readout (sits just under the funscript zone).
+	_update_funscript_readout(fs_stats_lbl, round_data.get("funscript_path", ""))
+	col.add_child(fs_stats_lbl)
 
 	col.add_child(_side_section_separator())
 	col.add_child(_side_field_label("COINS AWARDED"))
-	var coins_edit: LineEdit = LineEdit.new()
-	coins_edit.text             = str(round_data.get("coins", 0))
-	coins_edit.max_length       = 6
-	coins_edit.placeholder_text = "0"
-	UITheme.style_line_edit(coins_edit)
-	coins_edit.text_changed.connect(func(val: String) -> void:
-		arr[idx]["coins"] = val.to_int()
+	var coins_spin: SpinBox = SpinBox.new()
+	coins_spin.min_value = 0
+	coins_spin.max_value = 999999
+	coins_spin.step      = 1
+	coins_spin.value     = round_data.get("coins", 0)
+	coins_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(coins_spin)
+	coins_spin.value_changed.connect(func(v: float) -> void:
+		arr[idx]["coins"] = int(v)
 	)
-	col.add_child(coins_edit)
+	col.add_child(coins_spin)
 
 	col.add_child(_side_section_separator())
 	col.add_child(_make_axis_expander(arr, idx))
@@ -751,20 +843,18 @@ func _make_side_shop_editor(arr: Array, idx: int, graph: Control, reselect: Call
 	# Item count — only consulted in pool mode; disabled in fixed mode where the
 	# lineup length is the checklist itself. Clamped to [1, item registry size].
 	col.add_child(_side_field_label("ITEMS SHOWN (POOL MODE)"))
-	var count_edit: LineEdit = LineEdit.new()
-	count_edit.text             = str(shop_data.get("count", 3))
-	count_edit.max_length       = 3
-	count_edit.placeholder_text = "3"
-	count_edit.editable         = shop_data.get("mode", "pool") == "pool"
-	UITheme.style_line_edit(count_edit)
-	count_edit.text_changed.connect(func(val: String) -> void:
-		arr[idx]["count"] = clampi(val.to_int(), 1, max(1, item_count))
+	var count_spin: SpinBox = SpinBox.new()
+	count_spin.min_value = 1
+	count_spin.max_value = max(1, item_count)
+	count_spin.step      = 1
+	count_spin.value     = clampi(int(shop_data.get("count", 3)), 1, max(1, item_count))
+	count_spin.editable  = shop_data.get("mode", "pool") == "pool"
+	count_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(count_spin)
+	count_spin.value_changed.connect(func(v: float) -> void:
+		arr[idx]["count"] = int(v)
 	)
-	# Snap the displayed text to the clamped value once editing finishes.
-	count_edit.focus_exited.connect(func() -> void:
-		count_edit.text = str(arr[idx]["count"])
-	)
-	col.add_child(count_edit)
+	col.add_child(count_spin)
 
 	# Fixed-lineup checklist — shown only in fixed mode; pool mode draws from all
 	# items so the list would just be noise there.
@@ -806,11 +896,11 @@ func _make_side_shop_editor(arr: Array, idx: int, graph: Control, reselect: Call
 		if sel == 1:
 			arr[idx]["mode"] = "fixed"
 			items_section.visible = true
-			count_edit.editable = false
+			count_spin.editable = false
 		else:
 			arr[idx]["mode"] = "pool"
 			items_section.visible = false
-			count_edit.editable = true
+			count_spin.editable = true
 			(arr[idx]["items"] as Array).clear()
 			for cb: CheckBox in item_checks:
 				cb.set_pressed_no_signal(false)
@@ -819,16 +909,17 @@ func _make_side_shop_editor(arr: Array, idx: int, graph: Control, reselect: Call
 	# Price multiplier — applied on top of each item's base price.
 	col.add_child(_side_section_separator())
 	col.add_child(_side_field_label("PRICE MULTIPLIER"))
-	var mult_edit: LineEdit = LineEdit.new()
-	mult_edit.text             = str(shop_data.get("price_multiplier", 1.0))
-	mult_edit.max_length       = 6
-	mult_edit.placeholder_text = "1.0"
-	UITheme.style_line_edit(mult_edit)
-	mult_edit.text_changed.connect(func(val: String) -> void:
-		var multiplier: float = val.to_float()
-		arr[idx]["price_multiplier"] = multiplier if multiplier > 0.0 else 1.0
+	var mult_spin: SpinBox = SpinBox.new()
+	mult_spin.min_value = 0.1
+	mult_spin.max_value = 100.0
+	mult_spin.step      = 0.1
+	mult_spin.value     = float(shop_data.get("price_multiplier", 1.0))
+	mult_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(mult_spin)
+	mult_spin.value_changed.connect(func(v: float) -> void:
+		arr[idx]["price_multiplier"] = v
 	)
-	col.add_child(mult_edit)
+	col.add_child(mult_spin)
 
 	col.add_child(_side_section_separator())
 	col.add_child(_side_action_row(arr, idx, graph, reselect))
@@ -841,15 +932,17 @@ func _make_side_storyboard_editor(arr: Array, idx: int, graph: Control, reselect
 	col.add_theme_constant_override("separation", 6)
 
 	col.add_child(_side_field_label("COINS AWARDED"))
-	var coins_edit: LineEdit = LineEdit.new()
-	coins_edit.text             = str(sb_data.get("coins", 0))
-	coins_edit.max_length       = 6
-	coins_edit.placeholder_text = "0"
-	UITheme.style_line_edit(coins_edit)
-	coins_edit.text_changed.connect(func(val: String) -> void:
-		arr[idx]["coins"] = val.to_int()
+	var coins_spin: SpinBox = SpinBox.new()
+	coins_spin.min_value = 0
+	coins_spin.max_value = 999999
+	coins_spin.step      = 1
+	coins_spin.value     = sb_data.get("coins", 0)
+	coins_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(coins_spin)
+	coins_spin.value_changed.connect(func(v: float) -> void:
+		arr[idx]["coins"] = int(v)
 	)
-	col.add_child(coins_edit)
+	col.add_child(coins_spin)
 
 	col.add_child(_side_section_separator())
 	col.add_child(_side_field_label("DEFAULT IMAGE"))
@@ -1383,14 +1476,26 @@ func _make_axis_expander(arr: Array, idx: int) -> Control:
 		zone.picker_title          = "Select %s Funscript" % axis
 		zone.picker_filters        = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
 		zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		axes_panel.add_child(zone)
 		var current_path: String = (arr[idx]["axis_scripts"] as Dictionary).get(axis, "")
+		# Zone + inline ✕ remove (disabled until this axis is set).
+		var rm: Button = UITheme.make_icon_btn("✕", current_path == "", UITheme.MAGENTA)
+		rm.tooltip_text = "Remove %s funscript" % axis
+		rm.pressed.connect(func() -> void: zone.set_file(""))
+		var row: HBoxContainer = HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		row.add_child(zone)
+		row.add_child(rm)
+		axes_panel.add_child(row)
 		if current_path != "":
-			zone.call_deferred("set_file", current_path)
+			zone.call_deferred("set_file", current_path, false)
 		# Capture axis in closure.
 		var captured_axis: String = axis
 		zone.file_dropped.connect(func(p: String) -> void:
-			arr[idx]["axis_scripts"][captured_axis] = p
+			rm.disabled = (p == "")
+			if p == "":
+				(arr[idx]["axis_scripts"] as Dictionary).erase(captured_axis)
+			else:
+				arr[idx]["axis_scripts"][captured_axis] = p
 		)
 
 	toggle_btn.toggled.connect(func(pressed: bool) -> void:
@@ -1444,14 +1549,26 @@ func _make_vib_expander(arr: Array, idx: int) -> Control:
 		zone.picker_title          = "Select %s Funscript" % ch_key.to_upper()
 		zone.picker_filters        = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
 		zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		vib_panel.add_child(zone)
 		var current_path: String = (arr[idx]["vib_scripts"] as Dictionary).get(ch_key, "")
+		# Zone + inline ✕ remove (disabled until this channel is set).
+		var rm: Button = UITheme.make_icon_btn("✕", current_path == "", UITheme.MAGENTA)
+		rm.tooltip_text = "Remove %s funscript" % ch_key.to_upper()
+		rm.pressed.connect(func() -> void: zone.set_file(""))
+		var row: HBoxContainer = HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		row.add_child(zone)
+		row.add_child(rm)
+		vib_panel.add_child(row)
 		if current_path != "":
-			zone.call_deferred("set_file", current_path)
+			zone.call_deferred("set_file", current_path, false)
 		# Capture key in closure.
 		var captured_key: String = ch_key
 		zone.file_dropped.connect(func(p: String) -> void:
-			arr[idx]["vib_scripts"][captured_key] = p
+			rm.disabled = (p == "")
+			if p == "":
+				(arr[idx]["vib_scripts"] as Dictionary).erase(captured_key)
+			else:
+				arr[idx]["vib_scripts"][captured_key] = p
 		)
 
 	toggle_btn.toggled.connect(func(pressed: bool) -> void:

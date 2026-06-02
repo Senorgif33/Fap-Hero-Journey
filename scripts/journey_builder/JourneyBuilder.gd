@@ -89,6 +89,11 @@ var _selected_idx:  int        = -1  # Index of the lone selected item, or -1.
 # (copy / cut / delete / move) act on this.
 var _selected_items: Array = []
 
+# Fork-branch selection (mutually exclusive with node selection): when true,
+# new/pasted items are inserted at the TOP of _branch_arr (a fork path's items).
+var _has_branch: bool  = false
+var _branch_arr: Array = []
+
 # Module-level copy/paste clipboard. Holds deep duplicates of the copied item(s)
 # (round / shop / storyboard / fork-with-subtree, or several at once). Paste
 # inserts fresh deep duplicates so the same entry can be pasted repeatedly
@@ -186,6 +191,7 @@ func _setup_graph_view() -> void:
 	_graph.anchor_bottom = 1.0
 	_graph_host.add_child(_graph)
 	_graph.selection_changed.connect(_on_graph_selection_changed)
+	_graph.branch_selected.connect(_on_graph_branch_selected)
 	_graph.insert_requested.connect(_on_graph_insert_requested)
 	# Live per-node validation badges (evaluated at layout time).
 	_graph.validity_fn = _item_issue_summary
@@ -198,6 +204,9 @@ func _setup_graph_view() -> void:
 # sync, then renders the matching side panel: journey info (0), node editor (1),
 # or the multi-select panel (2+).
 func _on_graph_selection_changed(items: Array, arr: Array) -> void:
+	# Any node/empty selection ends a branch selection.
+	_has_branch = false
+	_branch_arr = []
 	_selected_items = items
 	_selected_arr   = arr
 	if items.size() == 1:
@@ -211,6 +220,20 @@ func _on_graph_selection_changed(items: Array, arr: Array) -> void:
 			_side_renderer.show_journey_info_panel()
 		else:
 			_side_renderer.show_multi_select_panel(items, arr)
+
+
+# A fork branch (path) was clicked. Becomes the insertion target — new/pasted
+# items land at the top of the path. Clears node selection (mutually exclusive).
+func _on_graph_branch_selected(path: Dictionary) -> void:
+	if not path.has("items"):
+		path["items"] = []
+	_selected_items = []
+	_selected_arr   = []
+	_selected_item  = {}
+	_selected_idx   = -1
+	_has_branch = true
+	_branch_arr = path["items"]
+	_side_renderer.show_branch_panel(path)
 
 
 # Index of `item` within `arr` by reference identity (Dictionary == is deep
@@ -347,8 +370,20 @@ func _show_shortcuts_overlay() -> void:
 	var parts: Dictionary = UITheme.build_centered_modal("⌨  SHORTCUTS", UITheme.PURPLE_BRIGHT, Vector2i(580, 640))
 	var modal: Control = parts["modal"]
 	var vbox: VBoxContainer = parts["vbox"]
-	vbox.add_theme_constant_override("separation", 5)
 	add_child(modal)
+
+	# Rows live in a scroll region so the reference can grow without overflowing
+	# the panel; the Close button stays pinned below it.
+	var scroll: ScrollContainer = ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_horizontal  = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical    = Control.SIZE_EXPAND_FILL
+	vbox.add_child(scroll)
+
+	var list: VBoxContainer = VBoxContainer.new()
+	list.add_theme_constant_override("separation", 5)
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list)
 
 	var groups: Array = [
 		["EDITING", [
@@ -360,10 +395,20 @@ func _show_shortcuts_overlay() -> void:
 			["Backspace  /  Delete", "Delete selected module(s)"],
 			["Ctrl + S", "Save journey"],
 		]],
+		["ADD", [
+			["Ctrl + 1", "Add a round"],
+			["Ctrl + 2", "Add a shop"],
+			["Ctrl + 3", "Add a storyboard"],
+			["Ctrl + 4", "Add a fork"],
+		]],
 		["SELECTION", [
 			["Click", "Select a node"],
+			["Click a fork branch", "Target it — add/paste to the top of that path"],
+			["Shift + Click", "Select a range of nodes (same branch)"],
 			["Ctrl + Click", "Add / remove a node from selection"],
 			["Drag on empty canvas", "Marquee-select (same branch)"],
+			["Ctrl + A", "Select all in the current branch"],
+			["Escape", "Clear selection"],
 		]],
 		["NAVIGATION", [
 			["Middle-drag", "Pan the graph"],
@@ -382,7 +427,7 @@ func _show_shortcuts_overlay() -> void:
 		section_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
 		section_lbl.add_theme_font_size_override("font_size", 11)
 		section_lbl.uppercase = true
-		vbox.add_child(section_lbl)
+		list.add_child(section_lbl)
 		for row_spec: Array in group[1]:
 			var row: HBoxContainer = HBoxContainer.new()
 			row.add_theme_constant_override("separation", 14)
@@ -398,10 +443,10 @@ func _show_shortcuts_overlay() -> void:
 			desc_lbl.add_theme_font_size_override("font_size", 12)
 			desc_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			row.add_child(desc_lbl)
-			vbox.add_child(row)
+			list.add_child(row)
 		var spacer: Control = Control.new()
 		spacer.custom_minimum_size = Vector2(0, 6)
-		vbox.add_child(spacer)
+		list.add_child(spacer)
 
 	var close_btn: Button = Button.new()
 	close_btn.text = "CLOSE"
@@ -484,6 +529,32 @@ func _input(event: InputEvent) -> void:
 					return
 				_redo()
 				get_viewport().set_input_as_handled()
+			KEY_A:
+				# Defer to native "select all" inside a text field.
+				if _focus_is_text_field():
+					return
+				_select_all_in_branch()
+				get_viewport().set_input_as_handled()
+			KEY_1:
+				if _focus_is_text_field():
+					return
+				_insert_new_item("round")
+				get_viewport().set_input_as_handled()
+			KEY_2:
+				if _focus_is_text_field():
+					return
+				_insert_new_item("shop")
+				get_viewport().set_input_as_handled()
+			KEY_3:
+				if _focus_is_text_field():
+					return
+				_insert_new_item("storyboard")
+				get_viewport().set_input_as_handled()
+			KEY_4:
+				if _focus_is_text_field():
+					return
+				_insert_new_item("fork")
+				get_viewport().set_input_as_handled()
 		return
 
 	# ── Unmodified shortcuts ─────────────────────────────────────────────────
@@ -495,6 +566,14 @@ func _input(event: InputEvent) -> void:
 				return
 			_delete_selection()
 			get_viewport().set_input_as_handled()
+		KEY_ESCAPE:
+			# Clear the current selection (node set or fork branch). Only consume
+			# the event when there was something to clear.
+			if _focus_is_text_field() or (_selected_items.is_empty() and not _has_branch):
+				return
+			if _graph:
+				_graph.clear_selection()
+			get_viewport().set_input_as_handled()
 
 
 # True when the keyboard focus is inside a text-entry control, so module
@@ -502,6 +581,46 @@ func _input(event: InputEvent) -> void:
 func _focus_is_text_field() -> bool:
 	var f: Control = get_viewport().gui_get_focus_owner()
 	return f is LineEdit or f is TextEdit
+
+
+# Where a new/pasted item should go, as {arr, at}:
+#   • a node selection → right after the last selected item (same branch)
+#   • a fork-branch selection → the top of that path
+#   • nothing selected → the end of the top level
+func _insertion_target() -> Dictionary:
+	if not _selected_items.is_empty():
+		return {"arr": _selected_arr, "at": _selected_indices_sorted()[-1] + 1}
+	if _has_branch:
+		return {"arr": _branch_arr, "at": 0}
+	return {"arr": _items, "at": _items.size()}
+
+
+# Ctrl+1–4 — inserts a new item of `type` at the current insertion target. The
+# new node becomes the selection so its editor opens immediately.
+func _insert_new_item(type: String) -> void:
+	var item: Dictionary = JourneyData.new_item(type)
+	var target: Dictionary = _insertion_target()
+	var arr: Array = target["arr"]
+	var at: int    = target["at"]
+	_push_undo()
+	arr.insert(at, item)
+	_refresh_graph()
+	_graph.call_deferred("select_item", arr, at)
+	_show_status("Added %s." % _item_type_label(item), false)
+
+
+# Ctrl+A — selects every node in the current branch: the node selection's parent
+# array, the selected fork branch's items, or the top level when nothing's
+# selected. Does not descend into fork paths.
+func _select_all_in_branch() -> void:
+	var arr: Array = _items
+	if not _selected_arr.is_empty():
+		arr = _selected_arr
+	elif _has_branch:
+		arr = _branch_arr
+	if arr.is_empty():
+		return
+	_graph.set_selection(arr.duplicate(), arr)
 
 
 # Indices of the current selection within _selected_arr, ascending. Identity-
@@ -629,15 +748,11 @@ func _paste_clipboard_into(arr: Array, idx: int) -> void:
 	_graph.call_deferred("set_selection", pasted, arr)
 
 
-# Ctrl+V — pastes after the current selection (same branch), or appends to the
-# top level when nothing's selected.
+# Ctrl+V — pastes at the current insertion target (after a node selection, the
+# top of a selected branch, or the end of the top level).
 func _paste_clipboard_after_selection() -> void:
-	var arr: Array = _items
-	var base: int  = _items.size()
-	if not _selected_items.is_empty():
-		arr  = _selected_arr
-		base = _selected_indices_sorted()[-1] + 1
-	_paste_clipboard_into(arr, base)
+	var target: Dictionary = _insertion_target()
+	_paste_clipboard_into(target["arr"], target["at"])
 
 
 # Records the current journey structure so the next mutation can be undone.

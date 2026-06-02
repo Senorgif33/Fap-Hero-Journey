@@ -16,6 +16,9 @@ extends Control
 
 signal selection_changed(items: Array, parent_arr: Array)
 signal insert_requested(parent_arr: Array, idx: int, screen_pos: Vector2)
+# Emitted when a fork-branch (path) label is clicked — selects that branch as an
+# insertion target so new/pasted items land at the top of the path.
+signal branch_selected(path: Dictionary)
 
 const NODE_WIDTH:  float = 200.0
 const NODE_HEIGHT: float = 64.0
@@ -37,6 +40,14 @@ var _items:           Array      = []
 # size 1 = single selection (drives the per-node editor).
 var _selected_items:  Array      = []
 var _selected_arr:    Array      = []
+# The selected fork-branch path dict (mutually exclusive with node selection),
+# or {} when no branch is selected. Drives the path-label highlight.
+var _selected_path:   Dictionary = {}
+
+# Range-select anchor: the last single/ctrl-clicked node, used as the fixed end
+# of a Shift+click range. {} when there's no anchor.
+var _anchor_item:     Dictionary = {}
+var _anchor_arr:      Array      = []
 
 # Optional callback (set by the builder) that, given an item dict, returns a
 # short problem summary String ("" when the item is fine). Drives the warning
@@ -69,6 +80,10 @@ var _edges: Array = []
 # so they pan/zoom together with edges.
 @onready var _canvas: Control = $Canvas
 
+# Centered onboarding hint, shown only while the journey is empty. Lives on the
+# GraphView (not _canvas) so it stays put regardless of pan/zoom.
+var _empty_hint: Label = null
+
 
 func _ready() -> void:
 	clip_contents = true
@@ -79,6 +94,19 @@ func _ready() -> void:
 	# transform moves the rect off-axis.
 	_canvas.custom_minimum_size = Vector2(8000, 8000)
 	_canvas.size = Vector2(8000, 8000)
+
+	_empty_hint = Label.new()
+	_empty_hint.text = "Drop videos or a whole folder here to auto-create rounds —\nor click  +  to add your first item."
+	_empty_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_empty_hint.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+	_empty_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_empty_hint.anchor_right  = 1.0
+	_empty_hint.anchor_bottom = 1.0
+	_empty_hint.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	_empty_hint.add_theme_color_override("font_color", Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.75))
+	_empty_hint.add_theme_font_size_override("font_size", 16)
+	_empty_hint.visible = false
+	add_child(_empty_hint)
 
 
 func set_items(items: Array) -> void:
@@ -91,6 +119,10 @@ func refresh() -> void:
 	for c in _canvas.get_children():
 		c.queue_free()
 	_edges.clear()
+
+	# Onboarding hint only while there's nothing authored yet.
+	if _empty_hint:
+		_empty_hint.visible = _items.is_empty()
 
 	# Recompute which items end the run before laying out so _make_node can
 	# query the set during layout.
@@ -418,13 +450,16 @@ func _make_node(item: Dictionary, arr: Array, _idx: int, is_terminal: bool = fal
 		warn_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.add_child(warn_lbl)
 
-	# Click selection. Ctrl+click toggles membership in the multi-selection;
-	# a plain click selects just this node.
+	# Click selection. Shift+click selects the range from the anchor; Ctrl+click
+	# toggles membership; a plain click selects just this node (and sets the
+	# anchor for a subsequent shift+click).
 	panel.gui_input.connect(func(event: InputEvent) -> void:
 		if event is InputEventMouseButton:
 			var mb := event as InputEventMouseButton
 			if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
-				if mb.ctrl_pressed:
+				if mb.shift_pressed:
+					_range_select(item, arr)
+				elif mb.ctrl_pressed:
 					_toggle_selection(item, arr)
 				else:
 					_select_single(item, arr)
@@ -440,13 +475,15 @@ func _make_path_label(path: Dictionary, paths_arr: Array, path_idx: int) -> Cont
 	panel.custom_minimum_size = Vector2(NODE_WIDTH, PATH_LABEL_HEIGHT)
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 
+	var selected: bool = is_same(path, _selected_path)
 	var s: StyleBoxFlat = StyleBoxFlat.new()
-	s.bg_color = Color(UITheme.MAGENTA.r, UITheme.MAGENTA.g, UITheme.MAGENTA.b, 0.10)
+	s.bg_color = Color(UITheme.MAGENTA.r, UITheme.MAGENTA.g, UITheme.MAGENTA.b, 0.22 if selected else 0.10)
 	s.border_color = UITheme.MAGENTA
-	s.border_width_left   = 1
-	s.border_width_right  = 1
-	s.border_width_top    = 1
-	s.border_width_bottom = 1
+	var bw: int = 3 if selected else 1
+	s.border_width_left   = bw
+	s.border_width_right  = bw
+	s.border_width_top    = bw
+	s.border_width_bottom = bw
 	s.corner_radius_top_left     = 14
 	s.corner_radius_top_right    = 14
 	s.corner_radius_bottom_left  = 14
@@ -455,6 +492,9 @@ func _make_path_label(path: Dictionary, paths_arr: Array, path_idx: int) -> Cont
 	s.content_margin_right  = 12
 	s.content_margin_top    = 4
 	s.content_margin_bottom = 4
+	if selected:
+		s.shadow_color = Color(UITheme.MAGENTA.r, UITheme.MAGENTA.g, UITheme.MAGENTA.b, 0.50)
+		s.shadow_size  = 8
 	panel.add_theme_stylebox_override("panel", s)
 
 	var name_text: String = path.get("name", "Path %d" % (path_idx + 1))
@@ -468,6 +508,16 @@ func _make_path_label(path: Dictionary, paths_arr: Array, path_idx: int) -> Cont
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(lbl)
+
+	# Click selects this branch as an insertion target (new/pasted items go to
+	# the top of the path).
+	panel.gui_input.connect(func(event: InputEvent) -> void:
+		if event is InputEventMouseButton:
+			var mb := event as InputEventMouseButton
+			if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+				_select_branch(path)
+				accept_event()
+	)
 
 	return panel
 
@@ -594,7 +644,52 @@ func _emit_selection() -> void:
 func _select_single(item: Dictionary, arr: Array) -> void:
 	_selected_items = [item]
 	_selected_arr   = arr
+	_selected_path  = {}
+	_anchor_item    = item   # becomes the fixed end of a later Shift+click range
+	_anchor_arr     = arr
 	_emit_selection()
+	refresh()
+
+
+# Index of `item` in `arr` by reference identity, or -1.
+func _index_of(arr: Array, item: Dictionary) -> int:
+	for i in arr.size():
+		if is_same(arr[i], item):
+			return i
+	return -1
+
+
+# Shift+click: selects the inclusive range between the anchor and `item` within
+# the same branch. With no valid anchor (or a different branch), falls back to a
+# plain single select.
+func _range_select(item: Dictionary, arr: Array) -> void:
+	var a_idx: int = -1
+	if not _anchor_item.is_empty() and is_same(arr, _anchor_arr):
+		a_idx = _index_of(arr, _anchor_item)
+	var c_idx: int = _index_of(arr, item)
+	if a_idx < 0 or c_idx < 0:
+		_select_single(item, arr)
+		return
+	var lo: int = min(a_idx, c_idx)
+	var hi: int = max(a_idx, c_idx)
+	var items: Array = []
+	for i in range(lo, hi + 1):
+		items.append(arr[i])
+	_selected_items = items
+	_selected_arr   = arr
+	_selected_path  = {}
+	# Anchor stays put so the range can be re-stretched with another Shift+click.
+	_emit_selection()
+	refresh()
+
+
+# Selects a fork branch (path) as an insertion target — new/pasted items go to
+# the top of the path. Mutually exclusive with node selection.
+func _select_branch(path: Dictionary) -> void:
+	_selected_items = []
+	_selected_arr   = []
+	_selected_path  = path
+	emit_signal("branch_selected", path)
 	refresh()
 
 
@@ -617,6 +712,9 @@ func _toggle_selection(item: Dictionary, arr: Array) -> void:
 	else:
 		_selected_items.append(item)
 		_selected_arr = arr
+	_selected_path = {}
+	_anchor_item   = item   # extend a future Shift+click range from here
+	_anchor_arr    = arr
 	_emit_selection()
 	refresh()
 
@@ -626,6 +724,7 @@ func _toggle_selection(item: Dictionary, arr: Array) -> void:
 func set_selection(items: Array, arr: Array) -> void:
 	_selected_items = items.duplicate()
 	_selected_arr   = arr if not items.is_empty() else []
+	_selected_path  = {}
 	_emit_selection()
 	refresh()
 
@@ -640,12 +739,15 @@ func select_item(arr: Array, idx: int) -> void:
 
 
 func clear_selection() -> void:
-	if _selected_items.is_empty():
+	if _selected_items.is_empty() and _selected_path.is_empty():
 		# Force the signal so consumers can update on a forced clear.
 		_emit_selection()
 		return
 	_selected_items = []
 	_selected_arr   = []
+	_selected_path  = {}
+	_anchor_item    = {}
+	_anchor_arr     = []
 	_emit_selection()
 	refresh()
 
@@ -748,6 +850,7 @@ func _finish_marquee() -> void:
 
 	_selected_items = items
 	_selected_arr   = target_arr
+	_selected_path  = {}
 	_emit_selection()
 	refresh()
 

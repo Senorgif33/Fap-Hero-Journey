@@ -181,11 +181,16 @@ All axes ease in together from neutral at round start and ease out together on p
 | Key | Action |
 |---|---|
 | `Ctrl + S` | Save journey |
+| `Ctrl + 1` / `2` / `3` / `4` | Add a round / shop / storyboard / fork |
 | `Ctrl + C` / `Ctrl + X` / `Ctrl + V` | Copy / Cut / Paste selected module(s) |
 | `Ctrl + Z` / `Ctrl + Y` | Undo / Redo (`Ctrl + Shift + Z` also redoes) |
 | `Backspace` / `Delete` | Delete selected module(s) |
 | `Left Click` (node) | Select node and open its editor |
+| `Left Click` (fork branch) | Select the branch — add/paste to the top of that path |
+| `Shift + Click` (node) | Select a range of nodes in the same branch |
 | `Ctrl + Click` (node) | Add / remove a node from the selection |
+| `Ctrl + A` | Select all nodes in the current branch |
+| `Escape` | Clear selection |
 | `Drag` (empty canvas) | Marquee-select nodes in one branch |
 | `Middle Mouse + Drag` | Pan the graph canvas |
 | `Scroll Wheel` | Zoom the graph canvas in / out |

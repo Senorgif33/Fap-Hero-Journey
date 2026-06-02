@@ -88,12 +88,16 @@ func _on_viewport_files_dropped(files: PackedStringArray) -> void:
 
 # --- Public API ---
 
-func set_file(path: String) -> void:
+# Sets the displayed file. `emit` should be false when only redisplaying an
+# already-stored path on a panel rebuild — otherwise the file_dropped handler
+# treats it as a fresh user drop (and would re-run things like sibling autofill).
+func set_file(path: String, emit: bool = true) -> void:
 	_current_path = path
 	if _label:
 		_label.text = path.get_file() if path != "" else _placeholder
 	_update_style()
-	file_dropped.emit(path)
+	if emit:
+		file_dropped.emit(path)
 
 
 func get_file() -> String:

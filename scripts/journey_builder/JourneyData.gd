@@ -30,6 +30,27 @@ const IMAGE_EXTENSIONS:     Array[String] = ["png", "jpg", "jpeg", "webp"]
 const EXTRA_AXES: Array[String] = ["L1", "L2", "R0", "R1", "R2"]
 
 
+# ── Item templates ───────────────────────────────────────────────────────────
+
+# Returns a fresh default item dict for a builder node of the given type. Single
+# source of truth for the empty-item shape, used by the insert menu, the quick-
+# add buttons, and the Ctrl+1–4 shortcuts.
+static func new_item(type: String) -> Dictionary:
+	match type:
+		"round":
+			return {"type": "round", "name": "", "funscript_path": "", "video_path": "", "coins": 0, "axis_scripts": {}}
+		"shop":
+			return {"type": "shop", "title": ""}
+		"storyboard":
+			return {"type": "storyboard", "coins": 0, "image": "", "lines": []}
+		"fork":
+			return {"type": "fork", "title": "", "description": "", "paths": [
+				{"name": "Path A", "description": "", "image_path": "", "items": []},
+				{"name": "Path B", "description": "", "image_path": "", "items": []},
+			]}
+	return {"type": type}
+
+
 # ── Parse ───────────────────────────────────────────────────────────────────
 
 # Takes a journey dict as parsed by JourneySelect._parse_journey() and

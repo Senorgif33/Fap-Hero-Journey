@@ -128,6 +128,16 @@ func style_line_edit(line_edit: LineEdit) -> void:
 	line_edit.add_theme_stylebox_override("focus", focus_style)
 
 
+# SpinBox styling — reuses the line-edit look for the editable field so numeric
+# inputs match the rest of the panel.
+func style_spin_box(spin: SpinBox) -> void:
+	spin.add_theme_color_override("font_color", WHITE_SOFT)
+	spin.add_theme_font_size_override("font_size", 14)
+	var le: LineEdit = spin.get_line_edit()
+	if le != null:
+		style_line_edit(le)
+
+
 # TextEdit styling (multi-line).
 func style_text_edit(text_edit: TextEdit) -> void:
 	text_edit.add_theme_color_override("font_color",  WHITE_SOFT)
