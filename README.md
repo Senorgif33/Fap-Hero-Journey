@@ -27,7 +27,8 @@ A Godot 4.6 application for creating and playing structured, interactive fap-her
 - **Ease-in / ease-out** — smooth ramp from neutral at round start and on pause/stop (linear devices only; vibrators respond immediately)
 - **Position clamp** — hard min/max range applied to all output, adjustable in Options
 - **Storyboard filler** — keeps the device active during cutscenes with a configurable alternating stroke
-
+  
+### Builder
 - **Graph-based editor** — pan/zoom node graph for authoring the full round sequence, with a **Fit-to-view** button and a built-in **shortcuts reference**
 - **Bulk import** — drop a batch of files (or a whole folder, scanned recursively) and the builder creates one round per video, pairing each with its matching funscript by file name
 - **Auto-fill & auto-route** — set a video and the matching funscript + secondary axis/vib scripts (`name_L1.funscript`, `name.vib1.funscript`, …) are pulled in automatically
@@ -156,7 +157,7 @@ Each entry requires `id` (lowercase, URL-safe), `label` (display text), and `col
 
 Secondary axes (L1, L2, R0, R1, R2) and vibrator channels (vib1, vib2) are supported for serial T-code devices. To use them:
 
-1. **Easiest:** name the files with the axis/channel suffix (`scene_L1.funscript`, `scene.vib1.funscript`, …) and drop them alongside the main video/funscript — the builder routes each to the right slot automatically (on bulk import, single-round drops, or via auto-fill)
+1. **Easiest:** name the files with the axis/channel suffix (`scene.pitch.funscript`, `scene.vib1.funscript`, …) and drop them alongside the main video/funscript — the builder routes each to the right slot automatically (on bulk import, single-round drops, or via auto-fill)
 2. **Manual:** expand the Extra Axes / Vibrator Scripts sections under a round and drop a `.funscript` onto each slot directly
 3. On single-axis devices, secondary axis commands are silently ignored per the T-code spec
 
