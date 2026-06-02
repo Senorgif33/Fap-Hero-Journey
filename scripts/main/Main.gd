@@ -66,6 +66,7 @@ func _ready() -> void:
 	_apply_layout()
 	_apply_theme()
 	_connect_buttons()
+	_setup_version_label()
 	if _intro_played:
 		# Already played this session — show the menu fully formed.
 		_intro_done = true
@@ -137,6 +138,31 @@ func _apply_layout() -> void:
 
 	for btn: Button in [_start_btn, _options_btn, _build_btn, _quit_btn]:
 		btn.custom_minimum_size = Vector2(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT)
+
+
+# Pins a subtle version label to the bottom-right corner. Read from
+# project.godot (application/config/version) so it tracks the real build version.
+# Added directly to the root (not the panel) so it stays out of the intro tweens.
+func _setup_version_label() -> void:
+	var version: String = str(ProjectSettings.get_setting("application/config/version", ""))
+	if version == "":
+		return
+	var ver_lbl: Label = Label.new()
+	ver_lbl.text = "v" + version
+	ver_lbl.add_theme_color_override("font_color", UITheme.PURPLE_MID)
+	ver_lbl.add_theme_font_size_override("font_size", 12)
+	ver_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	ver_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Anchor to the bottom-right corner, growing up/left from it.
+	ver_lbl.anchor_left = 1.0; ver_lbl.anchor_top = 1.0
+	ver_lbl.anchor_right = 1.0; ver_lbl.anchor_bottom = 1.0
+	ver_lbl.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	ver_lbl.grow_vertical   = Control.GROW_DIRECTION_BEGIN
+	ver_lbl.offset_left   = -160
+	ver_lbl.offset_top    = -30
+	ver_lbl.offset_right  = -14
+	ver_lbl.offset_bottom = -10
+	add_child(ver_lbl)
 
 
 # ---------------------------------------------------------------------------
