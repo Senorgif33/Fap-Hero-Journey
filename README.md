@@ -211,7 +211,7 @@ All axes ease in together from neutral at round start and ease out together on p
 | `Middle Mouse + Drag` | Pan the graph canvas |
 | `Scroll Wheel` | Zoom the graph canvas in / out |
 
-> Editing shortcuts (copy/cut/paste/undo/redo/delete) defer to normal text editing while a text field is focused. A full reference is also available via the **⌨ Shortcuts** button in the builder.
+> Editing shortcuts (copy/cut/paste/undo/redo/delete) defer to normal text editing while a text field is focused. A full reference is also available via the **⌨ Shortcuts** button in the builder. 
 
 ---
 
