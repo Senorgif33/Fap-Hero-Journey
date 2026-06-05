@@ -1503,40 +1503,35 @@ func _make_path_editor_block(fork: Dictionary, paths_arr: Array, pi: int, graph:
 	var resolution: String = fork.get("resolution", "choice")
 	var metric: String = fork.get("cond_metric", "score")
 	if resolution == "random":
-		sub.add_child(_side_field_label("WEIGHT (RELATIVE ODDS)"))
-		var w_spin: SpinBox = SpinBox.new()
-		w_spin.min_value = 0; w_spin.max_value = 1000; w_spin.step = 1
-		w_spin.value = int(path.get("weight", 1))
-		w_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		UITheme.style_spin_box(w_spin)
-		w_spin.value_changed.connect(func(v: float) -> void: paths_arr[pi]["weight"] = int(v))
-		sub.add_child(w_spin)
+		_add_path_int_field(sub, paths_arr, pi, "weight", "WEIGHT (RELATIVE ODDS)", 1000)
 	elif resolution == "sacrifice":
 		# A path can demand coins and/or an item; both spent on pick. 0 + None = free.
-		sub.add_child(_side_field_label("COIN COST"))
-		var c_spin: SpinBox = SpinBox.new()
-		c_spin.min_value = 0; c_spin.max_value = 999999; c_spin.step = 1
-		c_spin.value = int(path.get("cost", 0))
-		c_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		UITheme.style_spin_box(c_spin)
-		c_spin.value_changed.connect(func(v: float) -> void: paths_arr[pi]["cost"] = int(v))
-		sub.add_child(c_spin)
+		_add_path_int_field(sub, paths_arr, pi, "cost", "COIN COST", 999999)
 		_add_required_item_field(sub, paths_arr, pi, path, "REQUIRED ITEM (CONSUMED)")
 	elif resolution == "conditional" and metric == "item":
 		# Pure ownership check — not consumed.
 		_add_required_item_field(sub, paths_arr, pi, path, "REQUIRED ITEM")
 	elif resolution == "conditional":
 		# score / coins → numeric tier threshold
-		sub.add_child(_side_field_label("ACTIVATES AT ≥  (%s)" % ("SCORE" if metric == "score" else "COINS")))
-		var t_spin: SpinBox = SpinBox.new()
-		t_spin.min_value = 0; t_spin.max_value = 999999; t_spin.step = 1
-		t_spin.value = int(path.get("threshold", 0))
-		t_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		UITheme.style_spin_box(t_spin)
-		t_spin.value_changed.connect(func(v: float) -> void: paths_arr[pi]["threshold"] = int(v))
-		sub.add_child(t_spin)
+		var thr_label: String = "ACTIVATES AT ≥  (%s)" % ("SCORE" if metric == "score" else "COINS")
+		_add_path_int_field(sub, paths_arr, pi, "threshold", thr_label, 999999)
 
 	return panel
+
+
+# Adds a labeled integer SpinBox to `container` that writes its value back to
+# paths_arr[pi][key]. Shared by the per-path weight / cost / threshold fields.
+func _add_path_int_field(container: VBoxContainer, paths_arr: Array, pi: int, key: String, label: String, max_value: int) -> void:
+	container.add_child(_side_field_label(label))
+	var spin: SpinBox = SpinBox.new()
+	spin.min_value = 0
+	spin.max_value = max_value
+	spin.step = 1
+	spin.value = int(paths_arr[pi].get(key, 0))
+	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(spin)
+	spin.value_changed.connect(func(v: float) -> void: paths_arr[pi][key] = int(v))
+	container.add_child(spin)
 
 
 # Adds a "required item" label + dropdown (with a None/free option) to `container`,

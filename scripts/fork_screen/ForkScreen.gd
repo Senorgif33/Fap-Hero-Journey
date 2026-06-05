@@ -254,13 +254,12 @@ func _can_afford(cost: int, required_item: String) -> bool:
 # "REQUIRES KEY", with a "DEFAULT" tag on the fallback path.
 func _conditional_req_text(index: int, path_data: Dictionary) -> String:
 	var parts: Array = []
+	var threshold: int = int(path_data.get("threshold", 0))
 	match _cond_metric:
 		"score":
-			var ts: int = int(path_data.get("threshold", 0))
-			parts.append("SCORE ≥ %d" % ts if ts > 0 else "ANY SCORE")
+			parts.append("SCORE ≥ %d" % threshold if threshold > 0 else "ANY SCORE")
 		"coins":
-			var tc: int = int(path_data.get("threshold", 0))
-			parts.append("COINS ≥ %d" % tc if tc > 0 else "ANY BALANCE")
+			parts.append("COINS ≥ %d" % threshold if threshold > 0 else "ANY BALANCE")
 		"item":
 			var req: String = str(path_data.get("required_item", ""))
 			if req != "":
@@ -282,7 +281,7 @@ func _cost_text(cost: int, required_item: String) -> String:
 
 # Auto-resolve presentation: the GAME has chosen `index`. Locks out manual picks
 # and plays a roulette-style highlight that decelerates onto the winning card,
-# then dims the rest and continues. Used by random (and, later, conditional) forks.
+# then dims the rest and continues. Used by random and conditional forks.
 func reveal(index: int, caption: String = "FATE DECIDES…") -> void:
 	# Lock out manual choice.
 	for b: Button in _choose_buttons:
