@@ -33,6 +33,11 @@ const ZOOM_STEP:   float = 0.1
 const VIEW_TOP_MARGIN: float = 40.0
 # Padding kept around the content when fit-to-view frames the whole graph.
 const FIT_PADDING:     float = 60.0
+# Minimum canvas extent, and extra margin added around the laid-out content. The
+# canvas is grown to fit tall/wide journeys so its draw (the edges) is never
+# culled — see _resize_canvas_to_content.
+const CANVAS_MIN_SIZE:       float = 8000.0
+const CANVAS_CONTENT_MARGIN: float = 600.0
 
 var _items:           Array      = []
 # Multi-selection: the selected item dicts (by reference) plus the single parent
@@ -89,11 +94,12 @@ func _ready() -> void:
 	clip_contents = true
 	# Make sure we receive input events for pan/zoom.
 	mouse_filter = Control.MOUSE_FILTER_PASS
-	# Force the canvas to have a large bounding rect. A zero-sized Control's
-	# _draw() output can be silently culled by the renderer once the parent's
-	# transform moves the rect off-axis.
-	_canvas.custom_minimum_size = Vector2(8000, 8000)
-	_canvas.size = Vector2(8000, 8000)
+	# Start with a large bounding rect; _resize_canvas_to_content grows it to fit
+	# the actual layout so the edge draw is never culled on tall/wide journeys.
+	# (A canvas item whose rect leaves the viewport is skipped entirely, which
+	# would drop every edge at once while the per-node child controls survive.)
+	_canvas.custom_minimum_size = Vector2(CANVAS_MIN_SIZE, CANVAS_MIN_SIZE)
+	_canvas.size = Vector2(CANVAS_MIN_SIZE, CANVAS_MIN_SIZE)
 
 	_empty_hint = Label.new()
 	_empty_hint.text = "Drop videos or a whole folder here to auto-create rounds —\nor click  +  to add your first item."
@@ -137,11 +143,24 @@ func refresh() -> void:
 
 
 func _do_layout() -> void:
-	_layout_items(_items, 0.0, 0.0)  # return value not used at top level
+	var bounds: Dictionary = _layout_items(_items, 0.0, 0.0)
 	_canvas.set_edges(_edges)
+	_resize_canvas_to_content(bounds.get("size", Vector2(CANVAS_MIN_SIZE, CANVAS_MIN_SIZE)))
 	if not _has_initial_center:
 		_has_initial_center = true
 		call_deferred("_center_initial_view")
+
+
+# Grows _canvas so its rect always covers the laid-out content. Edges are drawn
+# on _canvas as part of its own _draw, so if the content is taller/wider than the
+# canvas rect, the renderer culls the whole canvas item once you scroll past that
+# rect — and every edge disappears at once (nodes are separate items and survive).
+# Sizing to the real content height/width keeps the edges visible at any scroll.
+func _resize_canvas_to_content(content_size: Vector2) -> void:
+	var w: float = maxf(CANVAS_MIN_SIZE, content_size.x + CANVAS_CONTENT_MARGIN)
+	var h: float = maxf(CANVAS_MIN_SIZE, content_size.y + CANVAS_CONTENT_MARGIN)
+	_canvas.custom_minimum_size = Vector2(w, h)
+	_canvas.size = Vector2(w, h)
 
 
 # Aligns the top-center of the graph (where the first item sits, at x=0, y=0
