@@ -1802,10 +1802,9 @@ func _make_vib_expander(arr: Array, idx: int) -> Control:
 # ── Checkpoint toggle ───────────────────────────────────────────────────────
 
 # Author-marked save point. When this round starts during play, the game shows
-# a CHECKPOINT REACHED banner offering Save & Quit so the player can resume
-# the run later. Boss rounds aren't checkpoints (no save inside a boss fight),
-# so the toggle is suppressed when the round is also marked as boss; the
-# author chooses one role or the other per round.
+# a CHECKPOINT REACHED banner offering Save & Quit so the player can resume the
+# run later. Works on any round type, including bosses — the banner is shown
+# before the boss intro card, so the player can save out before committing.
 func _make_checkpoint_toggle(arr: Array, idx: int) -> Control:
 	if not arr[idx].has("is_checkpoint"):
 		arr[idx]["is_checkpoint"] = false

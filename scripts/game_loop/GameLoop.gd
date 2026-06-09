@@ -435,8 +435,6 @@ func _load_current_round() -> void:
 	if _is_boss_round:
 		_round_lbl.text = "⚔  BOSS  %d / %d  —  %s" % [num, total,
 			(round.get("name", "") as String).to_upper()]
-		# Telegraph the boss — playback begins only when the player commits.
-		_show_boss_intro(round)
 	else:
 		var prefix: String = "ROUND"
 		if _is_cursed_round:
@@ -445,12 +443,23 @@ func _load_current_round() -> void:
 			prefix = "✦  BLESSED"
 		_round_lbl.text = "%s %d / %d  —  %s" % [prefix, num, total,
 			(round.get("name", "") as String).to_upper()]
-		# Author-marked checkpoint rounds offer a Save & Quit opt-in before
-		# round playback. Continuing dismisses the banner and plays normally.
-		if round.get("is_checkpoint", false):
-			_show_checkpoint_banner(round)
-		else:
-			_begin_round(round)
+
+	# Author-marked checkpoint rounds offer a Save & Quit opt-in before round
+	# playback — honoured on every round type, bosses included (the banner
+	# precedes the boss intro). Continuing proceeds to the round's normal start.
+	if round.get("is_checkpoint", false):
+		_show_checkpoint_banner(round)
+	else:
+		_start_round_after_gates(round)
+
+
+# Starts a round once any checkpoint gate is cleared: boss rounds telegraph with
+# their intro card first (playback waits for BEGIN); everything else begins now.
+func _start_round_after_gates(round: Dictionary) -> void:
+	if _is_boss_round:
+		_show_boss_intro(round)
+	else:
+		_begin_round(round)
 
 
 # Loads the round's scripts + video and starts playback. For boss rounds this
@@ -560,7 +569,7 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 	continue_btn.pressed.connect(func() -> void:
 		modal.queue_free()
 		_is_overlay_open = false
-		_begin_round(round)
+		_start_round_after_gates(round)
 	)
 	btn_row.add_child(continue_btn)
 

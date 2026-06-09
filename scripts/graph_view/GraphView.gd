@@ -622,16 +622,14 @@ func _type_sublabel(item: Dictionary) -> String:
 		"round":
 			var c: int = item.get("coins", 0)
 			var rt: String = item.get("round_type", "normal")
-			var is_boss: bool = rt == "boss"
 			var rlabel: String = "ROUND"
 			match rt:
 				"boss":    rlabel = "BOSS ROUND"
 				"cursed":  rlabel = "☠ CURSED ROUND"
 				"blessed": rlabel = "✦ BLESSED ROUND"
-			# Checkpoint marker — author-set save point. Suppressed on bosses
-			# since the runtime ignores the flag inside a boss round, so the
-			# graph shouldn't claim something the play loop won't deliver.
-			if not is_boss and item.get("is_checkpoint", false):
+			# Checkpoint marker — author-set save point, honoured on every round
+			# type (the banner shows before a boss round's intro card).
+			if item.get("is_checkpoint", false):
 				rlabel += "   ◆ CHECKPOINT"
 			return "%s   ♦ %d" % [rlabel, c] if c > 0 else rlabel
 		"shop":
