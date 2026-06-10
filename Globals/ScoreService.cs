@@ -146,6 +146,17 @@ public partial class ScoreService : Node
 		EmitSignal(SignalName.ScoreChanged, TotalScore);
 	}
 
+	// Docks points from the current round's score (pause penalty). Clamped at 0 so
+	// a penalty can never eat into previously banked rounds. Emits ScoreChanged so
+	// the HUD reflects the drain live.
+	public void PenalizeScore(int points)
+	{
+		if (points <= 0)
+			return;
+		_current.Score = Math.Max(0, _current.Score - points);
+		EmitSignal(SignalName.ScoreChanged, TotalScore);
+	}
+
 	// Returns completed rounds only (not the current in-progress round).
 	// Each Dictionary has keys: score, small, medium, large (all int).
 	public Godot.Collections.Array<Godot.Collections.Dictionary> GetRoundBreakdowns()

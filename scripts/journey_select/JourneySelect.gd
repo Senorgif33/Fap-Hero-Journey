@@ -72,6 +72,14 @@ const JourneyCardScene = preload("res://scenes/journey_select/JourneyCard.tscn")
 # (and Play recoloured) when the modal switches to a journey without a save.
 var _resume_btn: Button = null
 
+# Separate scoreboard panel, floated to the right of the detail modal. Built once
+# (lazily) and repositioned against the modal's right edge when the modal opens
+# or the viewport resizes. _scoreboard_content holds the per-journey rows.
+var _scoreboard_panel:   PanelContainer = null
+var _scoreboard_content: VBoxContainer  = null
+const SCOREBOARD_PANEL_W: int = 300
+const SCOREBOARD_PANEL_GAP: int = 16
+
 var _journeys:        Array      = []
 var _sort_field:      String     = "name"
 var _sort_asc:        bool       = true
@@ -97,6 +105,8 @@ func _ready() -> void:
 	_scan_journeys()
 	_sort_and_populate()
 	_modal.visible = false
+	# Keep the floating scoreboard glued to the modal's right edge across resizes.
+	get_viewport().size_changed.connect(_position_scoreboard_panel)
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -479,10 +489,11 @@ func _confirm_delete() -> void:
 	var folder: String = _current_journey.get("folder", "")
 	if folder != "":
 		JourneyData.delete_dir_recursive(folder)
-	# Also drop the save file — a deleted journey shouldn't leave orphan saves
-	# in user://journey_saves/ that would resurface if the user creates a new
+	# Also drop the save file and scoreboard — a deleted journey shouldn't leave
+	# orphan data in user:// that would resurface if the user creates a new
 	# journey with the same folder name.
 	JourneySaveService.delete_save(_current_journey.get("folder_name", ""))
+	ScoreboardService.clear(_current_journey.get("folder_name", ""))
 	_journeys.erase(_current_journey)
 	_current_journey = {}
 	_close_modal()
@@ -588,15 +599,20 @@ func _open_modal() -> void:
 	_modal.visible          = true
 	_backdrop.modulate.a    = 0.0
 	_modal_panel.modulate.a = 0.0
+	if _scoreboard_panel != null:
+		_scoreboard_panel.modulate.a = 0.0
 	# Wait one frame so the panel has its final size before computing the pivot.
 	await get_tree().process_frame
 	_modal_panel.pivot_offset = _modal_panel.size / 2.0
 	_modal_panel.scale        = Vector2(0.95, 0.95)
+	_position_scoreboard_panel()
 	var t: Tween = create_tween().set_parallel(true)
 	t.tween_property(_backdrop,    "modulate:a", 1.0, 0.16)
 	t.tween_property(_modal_panel, "modulate:a", 1.0, 0.16)
 	t.tween_property(_modal_panel, "scale", Vector2.ONE, 0.18) \
 		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+	if _scoreboard_panel != null:
+		t.tween_property(_scoreboard_panel, "modulate:a", 1.0, 0.16)
 
 
 # Fades + shrinks the modal out, then hides it and resets the transform.
@@ -607,6 +623,8 @@ func _close_modal() -> void:
 	t.tween_property(_backdrop,    "modulate:a", 0.0, 0.12)
 	t.tween_property(_modal_panel, "modulate:a", 0.0, 0.12)
 	t.tween_property(_modal_panel, "scale", Vector2(0.96, 0.96), 0.12)
+	if _scoreboard_panel != null:
+		t.tween_property(_scoreboard_panel, "modulate:a", 0.0, 0.12)
 	await t.finished
 	_modal.visible            = false
 	_modal_panel.scale        = Vector2.ONE
@@ -703,6 +721,181 @@ func _populate_modal(journey: Dictionary) -> void:
 	# start a fresh run (overwriting the save). When no save exists, the
 	# button row is the original Play / Edit / Delete trio.
 	_refresh_resume_button(journey)
+
+	# Local scoreboard — ranked past runs for this journey.
+	_populate_scoreboard(journey)
+
+
+const SCORE_MONTHS: Array = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+# Lazily builds the floating scoreboard panel (a styled card with a header and a
+# scrollable content column) as a sibling of the modal panel under DetailModal.
+func _ensure_scoreboard_panel() -> void:
+	if _scoreboard_panel != null:
+		return
+	_scoreboard_panel = PanelContainer.new()
+	_scoreboard_panel.name = "ScoreboardPanel"
+	_scoreboard_panel.custom_minimum_size = Vector2(SCOREBOARD_PANEL_W, 0)
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color = UITheme.PANEL_BG
+	s.border_color = UITheme.PURPLE_BRIGHT
+	s.border_width_left = BORDER_WIDTH; s.border_width_right = BORDER_WIDTH
+	s.border_width_top  = BORDER_WIDTH; s.border_width_bottom = BORDER_WIDTH
+	s.corner_radius_top_left = 4; s.corner_radius_top_right = 4
+	s.corner_radius_bottom_left = 4; s.corner_radius_bottom_right = 4
+	s.content_margin_left = 18; s.content_margin_right = 18
+	s.content_margin_top  = 20; s.content_margin_bottom = 20
+	_scoreboard_panel.add_theme_stylebox_override("panel", s)
+
+	_scoreboard_content = VBoxContainer.new()
+	_scoreboard_content.add_theme_constant_override("separation", 6)
+	_scoreboard_content.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	_scoreboard_panel.add_child(_scoreboard_content)
+
+	_modal.add_child(_scoreboard_panel)
+
+
+# Rebuilds the floating HIGH SCORES panel from the journey's recorded runs
+# (ranked by score). Called each modal open and after the player clears the board.
+func _populate_scoreboard(journey: Dictionary) -> void:
+	_ensure_scoreboard_panel()
+	for child in _scoreboard_content.get_children():
+		child.queue_free()
+
+	var folder: String = journey.get("folder_name", "")
+	var runs: Array = ScoreboardService.read_runs(folder)
+
+	# Header: title + a Clear button (only when there's something to clear).
+	var hdr: HBoxContainer = HBoxContainer.new()
+	hdr.add_theme_constant_override("separation", 8)
+	var title: Label = Label.new()
+	title.text = "HIGH SCORES"
+	title.uppercase = true
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	title.add_theme_font_size_override("font_size", 13)
+	hdr.add_child(title)
+	if not runs.is_empty():
+		var clear_btn: Button = Button.new()
+		clear_btn.text = "CLEAR"
+		clear_btn.focus_mode = Control.FOCUS_NONE
+		clear_btn.add_theme_font_size_override("font_size", 10)
+		clear_btn.add_theme_color_override("font_color", UITheme.DANGER)
+		clear_btn.flat = true
+		clear_btn.pressed.connect(_on_clear_scores_pressed)
+		hdr.add_child(clear_btn)
+	_scoreboard_content.add_child(hdr)
+
+	var hdr_line: HSeparator = HSeparator.new()
+	_scoreboard_content.add_child(hdr_line)
+
+	if runs.is_empty():
+		var empty: Label = Label.new()
+		empty.text = "No runs yet — play it!"
+		empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		empty.add_theme_color_override("font_color", UITheme.PURPLE_MID)
+		empty.add_theme_font_size_override("font_size", 11)
+		_scoreboard_content.add_child(empty)
+	else:
+		for i in runs.size():
+			_scoreboard_content.add_child(_make_score_row(i + 1, runs[i]))
+
+
+# Places the scoreboard panel against the modal panel's right edge, matching its
+# height. Called after the modal's size is settled and on viewport resize.
+func _position_scoreboard_panel() -> void:
+	if _scoreboard_panel == null or not _modal.visible:
+		return
+	_scoreboard_panel.custom_minimum_size = Vector2(SCOREBOARD_PANEL_W, _modal_panel.size.y)
+	_scoreboard_panel.size = Vector2(SCOREBOARD_PANEL_W, _modal_panel.size.y)
+	_scoreboard_panel.position = _modal_panel.position + Vector2(_modal_panel.size.x + SCOREBOARD_PANEL_GAP, 0.0)
+
+
+# One ranked run row: rank · score · outcome badge · date.
+func _make_score_row(rank: int, run: Dictionary) -> Control:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+
+	var rank_lbl: Label = Label.new()
+	rank_lbl.text = "%d." % rank
+	rank_lbl.custom_minimum_size = Vector2(22, 0)
+	rank_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	rank_lbl.add_theme_font_size_override("font_size", 12)
+	row.add_child(rank_lbl)
+
+	var score_lbl: Label = Label.new()
+	score_lbl.text = _format_score(int(run.get("score", 0)))
+	score_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	score_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	score_lbl.add_theme_font_size_override("font_size", 12)
+	row.add_child(score_lbl)
+
+	var outcome_lbl: Label = Label.new()
+	if bool(run.get("completed", false)):
+		outcome_lbl.text = "✓ COMPLETE"
+		outcome_lbl.add_theme_color_override("font_color", UITheme.SUCCESS)
+	else:
+		outcome_lbl.text = "✗ ROUND %d/%d" % [int(run.get("rounds_done", 0)), int(run.get("rounds_total", 0))]
+		outcome_lbl.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+	outcome_lbl.add_theme_font_size_override("font_size", 11)
+	row.add_child(outcome_lbl)
+
+	var date_lbl: Label = Label.new()
+	date_lbl.text = _format_short_date(str(run.get("date", "")))
+	date_lbl.custom_minimum_size = Vector2(56, 0)
+	date_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	date_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	date_lbl.add_theme_font_size_override("font_size", 11)
+	row.add_child(date_lbl)
+
+	return row
+
+
+# Thousands-separated score, e.g. 14200 → "14,200".
+func _format_score(n: int) -> String:
+	var s: String = str(absi(n))
+	var out: String = ""
+	while s.length() > 3:
+		out = "," + s.substr(s.length() - 3) + out
+		s = s.substr(0, s.length() - 3)
+	out = s + out
+	return ("-" + out) if n < 0 else out
+
+
+# ISO datetime ("2026-06-12T14:30:25") → "Jun 12". Falls back to the raw date
+# portion if parsing fails.
+func _format_short_date(iso: String) -> String:
+	if iso.is_empty():
+		return ""
+	var dt: Dictionary = Time.get_datetime_dict_from_datetime_string(iso, false)
+	var month: int = int(dt.get("month", 0))
+	var day: int = int(dt.get("day", 0))
+	if month >= 1 and month <= 12 and day >= 1:
+		return "%s %d" % [SCORE_MONTHS[month - 1], day]
+	return iso.split("T")[0]
+
+
+# Confirms, then wipes the current journey's recorded runs and refreshes the
+# section in place.
+func _on_clear_scores_pressed() -> void:
+	if _current_journey.is_empty():
+		return
+	var title: String = _current_journey.get("title", "this journey")
+	var dialog: ConfirmationDialog = ConfirmationDialog.new()
+	dialog.title = "Clear Run History"
+	dialog.dialog_text = "Clear all recorded runs for \"%s\"?\n\nThis cannot be undone." % title
+	dialog.ok_button_text = "CLEAR"
+	dialog.get_ok_button().add_theme_color_override("font_color", UITheme.DANGER)
+	dialog.confirmed.connect(func() -> void:
+		ScoreboardService.clear(_current_journey.get("folder_name", ""))
+		_populate_scoreboard(_current_journey)
+		dialog.queue_free()
+	)
+	dialog.canceled.connect(dialog.queue_free)
+	add_child(dialog)
+	dialog.popup_centered()
 
 
 # Creates or removes the Resume button based on whether the current journey

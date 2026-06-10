@@ -1971,15 +1971,20 @@ func _swap_staging_into_place(paths: Dictionary) -> void:
 func _invalidate_existing_run_saves(paths: Dictionary) -> void:
 	var final_abs: String = paths["final_abs_dir"]
 	var new_folder_name: String = final_abs.get_file()
+	# The run-save snapshot can reference rounds that no longer exist after an
+	# edit, and recorded scores are no longer comparable — so a rebuild clears
+	# both the resume save and the journey's scoreboard.
 	if JourneySaveService.has_save(new_folder_name):
 		JourneySaveService.delete_save(new_folder_name)
 		_invalidated_save_count += 1
+	ScoreboardService.clear(new_folder_name)
 	if _original_journey_folder != "":
 		var old_folder_name: String = (_original_journey_folder as String).get_file()
-		if old_folder_name != "" and old_folder_name != new_folder_name \
-				and JourneySaveService.has_save(old_folder_name):
-			JourneySaveService.delete_save(old_folder_name)
-			_invalidated_save_count += 1
+		if old_folder_name != "" and old_folder_name != new_folder_name:
+			if JourneySaveService.has_save(old_folder_name):
+				JourneySaveService.delete_save(old_folder_name)
+				_invalidated_save_count += 1
+			ScoreboardService.clear(old_folder_name)
 
 
 # Final UX after a clean save: brief success message, then transition back

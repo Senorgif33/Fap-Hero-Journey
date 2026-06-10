@@ -66,6 +66,14 @@ var _device_warning_label:  Label          = null
 var _paused: bool = false
 var _inventory_panel: Control = null
 
+# Pause penalty — score drains while the player has *actively* paused (the pause
+# button or the Options menu). System pauses (boss intro, checkpoint banner,
+# shops/forks/storyboards) don't count. _options_open tracks the Options overlay
+# since it pauses without setting _paused.
+const PAUSE_PENALTY_PER_SEC: int = 10
+var _options_open: bool = false
+var _pause_penalty_accum: float = 0.0
+
 # True while a full-screen overlay (shop / fork / storyboard) is active.
 # Used to suppress gameplay hotkeys that should not fire through an overlay.
 var _is_overlay_open: bool = false
@@ -153,6 +161,10 @@ var _test_return_journey: Dictionary = {}
 # Sacrifice forks can be exercised from a chosen starting point.
 var _test_seed_score: int = 0
 var _test_seed_coins: int = 0
+# Set once this run's outcome has been logged to the scoreboard (on completion)
+# or when leaving via Save & Quit (a resume, not an abandon) — so the menu exit
+# doesn't also record an abandoned run.
+var _run_accounted: bool = false
 
 
 func _ready() -> void:
@@ -215,7 +227,7 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_fit_video_cover)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _video.is_playing():
 		var len: float = _video.get_stream_length()
 		if len > 0.0:
@@ -225,6 +237,7 @@ func _process(_delta: float) -> void:
 		# Re-fit every frame: cheap, and keeps the video covering the screen even
 		# if the viewport or UI scale changes mid-playback.
 		_fit_video_cover()
+	_apply_pause_penalty(delta)
 	_update_chip_countdowns()
 	if _is_boss_round:
 		_update_boss_frame()
@@ -234,6 +247,20 @@ func _process(_delta: float) -> void:
 		_update_blessing_frame()
 	if _beat_bar != null:
 		_beat_bar.set_time(FunscriptPlayer.PositionMs)
+
+
+# Drains score while the player has actively paused (pause button or Options) —
+# PAUSE_PENALTY_PER_SEC per whole second held. System pauses (boss intro,
+# checkpoint banner, shops/forks/storyboards) don't set _paused / _options_open,
+# so they're exempt. The accumulator resets the moment play resumes.
+func _apply_pause_penalty(delta: float) -> void:
+	if not (_paused or _options_open):
+		_pause_penalty_accum = 0.0
+		return
+	_pause_penalty_accum += delta
+	while _pause_penalty_accum >= 1.0:
+		_pause_penalty_accum -= 1.0
+		ScoreService.PenalizeScore(PAUSE_PENALTY_PER_SEC)
 
 
 # Leaving the game loop (Esc out of a test, journey complete, etc.) — strip any
@@ -466,6 +493,9 @@ func _start_round_after_gates(round: Dictionary) -> void:
 # runs after the intro card's BEGIN; for normal rounds, immediately.
 func _begin_round(round: Dictionary) -> void:
 	ScoreService.StartRound()
+	# Clear any pause left by a pre-round gate (boss intro / checkpoint banner) —
+	# _video.play() below doesn't reset the paused flag on its own.
+	_video.paused = false
 
 	var fs_path: String = round.get("funscript_path", "")
 	if fs_path != "":
@@ -527,6 +557,7 @@ func _begin_round(round: Dictionary) -> void:
 # Pattern mirrors _show_boss_intro since both gate round start on user input.
 func _show_checkpoint_banner(round: Dictionary) -> void:
 	_is_overlay_open = true   # suppress gameplay hotkeys while the banner is up
+	_halt_playback_for_gate()  # freeze any leftover playback so the score can't tick
 
 	var parts: Dictionary    = UITheme.build_centered_modal("◆  CHECKPOINT REACHED  ◆", UITheme.AMBER, Vector2i(620, 320))
 	var modal: Control       = parts["modal"]
@@ -580,10 +611,21 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 # Boss rounds
 # ---------------------------------------------------------------------------
 
+# Freezes playback while a pre-round modal (boss intro / checkpoint banner) is up.
+# A round reached after a shop/storyboard/fork resumes the prior video+funscript
+# before loading the next item; for a gated round that real start is deferred to
+# BEGIN/Continue, so without this the leftover playback would keep dispatching
+# strokes and tick the score up behind the modal. _begin_round restarts cleanly.
+func _halt_playback_for_gate() -> void:
+	_video.paused = true
+	FunscriptPlayer.Pause()
+
+
 # Telegraphed intro card. The round's scripts/video do not load and playback
 # does not start until the player clicks BEGIN.
 func _show_boss_intro(round: Dictionary) -> void:
 	_is_overlay_open = true  # suppress gameplay hotkeys while the card is up
+	_halt_playback_for_gate()  # don't let leftover playback tick the score behind the card
 
 	var overlay: Control = Control.new()
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -1245,6 +1287,15 @@ func _build_boss_frame() -> void:
 	s.border_width_top  = 6; s.border_width_bottom = 6
 	_boss_frame.add_theme_stylebox_override("panel", s)
 	add_child(_boss_frame)
+	_send_frame_behind_hud(_boss_frame)
+
+
+# Decorative round frames (boss/curse/blessing borders) must draw BEHIND the HUD
+# so their edge border doesn't sit on top of the progress bar / HUD bar. Call
+# right after the frame is added to the game-loop root.
+func _send_frame_behind_hud(frame: Control) -> void:
+	if is_instance_valid(_hud):
+		move_child(frame, _hud.get_index())
 
 
 # One composable canvas_item shader for every per-pixel video hex. Each effect is
@@ -1443,6 +1494,7 @@ func _build_curse_overlay() -> void:
 	s.border_width_top  = 5; s.border_width_bottom = 5
 	_curse_frame.add_theme_stylebox_override("panel", s)
 	add_child(_curse_frame)
+	_send_frame_behind_hud(_curse_frame)
 
 	# Blessed-round counterparts — faint gold tint + gold frame.
 	_blessing_tint = ColorRect.new()
@@ -1463,6 +1515,7 @@ func _build_curse_overlay() -> void:
 	gs.border_width_top  = 5; gs.border_width_bottom = 5
 	_blessing_frame.add_theme_stylebox_override("panel", gs)
 	add_child(_blessing_frame)
+	_send_frame_behind_hud(_blessing_frame)
 
 
 # Routes the video's audio through a dedicated bus (→ Master) so audio hexes
@@ -1879,6 +1932,10 @@ func _go_to_menu() -> void:
 	if _test_mode:
 		_exit_test_to_builder()
 		return
+	# Quitting mid-journey is an abandoned run — unless we already accounted for
+	# this run (completed it, or left via Save & Quit to resume later).
+	if not _run_accounted:
+		_record_run(false)
 	Transition.change_scene("res://scenes/main/Main.tscn")
 
 
@@ -1892,8 +1949,30 @@ func _transition_to_end_screen() -> void:
 	if _test_mode:
 		_exit_test_to_builder()
 		return
+	_record_run(true)  # completed run → scoreboard
 	JourneySaveService.delete_save(GameState.Journey.get("folder_name", ""))
 	Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
+
+
+# Records this run's outcome to the journey's local scoreboard. `completed` is
+# true when the journey reached the end screen, false for an abandoned (quit)
+# run — which logs the score-so-far and how far the player got. No-op in test
+# mode; sets _run_accounted so a later menu exit can't double-record.
+func _record_run(completed: bool) -> void:
+	_run_accounted = true
+	if _test_mode:
+		return
+	var folder: String = GameState.Journey.get("folder_name", "")
+	if folder.is_empty():
+		return
+	var total: int = GameState.TotalRounds()
+	var reached: int = total if completed else clampi(GameState.RoundNumber, 0, total)
+	ScoreboardService.add_run(folder, {
+		"score": ScoreService.TotalScore,
+		"completed": completed,
+		"rounds_done": reached,
+		"rounds_total": total,
+	})
 
 
 # Returns from a test play to the builder, reloading the same journey so the
@@ -1977,6 +2056,9 @@ func _on_save_and_quit() -> void:
 	var ok: bool = _write_journey_save()
 	if not ok:
 		push_warning("GameLoop: save failed — returning to menu without saving")
+	# Saved for resume — this isn't an abandoned run, so don't let the menu exit
+	# log it to the scoreboard.
+	_run_accounted = true
 	_go_to_menu()
 
 
@@ -2033,6 +2115,7 @@ func _show_save_toast(text: String) -> void:
 func _on_options_pressed() -> void:
 	_video.paused = true
 	FunscriptPlayer.Pause()
+	_options_open = true  # counts as an active pause for the score penalty
 	# Freeze the active-effect clock while the Options overlay is open.
 	InventoryService.SetPaused(true)
 	var opts: Control = OptionsScene.instantiate()
@@ -2042,6 +2125,7 @@ func _on_options_pressed() -> void:
 
 
 func _on_options_closed() -> void:
+	_options_open = false
 	# Only resume if the round was not separately paused via the pause button —
 	# in that case the effect clock must stay frozen until the player resumes.
 	if not _paused:
