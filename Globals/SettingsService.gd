@@ -48,6 +48,7 @@ const DEFAULT_FILLER_HI:         int    = 100
 const DEFAULT_JOURNEYS_DIR:      String = "user://journeys"
 const DEFAULT_FFMPEG_DIR:        String = ""    # "" = bundled binary / PATH
 const DEFAULT_AUTO_TRANSCODE:    bool   = true
+const DEFAULT_UPDATE_CHECK:      bool   = true   # check GitHub for a newer build on launch
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -191,6 +192,12 @@ func resolve_ffmpeg_binary(name: String) -> String:
 func get_auto_transcode() -> bool:
 	return bool(_config.get_value("transcode", "auto_transcode", DEFAULT_AUTO_TRANSCODE))
 
+# When true (default), the main menu pings GitHub once per launch to see if a
+# newer release exists and shows an update banner. Off = no network call, no
+# banner — for players who'd rather the app never phone home.
+func get_update_check_enabled() -> bool:
+	return bool(_config.get_value("updates", "check_on_launch", DEFAULT_UPDATE_CHECK))
+
 
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
@@ -288,6 +295,9 @@ func set_ffmpeg_dir(value: String) -> void:
 
 func set_auto_transcode(value: bool) -> void:
 	_config.set_value("transcode", "auto_transcode", value)
+
+func set_update_check_enabled(value: bool) -> void:
+	_config.set_value("updates", "check_on_launch", value)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────

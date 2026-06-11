@@ -1691,7 +1691,13 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 	var shops_json:       Array = []
 	var storyboards_json: Array = []
 	var rorder: int = 0
-	var last_rorder: int = 0
+	# Monotonic authoring position — incremented for EVERY item so each gets a
+	# unique, strictly-increasing sort anchor. Items sort by (pos*3 [+1 shop /
+	# +2 fork]); since consecutive positions differ by 3 the offsets never
+	# collide, so authored order is preserved exactly — including a shop placed
+	# *after* a fork (which the old "anchor to the previous round" scheme could
+	# not express: shop's +1 sorted before the fork's +2 at the same anchor).
+	var pos: int = 0
 	var total_main_rounds: int = _items.filter(func(item: Dictionary) -> bool: return item.get("type","round") == "round").size()
 
 	for i in _items.size():
@@ -1702,9 +1708,10 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 			break
 		var item: Dictionary = _items[i]
 		var item_type: String = item.get("type","round")
+		pos += 1
 		if item_type == "shop":
 			shops_json.append({
-				"AfterOrder":      last_rorder,
+				"AfterOrder":      pos,
 				"Title":           item.get("title",""),
 				"Mode":            item.get("mode", "pool"),
 				"Count":           item.get("count", 3),
@@ -1714,7 +1721,6 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 			continue
 		if item_type == "storyboard":
 			rorder += 1
-			last_rorder = rorder
 			var sb_slug: String = "storyboard_%d" % rorder
 			var sb_img_src: String = item.get("image", "")
 			var sb_img_fname: String = ""
@@ -1737,7 +1743,7 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 					"Image":   li_img_fname,
 				})
 			storyboards_json.append({
-				"Order":        rorder,
+				"Order":        pos,
 				"CoinsAwarded": item.get("coins", 0) as int,
 				"Item":         item.get("item", ""),
 				"Image":        sb_img_fname,
@@ -1746,7 +1752,6 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 			continue
 		if item_type == "round":
 			rorder += 1
-			last_rorder = rorder
 
 			# Human-readable name kept in journey.json's "Name" for display.
 			# Short slug (r001, r002, …) is the actual on-disk folder. This
@@ -1852,7 +1857,7 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 			var round_json: Dictionary = JourneyData.round_to_json(item)
 			round_json["Name"]          = round_name
 			round_json["FolderName"]    = round_slug
-			round_json["Order"]         = rorder
+			round_json["Order"]         = pos
 			round_json["BossImage"]     = boss_image_rel
 			round_json["FunscriptPath"] = round_slug + "/" + fs_dst_name
 			round_json["AxisScripts"]   = axis_scripts_rel
@@ -1863,7 +1868,7 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 		else:
 			# Fork — recursively save the fork and all nested forks.
 			var slug_prefix: String = "fork%d" % forks_json.size()
-			forks_json.append(await _save_fork(item, abs_dir, abs_media_dir, last_rorder, slug_prefix, copied_images, modal))
+			forks_json.append(await _save_fork(item, abs_dir, abs_media_dir, pos, slug_prefix, copied_images, modal))
 			# A failed video copy deep inside a fork path unwinds to here. Use
 			# the stashed failure info so the modal shows the actual cause
 			# (cancel vs source unreadable vs destination unwritable) and the
@@ -2028,15 +2033,18 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 	}
 
 	var pr_order: int = 0
-	var pr_last_order: int = 0
+	# Monotonic authoring position, same scheme as the top-level loop — every
+	# item bumps it so a shop placed after a (nested) fork sorts correctly.
+	var pr_pos: int = 0
 	var nested_fork_count: int = 0
 
 	for pi_item: Dictionary in path_data.get("items", []):
 		var pi_type: String = pi_item.get("type","round")
+		pr_pos += 1
 		match pi_type:
 			"shop":
 				path_entry["Shops"].append({
-					"AfterOrder":      pr_last_order,
+					"AfterOrder":      pr_pos,
 					"Title":           pi_item.get("title",""),
 					"Mode":            pi_item.get("mode", "pool"),
 					"Count":           pi_item.get("count", 3),
@@ -2045,7 +2053,6 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				})
 			"storyboard":
 				pr_order += 1
-				pr_last_order = pr_order
 				var psb_slug: String = "%s_storyboard_%d" % [slug_prefix, pr_order]
 				var psb_img_src: String = pi_item.get("image", "")
 				var psb_img_fname: String = ""
@@ -2068,18 +2075,18 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 						"Image":   psb_li_img_fname,
 					})
 				path_entry["Storyboards"].append({
-					"Order":        pr_order,
+					"Order":        pr_pos,
 					"CoinsAwarded": pi_item.get("coins",0) as int,
 					"Item":         pi_item.get("item", ""),
 					"Image":        psb_img_fname,
 					"Lines":        psb_lines_json,
 				})
 			"fork":
-				# Nested fork — recurse. Sort key uses pr_last_order so it lands
-				# after the last round/storyboard authored before it in this path.
+				# Nested fork — recurse. Sort key uses the monotonic position so it
+				# lands exactly where it was authored within this path.
 				var nested_slug: String = "%s_f%d" % [slug_prefix, nested_fork_count]
 				nested_fork_count += 1
-				path_entry["Forks"].append(await _save_fork(pi_item, abs_dir, abs_media_dir, pr_last_order, nested_slug, copied_images, modal))
+				path_entry["Forks"].append(await _save_fork(pi_item, abs_dir, abs_media_dir, pr_pos, nested_slug, copied_images, modal))
 				if _save_aborted:
 					return path_entry
 			_:
@@ -2087,7 +2094,6 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				# short slug for the folder, short standard filenames inside,
 				# human-readable name kept only in journey.json.
 				pr_order += 1
-				pr_last_order = pr_order
 				var pr_name: String = (pi_item.get("name","") as String).strip_edges()
 				var pr_slug: String = _next_round_folder_slug()
 				var pr_dir: String  = abs_dir + "/" + pr_slug
@@ -2172,7 +2178,7 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				var pr_json: Dictionary = JourneyData.round_to_json(pi_item)
 				pr_json["Name"]          = pr_name
 				pr_json["FolderName"]    = pr_slug
-				pr_json["Order"]         = pr_order
+				pr_json["Order"]         = pr_pos
 				pr_json["BossImage"]     = pr_boss_image_rel
 				pr_json["FunscriptPath"] = (pr_slug + "/" + pr_fs_dst_name) if pr_fs_dst_name != "" else ""
 				pr_json["AxisScripts"]   = pr_axis_rel

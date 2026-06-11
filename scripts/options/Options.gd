@@ -97,6 +97,7 @@ var _hud_delay_value_lbl: Label   = null
 var _ui_scale_slider:     HSlider = null
 var _ui_scale_value_lbl:  Label   = null
 var _beat_bar_toggle:     Button  = null
+var _update_check_toggle: Button  = null
 
 var _filler_toggle:     Button      = null
 var _filler_speed_input: LineEdit   = null
@@ -350,6 +351,33 @@ func _apply_layout() -> void:
 	beat_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(beat_hint, UITheme.SEPARATOR, 11, false)
 	display_section.add_child(beat_hint)
+
+	# ── Update Check row (code-generated, appended to DisplaySection) ─────────
+	var upd_row: HBoxContainer = HBoxContainer.new()
+	upd_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(upd_row)
+
+	var upd_lbl: Label = Label.new()
+	upd_lbl.text = "CHECK FOR UPDATES ON LAUNCH"
+	upd_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(upd_lbl, UITheme.WHITE_SOFT, 14, false)
+	upd_row.add_child(upd_lbl)
+
+	_update_check_toggle = Button.new()
+	_update_check_toggle.toggle_mode = true
+	_update_check_toggle.focus_mode  = Control.FOCUS_NONE
+	_style_toggle(_update_check_toggle, false)
+	upd_row.add_child(_update_check_toggle)
+	_update_check_toggle.toggled.connect(func(pressed: bool) -> void:
+		_style_toggle(_update_check_toggle, pressed)
+		_save_settings()
+	)
+
+	var upd_hint: Label = Label.new()
+	upd_hint.text = "Pings GitHub once per launch for a newer build and shows a banner. Off = no network call."
+	upd_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(upd_hint, UITheme.SEPARATOR, 11, false)
+	display_section.add_child(upd_hint)
 
 	for label_path in [
 		"ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeLabel",
@@ -1175,6 +1203,11 @@ func _load_settings() -> void:
 		_beat_bar_toggle.button_pressed = beat_on
 		_style_toggle(_beat_bar_toggle, beat_on)
 
+	if _update_check_toggle != null:
+		var upd_on: bool = SettingsService.get_update_check_enabled()
+		_update_check_toggle.button_pressed = upd_on
+		_style_toggle(_update_check_toggle, upd_on)
+
 	# Load the filler range slider FIRST so that if the toggle or speed-input
 	# signals fire _save_settings() below, the slider already holds the correct
 	# values and won't overwrite them with the initialisation defaults (0/100).
@@ -1256,6 +1289,9 @@ func _save_settings() -> void:
 
 	if _beat_bar_toggle != null:
 		SettingsService.set_beat_bar_enabled(_beat_bar_toggle.button_pressed)
+
+	if _update_check_toggle != null:
+		SettingsService.set_update_check_enabled(_update_check_toggle.button_pressed)
 
 	if _filler_toggle != null:
 		SettingsService.set_filler_enabled(_filler_toggle.button_pressed)
