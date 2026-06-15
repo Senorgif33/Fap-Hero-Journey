@@ -29,6 +29,16 @@ const IMAGE_EXTENSIONS:     Array[String] = ["png", "jpg", "jpeg", "webp"]
 # Secondary T-code axes supported for serial devices (L0 = main stroke, handled separately).
 const EXTRA_AXES: Array[String] = ["L1", "L2", "R0", "R1", "R2"]
 
+# Standard funscript multi-axis / vibrator suffixes, keyed by our internal channel
+# id. Used to name pooled channel scripts (content/m_<fp>.<suffix>.funscript) so the
+# pooled files stay self-describing and follow the funscript multi-axis convention.
+const AXIS_SUFFIXES: Dictionary = {
+	"L1": "surge", "L2": "sway", "R0": "twist", "R1": "roll", "R2": "pitch",
+}
+const VIB_SUFFIXES: Dictionary = {
+	"vib1": "vibe1", "vib2": "vibe2",
+}
+
 # Curse catalog — the GAMEPLAY afflictions a cursed round can apply (they change
 # the device output, the economy, or the controls). Non-gameplay visual/audio
 # effects live in SENSORY_CATALOG below. Single source of truth shared by the

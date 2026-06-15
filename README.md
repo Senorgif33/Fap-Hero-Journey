@@ -124,10 +124,11 @@ Rounds don't have their own folders. Each round references its assets by explici
 	├── media/                           ← journey images: cover, storyboard, fork-path art
 	│   └── cover.png
 	└── content/                         ← playback assets, pooled & deduped by content fingerprint
-	    ├── m_4f1a2b3c8d9e0f12.mp4        ← video (copied, or transcoded to H.264)
-	    ├── m_91c0a7e2d3b4f5a6.funscript  ← main stroke script
-	    ├── m_2d7be4a1c0938f5d.funscript  ← optional secondary axis / vibrator channel
-	    └── m_6a3f0b9e8c1d2740.png        ← optional boss intro image
+	    ├── m_4f1a2b3c8d9e0f12.mp4              ← video (copied, or transcoded to H.264)
+	    ├── m_91c0a7e2d3b4f5a6.funscript        ← main stroke script
+	    ├── m_2d7be4a1c0938f5d.pitch.funscript  ← optional secondary axis (.surge/.sway/.twist/.roll/.pitch)
+	    ├── m_5e8c1a09f4b3d672.vibe1.funscript  ← optional vibrator channel (.vibe1/.vibe2)
+	    └── m_6a3f0b9e8c1d2740.png              ← optional boss intro image
 ```
 
 `journey.json` schema (abbreviated — keys are PascalCase):

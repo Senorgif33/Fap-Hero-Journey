@@ -1947,7 +1947,8 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 			var axis_scripts_in: Dictionary = item.get("axis_scripts", {})
 			var axis_scripts_rel: Dictionary = {}
 			for axis: String in axis_scripts_in:
-				var ax_rel: String = _pool_small_file(axis_scripts_in[axis], abs_dir)
+				var ax_src: String = axis_scripts_in[axis]
+				var ax_rel: String = _pool_small_file(ax_src, abs_dir, _channel_pool_ext(JourneyData.AXIS_SUFFIXES.get(axis, ""), ax_src))
 				if ax_rel != "":
 					axis_scripts_rel[axis] = ax_rel
 
@@ -1955,7 +1956,8 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 			var vib_scripts_in: Dictionary = item.get("vib_scripts", {})
 			var vib_scripts_rel: Dictionary = {}
 			for ch_key: String in vib_scripts_in:
-				var vib_rel: String = _pool_small_file(vib_scripts_in[ch_key], abs_dir)
+				var vib_src: String = vib_scripts_in[ch_key]
+				var vib_rel: String = _pool_small_file(vib_src, abs_dir, _channel_pool_ext(JourneyData.VIB_SUFFIXES.get(ch_key, ""), vib_src))
 				if vib_rel != "":
 					vib_scripts_rel[ch_key] = vib_rel
 
@@ -2316,13 +2318,15 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				var pr_axis_in: Dictionary = pi_item.get("axis_scripts", {})
 				var pr_axis_rel: Dictionary = {}
 				for axis: String in pr_axis_in:
-					var ax_rel: String = _pool_small_file(pr_axis_in[axis], abs_dir)
+					var ax_src: String = pr_axis_in[axis]
+					var ax_rel: String = _pool_small_file(ax_src, abs_dir, _channel_pool_ext(JourneyData.AXIS_SUFFIXES.get(axis, ""), ax_src))
 					if ax_rel != "":
 						pr_axis_rel[axis] = ax_rel
 				var pr_vib_in: Dictionary = pi_item.get("vib_scripts", {})
 				var pr_vib_rel: Dictionary = {}
 				for ch_key: String in pr_vib_in:
-					var vib_rel: String = _pool_small_file(pr_vib_in[ch_key], abs_dir)
+					var vib_src: String = pr_vib_in[ch_key]
+					var vib_rel: String = _pool_small_file(vib_src, abs_dir, _channel_pool_ext(JourneyData.VIB_SUFFIXES.get(ch_key, ""), vib_src))
 					if vib_rel != "":
 						pr_vib_rel[ch_key] = vib_rel
 				var pr_round_type: String = pi_item.get("round_type", "normal")
@@ -2670,15 +2674,29 @@ func _assign_pooled_media(src: String, ext: String) -> Dictionary:
 # Pools a small file (funscript / axis / vib / boss image) into content/ via the
 # synchronous _copy_file, copying only on the first sighting of its source so
 # reused assets are stored once. Returns the journey-root-relative pooled path
-# ("" for an empty source). A copy failure sets _save_aborted (surfaced at the
-# next checkpoint), matching the other _copy_file call sites.
-func _pool_small_file(src: String, abs_dir: String) -> String:
+# ("" for an empty source). `ext_override` sets the pooled file's extension —
+# used to keep the channel suffix on axis/vib scripts (e.g. "pitch.funscript");
+# falls back to the source's extension when empty. A copy failure sets
+# _save_aborted (surfaced at the next checkpoint), like the other _copy_file sites.
+func _pool_small_file(src: String, abs_dir: String, ext_override: String = "") -> String:
 	if src == "":
 		return ""
-	var pool: Dictionary = _assign_pooled_media(src, src.get_extension())
+	var ext: String = ext_override if ext_override != "" else src.get_extension()
+	var pool: Dictionary = _assign_pooled_media(src, ext)
 	if pool["copy"]:
 		_copy_file(src, abs_dir + "/" + pool["rel"])
 	return pool["rel"]
+
+
+# Builds the pooled extension for a channel script so it keeps the standard
+# funscript suffix (content/m_<fp>.<suffix>.<ext>, e.g. ...pitch.funscript).
+# `suffix` is the channel's funscript suffix (surge/sway/…/vibe1); falls back to
+# the bare source extension when the channel id isn't recognised.
+func _channel_pool_ext(suffix: String, src: String) -> String:
+	var src_ext: String = src.get_extension()
+	if suffix == "" or src_ext == "":
+		return src_ext
+	return suffix + "." + src_ext
 
 
 # Synchronous whole-file copy. Use only for small files (funscripts, images) —
