@@ -150,6 +150,10 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		# Boss-round config — RoundType plus optional intro image / tagline /
 		# forced modifiers. Absent fields fall back to a plain ("normal") round.
 		var round_type: String = (raw.get("RoundType", "Normal") as String).to_lower()
+		# Explicit video path (new). Falls back to "" so the consumer can folder-
+		# scan for pre-VideoPath journeys (JourneyData._round_video).
+		var raw_video: String = raw.get("VideoPath", raw.get("video_path", ""))
+		var video_path: String = (path + "/" + raw_video) if raw_video != "" else ""
 		var boss_image: String = raw.get("BossImage", "")
 		if boss_image != "":
 			boss_image = path + "/" + boss_image
@@ -161,6 +165,7 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		var round_data: Dictionary = {
 			"name":           round_name,
 			"folder":         round_folder,
+			"video_path":     video_path,
 			"funscript_path": funscript_stats["path"],
 			"axis_scripts":   axis_scripts,
 			"vib_scripts":    vib_scripts,
@@ -261,6 +266,8 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 					pr_vib_scripts[ch_key] = journey_path + "/" + rel
 
 			var pr_round_type: String = (raw_pr.get("RoundType", "Normal") as String).to_lower()
+			var pr_raw_video: String = raw_pr.get("VideoPath", raw_pr.get("video_path", ""))
+			var pr_video_path: String = (journey_path + "/" + pr_raw_video) if pr_raw_video != "" else ""
 			var pr_boss_image: String = raw_pr.get("BossImage", "")
 			if pr_boss_image != "":
 				pr_boss_image = journey_path + "/" + pr_boss_image
@@ -272,6 +279,7 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 			path_entry["rounds"].append({
 				"name":           pr_name,
 				"folder":         pr_folder,
+				"video_path":     pr_video_path,
 				"funscript_path": pr_fs["path"],
 				"axis_scripts":   pr_axis_scripts,
 				"vib_scripts":    pr_vib_scripts,

@@ -84,6 +84,15 @@ Ordered by value × ease. ✅ = written, ▢ = planned.
   - *Remaining:* shops / storyboards / fork-resolution serialization still live
     inline in the builder save — same extraction could fold them into
     `round_to_json`-style helpers if/when they grow. Not urgent.
+  - *VideoPath round-trip:* both round-trip suites now also assert the explicit
+    `VideoPath` survives save → scan (resolved to absolute), with a no-`VideoPath`
+    case asserting the folder-scan fallback (`JourneyData._round_video`).
+- ✅ **Shared media pool** (`media_pool_test.gd`): the save-time dedup that stores
+  each video / funscript source once under `media/m_<fingerprint>.<ext>`. Unit-tests
+  the pure planner `JourneyData.plan_media_pool` (first-copy vs skip-on-reuse, 5
+  references → 3 writes), `pooled_media_rel` shape, and `media_fingerprint`
+  stability (same bytes → same fp; different size/path → different fp). The actual
+  transcode/copy + skip wiring in the builder save is manual/integration.
 
 ### Tier 3 — GameState fork splicing (C#, highest risk)
 

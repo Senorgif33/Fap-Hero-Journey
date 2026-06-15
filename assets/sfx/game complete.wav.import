@@ -1,0 +1,24 @@
+[remap]
+
+importer="wav"
+type="AudioStreamWAV"
+uid="uid://ciclkao0oefbr"
+path="res://.godot/imported/game complete.wav-e651b2de46efb4aab90ec8980b0e2a88.sample"
+
+[deps]
+
+source_file="res://assets/sfx/game complete.wav"
+dest_files=["res://.godot/imported/game complete.wav-e651b2de46efb4aab90ec8980b0e2a88.sample"]
+
+[params]
+
+force/8_bit=false
+force/mono=false
+force/max_rate=false
+force/max_rate_hz=44100
+edit/trim=false
+edit/normalize=false
+edit/loop_mode=0
+edit/loop_begin=0
+edit/loop_end=-1
+compress/mode=2

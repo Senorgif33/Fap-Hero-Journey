@@ -200,7 +200,7 @@ func _ready() -> void:
 			CoinService.SetBalance(_test_seed_coins)
 		if _test_seed_score > 0:
 			ScoreService.SeedLastRoundScore(_test_seed_score)
-	_refresh_coin_label()
+	_refresh_coin_label(true)
 	_load_current_item()
 	_show_hud()
 	if _test_mode:
@@ -504,8 +504,12 @@ func _begin_round(round: Dictionary) -> void:
 	if not _reveal_effects.is_empty() and bool(round.get("show_reveal", true)):
 		await _show_reveal_card(_is_blessed_round)
 
-	var folder: String = round.get("folder", "")
-	var video_path: String = _find_video(folder)
+	# Prefer the explicit video_path (set by the scanner from VideoPath, or by
+	# JourneyData._round_video); fall back to a folder-scan for pre-VideoPath
+	# journeys that never recorded one.
+	var video_path: String = round.get("video_path", "")
+	if video_path == "":
+		video_path = _find_video(round.get("folder", ""))
 	_load_video(video_path)
 
 
@@ -1758,8 +1762,65 @@ func _input(event: InputEvent) -> void:
 # Signals
 # ---------------------------------------------------------------------------
 
+# Animated HUD counters: the score/coin labels count up (or down) to their new
+# value and flash a colour + scale pulse — green for a gain, red for a loss — so
+# rewards feel earned and the pause-penalty drain is actually visible.
+const COUNTER_DURATION: float = 0.45
+const PULSE_DURATION:   float = 0.35
+
+var _score_shown: int = 0
+var _coin_shown:  int = 0
+# Per-label [count, scale, colour] tweens, killed/replaced on each change so
+# rapid score ticks chase the target instead of stacking.
+var _counter_tweens: Dictionary = {}
+
+
 func _on_score_changed(total: int) -> void:
-	_score_lbl.text = str(total) + " PTS"
+	_animate_counter(_score_lbl, _score_shown, total, "%d PTS", UITheme.MAGENTA, false)
+	_score_shown = total
+
+
+# Rolls `lbl` from from_val→to_val with a count-up tween and a gain/loss pulse.
+# `fmt` is a printf format taking one int (e.g. "%d PTS"). `instant` snaps with
+# no animation (used for the initial fill so the HUD doesn't pulse on round start).
+func _animate_counter(lbl: Label, from_val: int, to_val: int, fmt: String, base_color: Color, instant: bool) -> void:
+	for tw: Tween in _counter_tweens.get(lbl, []):
+		if tw != null and tw.is_running():
+			tw.kill()
+
+	if instant or from_val == to_val:
+		lbl.text = fmt % to_val
+		lbl.scale = Vector2.ONE
+		lbl.add_theme_color_override("font_color", base_color)
+		_counter_tweens[lbl] = []
+		return
+
+	var pulse_color: Color = UITheme.OK if to_val > from_val else UITheme.DANGER
+
+	var count_tw: Tween = create_tween()
+	count_tw.tween_method(_set_counter_text.bind(lbl, fmt), float(from_val), float(to_val), COUNTER_DURATION) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+	lbl.pivot_offset = lbl.size / 2.0
+	var scale_tw: Tween = create_tween()
+	scale_tw.tween_property(lbl, "scale", Vector2(1.12, 1.12), 0.10) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	scale_tw.tween_property(lbl, "scale", Vector2.ONE, PULSE_DURATION - 0.10) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+
+	lbl.add_theme_color_override("font_color", pulse_color)
+	var color_tw: Tween = create_tween()
+	color_tw.tween_method(_set_counter_color.bind(lbl), pulse_color, base_color, PULSE_DURATION)
+
+	_counter_tweens[lbl] = [count_tw, scale_tw, color_tw]
+
+
+func _set_counter_text(value: float, lbl: Label, fmt: String) -> void:
+	lbl.text = fmt % int(round(value))
+
+
+func _set_counter_color(c: Color, lbl: Label) -> void:
+	lbl.add_theme_color_override("font_color", c)
 
 
 func _connect_signals() -> void:
@@ -1871,8 +1932,12 @@ func _on_coin_balance_changed(_balance: int) -> void:
 	_refresh_coin_label()
 
 
-func _refresh_coin_label() -> void:
-	_coin_lbl.text = "♦ %d" % CoinService.Balance
+# `instant` snaps to the balance with no count-up/pulse — used for the initial
+# HUD fill during setup so the coins don't pulse before the run begins.
+func _refresh_coin_label(instant: bool = false) -> void:
+	var balance: int = CoinService.Balance
+	_animate_counter(_coin_lbl, _coin_shown, balance, "♦ %d", UITheme.AMBER, instant)
+	_coin_shown = balance
 
 
 func _refresh_effect_chips() -> void:

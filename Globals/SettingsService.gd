@@ -49,6 +49,8 @@ const DEFAULT_JOURNEYS_DIR:      String = "user://journeys"
 const DEFAULT_FFMPEG_DIR:        String = ""    # "" = bundled binary / PATH
 const DEFAULT_AUTO_TRANSCODE:    bool   = true
 const DEFAULT_UPDATE_CHECK:      bool   = true   # check GitHub for a newer build on launch
+const DEFAULT_UI_SOUND_ENABLED:  bool   = true   # click/hover feedback blips
+const DEFAULT_UI_SOUND_VOLUME:   float  = 0.6    # linear, 0–1
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -198,6 +200,12 @@ func get_auto_transcode() -> bool:
 func get_update_check_enabled() -> bool:
 	return bool(_config.get_value("updates", "check_on_launch", DEFAULT_UPDATE_CHECK))
 
+func get_ui_sound_enabled() -> bool:
+	return bool(_config.get_value("audio", "ui_sound_enabled", DEFAULT_UI_SOUND_ENABLED))
+
+func get_ui_sound_volume() -> float:
+	return float(_config.get_value("audio", "ui_sound_volume", DEFAULT_UI_SOUND_VOLUME))
+
 
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
@@ -298,6 +306,12 @@ func set_auto_transcode(value: bool) -> void:
 
 func set_update_check_enabled(value: bool) -> void:
 	_config.set_value("updates", "check_on_launch", value)
+
+func set_ui_sound_enabled(value: bool) -> void:
+	_config.set_value("audio", "ui_sound_enabled", value)
+
+func set_ui_sound_volume(value: float) -> void:
+	_config.set_value("audio", "ui_sound_volume", value)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────

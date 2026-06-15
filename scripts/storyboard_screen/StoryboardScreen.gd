@@ -108,6 +108,7 @@ func _input(event: InputEvent) -> void:
 
 
 func _advance() -> void:
+	UISound.storyboard()
 	_line_idx += 1
 	if _line_idx >= _lines.size():
 		_finish()

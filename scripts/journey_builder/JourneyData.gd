@@ -254,7 +254,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 				"sensory_in_pool": bool(r.get("sensory_in_pool", false)),
 				"sensory_intensity": (r.get("sensory_intensity", {}) as Dictionary).duplicate(),
 				"show_reveal":     bool(r.get("show_reveal", true)),
-				"video_path":      find_video_in_round(r.get("folder", "")),
+				"video_path":      _round_video(r),
 				"coins":           r.get("coins", 0),
 				"original_folder": r.get("folder", ""),
 			},
@@ -365,7 +365,7 @@ static func _build_path_items(p: Dictionary) -> Array:
 				"sensory_in_pool": bool(pr.get("sensory_in_pool", false)),
 				"sensory_intensity": (pr.get("sensory_intensity", {}) as Dictionary).duplicate(),
 				"show_reveal":     bool(pr.get("show_reveal", true)),
-				"video_path":      find_video_in_round(pr.get("folder", "")),
+				"video_path":      _round_video(pr),
 				"coins":           pr.get("coins", 0),
 				"original_folder": pr.get("folder", ""),
 			},
@@ -471,6 +471,16 @@ static func validate_fork(fork_item: Dictionary, context_label: String) -> Strin
 
 # ── Filesystem helpers ──────────────────────────────────────────────────────
 
+# Resolves a round's video: the explicit scanner-provided path when present
+# (the shared-media / VideoPath case), else a folder-scan fallback so journeys
+# saved before VideoPath keep resolving. r is a scanner round_data dict.
+static func _round_video(r: Dictionary) -> String:
+	var explicit: String = r.get("video_path", "")
+	if explicit != "":
+		return explicit
+	return find_video_in_round(r.get("folder", ""))
+
+
 # Returns the path to the first video file in `folder`, or "" if none.
 static func find_video_in_round(folder: String) -> String:
 	if folder == "":
@@ -487,6 +497,54 @@ static func find_video_in_round(folder: String) -> String:
 		fname = dir.get_next()
 	dir.list_dir_end()
 	return ""
+
+
+# ── Shared content pool ──────────────────────────────────────────────────────
+# Per-round playback assets (video / funscript / axis / vib / boss image) are
+# stored once under content/m_<fingerprint>.<ext> and referenced by explicit
+# paths, so an asset reused across rounds (e.g. a clip used by a Normal round and
+# a Cursed round in a fork) lives on disk and in the shared zip exactly once.
+# (The media/ folder is separate — it holds journey images.)
+
+# Source identity for pool dedup: globalized path + byte size + mtime, hashed to
+# a short hex. Deliberately NOT a content hash — that would mean reading whole
+# multi-GB videos every save. Two rounds reusing the same source file produce the
+# same fingerprint (so they pool to one file); editing the source (new size or
+# mtime) yields a new fingerprint, so a re-save picks up the changed bytes.
+static func media_fingerprint(src: String) -> String:
+	var abs: String = ProjectSettings.globalize_path(src)
+	var size: int = 0
+	var f: FileAccess = FileAccess.open(abs, FileAccess.READ)
+	if f != null:
+		size = f.get_length()
+		f.close()
+	var mtime: int = FileAccess.get_modified_time(abs)
+	var identity: String = "%s|%d|%d" % [abs, size, mtime]
+	return identity.sha256_text().substr(0, 16)
+
+
+# Journey-root-relative path for a fingerprinted pooled content file. Pooled
+# playback content (video / funscript / axis / vib / boss image) lives under
+# content/, kept separate from media/ which holds journey IMAGES (cover,
+# storyboard art, fork-path art).
+static func pooled_media_rel(fingerprint: String, ext: String) -> String:
+	return "content/m_%s.%s" % [fingerprint, ext]
+
+
+# Pure dedup planner (the testable core of the save-time pooling). `sources` is
+# an ordered Array of {fingerprint, ext}; returns a parallel Array of
+# {rel, copy} where `copy` is true only the first time a given pooled rel is
+# seen — repeats reference the same rel and skip the write. The save flow mirrors
+# this with a live map so it can interleave the async transcode/copy work.
+static func plan_media_pool(sources: Array) -> Array:
+	var out: Array = []
+	var seen: Dictionary = {}
+	for s: Dictionary in sources:
+		var rel: String = pooled_media_rel(s.get("fingerprint", ""), s.get("ext", ""))
+		var is_copy: bool = not seen.has(rel)
+		seen[rel] = true
+		out.append({"rel": rel, "copy": is_copy})
+	return out
 
 
 # Recursively deletes a directory and all its contents. Accepts either a

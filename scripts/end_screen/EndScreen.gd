@@ -40,6 +40,7 @@ var _time_target:    int = 0  # seconds
 
 
 func _ready() -> void:
+	UISound.game_complete()
 	_apply_layout()
 	_apply_theme()
 	_build_confetti()

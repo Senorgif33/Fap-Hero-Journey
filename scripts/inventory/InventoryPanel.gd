@@ -168,6 +168,7 @@ func _activate_card(card: Control, use_lbl: Label, slot_idx: int) -> void:
 	if _activating:
 		return
 	_activating = true
+	UISound.item_use()
 	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	use_lbl.text = "✓ ACTIVATED"
 	use_lbl.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)

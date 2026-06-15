@@ -32,6 +32,8 @@ MusicService="*res://Globals/MusicService.gd"
 JourneySaveService="*res://Globals/JourneySaveService.gd"
 ScoreboardService="*res://Globals/ScoreboardService.gd"
 UpdateService="*res://Globals/UpdateService.gd"
+GlowEnvironment="*res://Globals/GlowEnvironment.gd"
+UISound="*res://Globals/UISound.gd"
 
 [display]
 

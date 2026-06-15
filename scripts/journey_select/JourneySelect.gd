@@ -228,6 +228,12 @@ func _apply_layout() -> void:
 	_modal_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_modal_panel.grow_vertical   = Control.GROW_DIRECTION_BOTH
 	_modal_panel.custom_minimum_size = Vector2(MODAL_MIN_WIDTH, MODAL_MIN_HEIGHT)
+	# Keep the floating scoreboard glued to the modal panel's actual rect. The
+	# panel re-lays-out (and re-centres) for a frame or two after the modal opens
+	# with fresh content, so positioning it once off a single-frame size read was
+	# racy — it would intermittently latch a stale/huge size and stretch off
+	# screen until reopened. Tracking item_rect_changed self-corrects every pass.
+	_modal_panel.item_rect_changed.connect(_position_scoreboard_panel)
 
 	_modal_layout.add_theme_constant_override("separation", 20)
 
@@ -402,6 +408,9 @@ func _connect_signals() -> void:
 	_sort_actions.pressed.connect(_on_sort_pressed.bind("actions"))
 	_backdrop.gui_input.connect(_on_backdrop_input)
 	_play_btn.pressed.connect(_on_play_pressed)
+	# Play plays start_journey at the embark point (not on press — a New Run shows
+	# an overwrite confirm first), so mute its default click.
+	UISound.mute_button(_play_btn)
 	_edit_btn.pressed.connect(_on_edit_pressed)
 	_delete_btn.pressed.connect(_on_delete_pressed)
 	_search_field.text_changed.connect(func(text: String) -> void:
@@ -589,6 +598,7 @@ func _populate_grid(journeys: Array) -> void:
 
 
 func _on_journey_selected(journey: Dictionary) -> void:
+	UISound.journey()
 	_current_journey = journey
 	_populate_modal(journey)
 	_open_modal()
@@ -804,7 +814,8 @@ func _populate_scoreboard(journey: Dictionary) -> void:
 
 
 # Places the scoreboard panel against the modal panel's right edge, matching its
-# height. Called after the modal's size is settled and on viewport resize.
+# height. Driven by the modal panel's item_rect_changed (so it tracks every
+# layout/centre pass), plus viewport resize and the initial open.
 func _position_scoreboard_panel() -> void:
 	if _scoreboard_panel == null or not _modal.visible:
 		return
@@ -913,6 +924,9 @@ func _refresh_resume_button(journey: Dictionary) -> void:
 			var action_row: HBoxContainer = _play_btn.get_parent()
 			action_row.add_child(_resume_btn)
 			action_row.move_child(_resume_btn, _play_btn.get_index())
+			# Resume plays start_journey at the embark point; mute its default click
+			# (after add_child, which is where the global wiring hooks it).
+			UISound.mute_button(_resume_btn)
 		_play_btn.text = "↻  NEW RUN"
 		_style_button(_play_btn, UITheme.PURPLE_MID)
 	else:
@@ -970,6 +984,7 @@ func _on_resume_pressed() -> void:
 	# the scene change as a fresh start and Reset() each service, wiping
 	# all the state we just restored from the save record.
 	GameState.set_meta("_resuming", true)
+	UISound.start_journey()
 	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
 
 
@@ -979,6 +994,7 @@ func _on_resume_pressed() -> void:
 func _on_play_pressed_unguarded() -> void:
 	JourneySaveService.delete_save(_current_journey.get("folder_name", ""))
 	GameState.StartJourney(_current_journey)
+	UISound.start_journey()
 	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
 
 

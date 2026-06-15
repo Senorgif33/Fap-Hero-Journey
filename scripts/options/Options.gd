@@ -98,6 +98,9 @@ var _ui_scale_slider:     HSlider = null
 var _ui_scale_value_lbl:  Label   = null
 var _beat_bar_toggle:     Button  = null
 var _update_check_toggle: Button  = null
+var _ui_sound_toggle:     Button  = null
+var _ui_sound_slider:     HSlider = null
+var _ui_sound_value_lbl:  Label   = null
 
 var _filler_toggle:     Button      = null
 var _filler_speed_input: LineEdit   = null
@@ -247,6 +250,69 @@ func _apply_layout() -> void:
 		MusicService.set_volume(v)
 		_save_settings()
 	)
+
+	# ── UI Sounds toggle (code-generated, appended to AudioSection) ───────────
+	var ui_sound_row: HBoxContainer = HBoxContainer.new()
+	ui_sound_row.add_theme_constant_override("separation", 16)
+	audio_section.add_child(ui_sound_row)
+
+	var ui_sound_lbl: Label = Label.new()
+	ui_sound_lbl.text = "UI SOUNDS"
+	ui_sound_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(ui_sound_lbl, UITheme.WHITE_SOFT, 14, false)
+	ui_sound_row.add_child(ui_sound_lbl)
+
+	_ui_sound_toggle = Button.new()
+	_ui_sound_toggle.toggle_mode = true
+	_ui_sound_toggle.focus_mode  = Control.FOCUS_NONE
+	_style_toggle(_ui_sound_toggle, false)
+	ui_sound_row.add_child(_ui_sound_toggle)
+	_ui_sound_toggle.toggled.connect(func(pressed: bool) -> void:
+		_style_toggle(_ui_sound_toggle, pressed)
+		_save_settings()
+		if pressed:
+			UISound.confirm()  # audible cue when enabling (disabling is cued by the click itself)
+	)
+
+	var ui_sound_hint: Label = Label.new()
+	ui_sound_hint.text = "Click feedback blips on menus and buttons."
+	ui_sound_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(ui_sound_hint, UITheme.SEPARATOR, 11, false)
+	audio_section.add_child(ui_sound_hint)
+
+	# ── UI Sound Volume row (code-generated, appended to AudioSection) ────────
+	var ui_vol_row: HBoxContainer = HBoxContainer.new()
+	ui_vol_row.add_theme_constant_override("separation", 16)
+	audio_section.add_child(ui_vol_row)
+
+	var ui_vol_lbl: Label = Label.new()
+	ui_vol_lbl.text = "UI SOUND VOLUME"
+	ui_vol_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(ui_vol_lbl, UITheme.WHITE_SOFT, 14, false)
+	ui_vol_row.add_child(ui_vol_lbl)
+
+	_ui_sound_slider = HSlider.new()
+	_ui_sound_slider.min_value = 0.0
+	_ui_sound_slider.max_value = 1.0
+	_ui_sound_slider.step = 0.01
+	_ui_sound_slider.value = 0.6
+	_ui_sound_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_ui_sound_slider.custom_minimum_size = Vector2(SLIDER_MIN_W, 0)
+	_style_slider(_ui_sound_slider)
+	ui_vol_row.add_child(_ui_sound_slider)
+
+	_ui_sound_value_lbl = Label.new()
+	_ui_sound_value_lbl.text = "60%"
+	_ui_sound_value_lbl.custom_minimum_size = Vector2(VALUE_LABEL_W, 0)
+	_style_label(_ui_sound_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
+	ui_vol_row.add_child(_ui_sound_value_lbl)
+
+	_ui_sound_slider.value_changed.connect(func(v: float) -> void:
+		_ui_sound_value_lbl.text = "%d%%" % roundi(v * 100.0)
+		_save_settings()
+	)
+	# Audible preview when the drag finishes (not on every tick).
+	_ui_sound_slider.drag_ended.connect(func(_changed: bool) -> void: UISound.click())
 
 	# ── HUD Auto-Hide row (code-generated, appended to DisplaySection) ────────
 	var display_section: VBoxContainer = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection
@@ -1208,6 +1274,17 @@ func _load_settings() -> void:
 		_update_check_toggle.button_pressed = upd_on
 		_style_toggle(_update_check_toggle, upd_on)
 
+	if _ui_sound_toggle != null:
+		var ui_snd_on: bool = SettingsService.get_ui_sound_enabled()
+		# no_signal so opening Options doesn't fire the toggled handler (which would
+		# play a confirm blip every time the screen loads).
+		_ui_sound_toggle.set_pressed_no_signal(ui_snd_on)
+		_style_toggle(_ui_sound_toggle, ui_snd_on)
+	if _ui_sound_slider != null:
+		var ui_snd_vol: float = SettingsService.get_ui_sound_volume()
+		_ui_sound_slider.set_value_no_signal(ui_snd_vol)
+		_ui_sound_value_lbl.text = "%d%%" % roundi(ui_snd_vol * 100.0)
+
 	# Load the filler range slider FIRST so that if the toggle or speed-input
 	# signals fire _save_settings() below, the slider already holds the correct
 	# values and won't overwrite them with the initialisation defaults (0/100).
@@ -1292,6 +1369,13 @@ func _save_settings() -> void:
 
 	if _update_check_toggle != null:
 		SettingsService.set_update_check_enabled(_update_check_toggle.button_pressed)
+
+	if _ui_sound_toggle != null:
+		SettingsService.set_ui_sound_enabled(_ui_sound_toggle.button_pressed)
+	if _ui_sound_slider != null:
+		SettingsService.set_ui_sound_volume(_ui_sound_slider.value)
+	# Push the new enabled/volume straight to the live service.
+	UISound.reload_settings()
 
 	if _filler_toggle != null:
 		SettingsService.set_filler_enabled(_filler_toggle.button_pressed)

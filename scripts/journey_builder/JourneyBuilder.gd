@@ -148,6 +148,14 @@ var _round_folder_counter: int = 0
 # _save_path so that videos inside fork paths get transcoded too.
 var _transcode_plan: Dictionary = {}
 
+# Shared content-pool state for the current save. Reset at the start of
+# _save_all_items. `_pooled_media` maps a source fingerprint → its journey-root-
+# relative pooled path (content/m_<fp>.<ext>); the second+ round to reference a
+# source reuses the path and skips the transcode/copy. `_pooled_fs_stats` caches
+# funscript {count,length_ms} per fingerprint so a reused script isn't re-parsed.
+var _pooled_media: Dictionary = {}
+var _pooled_fs_stats: Dictionary = {}
+
 # Count of player run-saves invalidated by this builder save (typically 0 or
 # 1, possibly 2 if both the renamed-from and renamed-to folders had saves).
 # Drives the contextual "Existing run reset" message in the success status
@@ -1644,6 +1652,10 @@ func _setup_save_folders() -> Dictionary:
 	var abs_media_dir: String = abs_dir + "/media"
 	DirAccess.make_dir_recursive_absolute(abs_media_dir)
 
+	# Pooled per-round playback content (video/funscript/axis/vib/boss image),
+	# hashed and deduped, lives here — separate from media/ (journey images).
+	DirAccess.make_dir_recursive_absolute(abs_dir + "/content")
+
 	# Dedup map: source_path → dest_filename (relative to abs_media_dir).
 	# Primed with the cover image when present so the same image dropped into
 	# the cover slot AND a storyboard wouldn't get copied twice.
@@ -1685,6 +1697,11 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 	var abs_dir: String       = paths["abs_dir"]
 	var abs_media_dir: String = paths["abs_media_dir"]
 	var copied_images: Dictionary = paths["copied_images"]
+
+	# Fresh content pool for this save — staging is rebuilt from scratch each time,
+	# so there's no cross-save state to carry (no refcount/GC needed).
+	_pooled_media = {}
+	_pooled_fs_stats = {}
 
 	var rounds_json:      Array = []
 	var forks_json:       Array = []
@@ -1753,95 +1770,94 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 		if item_type == "round":
 			rorder += 1
 
-			# Human-readable name kept in journey.json's "Name" for display.
-			# Short slug (r001, r002, …) is the actual on-disk folder. This
-			# bounds path length and prevents same-name fork rounds from
-			# colliding into one folder.
+			# Human-readable name kept in journey.json's "Name" for display. The
+			# short slug (r001, r002, …) is still written as FolderName — a stable
+			# logical round id and the legacy folder-scan fallback key — but no
+			# per-round folder is created any more: all playback assets are pooled
+			# into content/ by hash.
 			var round_name: String = (item.get("name","") as String).strip_edges()
 			var round_slug: String = _next_round_folder_slug()
-			var round_dir: String  = abs_dir + "/" + round_slug
-			DirAccess.make_dir_recursive_absolute(round_dir)
 
 			var fs_src: String = item.get("funscript_path","")
-			var fs_dst_name: String = "script." + fs_src.get_extension()
-			_copy_file(fs_src, round_dir + "/" + fs_dst_name)
-			var fs_stats: Dictionary = JourneyData.read_funscript_stats(round_dir + "/" + fs_dst_name)
+			# Funscript goes into the shared content pool (content/m_<fp>.<ext>) — a
+			# script reused across rounds is stored and parsed once. Stats are cached
+			# per fingerprint so a reused script is not re-read.
+			var funscript_rel: String = ""
+			var fs_stats: Dictionary = {"count": 0, "length_ms": 0}
+			if fs_src != "":
+				var fs_pool: Dictionary = _assign_pooled_media(fs_src, fs_src.get_extension())
+				funscript_rel = fs_pool["rel"]
+				if fs_pool["copy"]:
+					var fs_dst: String = abs_dir + "/" + funscript_rel
+					_copy_file(fs_src, fs_dst)
+					fs_stats = JourneyData.read_funscript_stats(fs_dst)
+					_pooled_fs_stats[fs_pool["fingerprint"]] = fs_stats
+				else:
+					fs_stats = _pooled_fs_stats.get(fs_pool["fingerprint"], fs_stats)
 
-			# Copy secondary-axis scripts and collect relative paths for the JSON.
+			# Secondary-axis scripts — pooled into content/ (deduped), keyed by axis.
 			var axis_scripts_in: Dictionary = item.get("axis_scripts", {})
 			var axis_scripts_rel: Dictionary = {}
 			for axis: String in axis_scripts_in:
-				var ax_src: String = axis_scripts_in[axis]
-				if ax_src == "":
-					continue
-				var ax_dst_name: String = "axis_" + axis + "." + ax_src.get_extension()
-				_copy_file(ax_src, round_dir + "/" + ax_dst_name)
-				axis_scripts_rel[axis] = round_slug + "/" + ax_dst_name
+				var ax_rel: String = _pool_small_file(axis_scripts_in[axis], abs_dir)
+				if ax_rel != "":
+					axis_scripts_rel[axis] = ax_rel
 
-			# Copy vibrator-channel scripts and collect relative paths for the JSON.
+			# Vibrator-channel scripts — pooled into content/, keyed by channel.
 			var vib_scripts_in: Dictionary = item.get("vib_scripts", {})
 			var vib_scripts_rel: Dictionary = {}
 			for ch_key: String in vib_scripts_in:
-				var vib_src: String = vib_scripts_in[ch_key]
-				if vib_src == "":
-					continue
-				var vib_dst_name: String = "vib_" + ch_key + "." + vib_src.get_extension()
-				_copy_file(vib_src, round_dir + "/" + vib_dst_name)
-				vib_scripts_rel[ch_key] = round_slug + "/" + vib_dst_name
+				var vib_rel: String = _pool_small_file(vib_scripts_in[ch_key], abs_dir)
+				if vib_rel != "":
+					vib_scripts_rel[ch_key] = vib_rel
 
-			# Boss-round config — copy the optional intro image into the round folder.
+			# Boss-round config — pool the optional intro image into content/.
 			var round_type: String = item.get("round_type", "normal")
 			var boss_image_rel: String = ""
 			if round_type == "boss":
-				var boss_src: String = item.get("boss_image", "")
-				if boss_src != "":
-					var boss_dst_name: String = "boss." + boss_src.get_extension()
-					_copy_file(boss_src, round_dir + "/" + boss_dst_name)
-					boss_image_rel = round_slug + "/" + boss_dst_name
+				boss_image_rel = _pool_small_file(item.get("boss_image", ""), abs_dir)
 
+			# Journey-root-relative video path written as VideoPath. Pooled under
+			# content/ and shared across rounds that reuse the same source clip; stays
+			# "" when the round has no video. The pooled file is transcoded/copied only
+			# the first time the source is seen this save (_assign_pooled_media).
+			var video_rel: String = ""
 			var vid_src: String = item.get("video_path","")
 			if vid_src != "":
-				if _transcode_plan.has(vid_src):
-					var info: Dictionary = _transcode_plan[vid_src]
-					# Fixed short name regardless of the source — transcoded videos
-					# are always h264 .mp4, and the original filename is irrelevant
-					# (the round is addressed by folder slug).
-					var vid_dst_name: String = "video.mp4"
-					var vid_dst: String      = round_dir + "/" + vid_dst_name
-					_update_modal_round(modal, rorder, total_main_rounds, round_name, info["codec"])
-					var ok: bool = await _transcode_video(vid_src, vid_dst, info["duration"], modal)
-					if not ok:
-						# _transcode_cancel distinguishes user cancel from ffmpeg
-						# failure (e.g. bad input file). Same return-value path,
-						# different remediation. Modal + staging cleanup happen
-						# in _do_save when we return {}.
-						if _transcode_cancel:
-							_show_save_error_single(
-								"SAVE CANCELLED",
-								CAUSE_CANCELLED,
-								"Round %d \"%s\"" % [rorder, round_name],
-								"You cancelled the transcode while round \"%s\" was being processed." % round_name,
-								"Press Save again to retry. Nothing on disk was changed.")
-						else:
-							_show_save_error_single(
-								"SAVE FAILED",
-								CAUSE_TRANSCODE_FAILED,
-								"Round %d \"%s\"" % [rorder, round_name],
-								"ffmpeg failed to transcode video \"%s\" (codec %s → h264)." % [vid_src.get_file(), info["codec"]],
-								"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round.")
-						return {}
-				else:
-					# Short standard filename keyed off the source extension.
-					var vid_dst_name: String = "video." + vid_src.get_extension()
-					var vid_dst_path: String = round_dir + "/" + vid_dst_name
-					# Source-equals-destination guard is now impossible (staging
-					# writes to a fresh sibling folder) but harmless to keep as
-					# defense-in-depth.
-					var vid_src_abs: String = ProjectSettings.globalize_path(vid_src)
-					if vid_src_abs != vid_dst_path:
+				var is_transcode: bool = _transcode_plan.has(vid_src)
+				var vid_ext: String = "mp4" if is_transcode else vid_src.get_extension()
+				var vid_pool: Dictionary = _assign_pooled_media(vid_src, vid_ext)
+				video_rel = vid_pool["rel"]
+				if vid_pool["copy"]:
+					var vid_dst: String = abs_dir + "/" + video_rel
+					if is_transcode:
+						var info: Dictionary = _transcode_plan[vid_src]
+						_update_modal_round(modal, rorder, total_main_rounds, round_name, info["codec"])
+						var ok: bool = await _transcode_video(vid_src, vid_dst, info["duration"], modal)
+						if not ok:
+							# _transcode_cancel distinguishes user cancel from ffmpeg
+							# failure (e.g. bad input file). Same return-value path,
+							# different remediation. Modal + staging cleanup happen
+							# in _do_save when we return {}.
+							if _transcode_cancel:
+								_show_save_error_single(
+									"SAVE CANCELLED",
+									CAUSE_CANCELLED,
+									"Round %d \"%s\"" % [rorder, round_name],
+									"You cancelled the transcode while round \"%s\" was being processed." % round_name,
+									"Press Save again to retry. Nothing on disk was changed.")
+							else:
+								_show_save_error_single(
+									"SAVE FAILED",
+									CAUSE_TRANSCODE_FAILED,
+									"Round %d \"%s\"" % [rorder, round_name],
+									"ffmpeg failed to transcode video \"%s\" (codec %s → h264)." % [vid_src.get_file(), info["codec"]],
+									"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round.")
+							return {}
+					else:
 						_update_modal_label(modal, "Round %d / %d — %s  (copying video)" % [rorder, total_main_rounds, round_name])
 						var copy_result: Dictionary = await _copy_file_chunked(
-							vid_src, vid_dst_path,
+							vid_src, vid_dst,
 							func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot))
 						if not copy_result["ok"]:
 							_show_copy_failure_modal(copy_result, "Round %d \"%s\"" % [rorder, round_name])
@@ -1859,7 +1875,8 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 			round_json["FolderName"]    = round_slug
 			round_json["Order"]         = pos
 			round_json["BossImage"]     = boss_image_rel
-			round_json["FunscriptPath"] = round_slug + "/" + fs_dst_name
+			round_json["FunscriptPath"] = funscript_rel
+			round_json["VideoPath"]     = video_rel
 			round_json["AxisScripts"]   = axis_scripts_rel
 			round_json["VibScripts"]    = vib_scripts_rel
 			round_json["ActionCount"]   = fs_stats["count"]
@@ -2090,46 +2107,50 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				if _save_aborted:
 					return path_entry
 			_:
-				# Round (inside a fork path). Same scheme as top-level rounds:
-				# short slug for the folder, short standard filenames inside,
-				# human-readable name kept only in journey.json.
+				# Round (inside a fork path). Same scheme as top-level rounds: the
+				# slug is written as FolderName (logical id / legacy fallback key),
+				# but no per-round folder is created — assets are pooled into content/.
 				pr_order += 1
 				var pr_name: String = (pi_item.get("name","") as String).strip_edges()
 				var pr_slug: String = _next_round_folder_slug()
-				var pr_dir: String  = abs_dir + "/" + pr_slug
-				DirAccess.make_dir_recursive_absolute(pr_dir)
 				var pr_fs: String = pi_item.get("funscript_path","")
-				var pr_fs_dst_name: String = ""
+				# Funscript into the shared content pool (see the top-level round save).
+				var pr_funscript_rel: String = ""
 				var pr_fs_stats: Dictionary = {"count": 0, "length_ms": 0}
 				if pr_fs != "":
-					pr_fs_dst_name = "script." + pr_fs.get_extension()
-					_copy_file(pr_fs, pr_dir + "/" + pr_fs_dst_name)
-					pr_fs_stats = JourneyData.read_funscript_stats(pr_dir + "/" + pr_fs_dst_name)
+					var pr_fs_pool: Dictionary = _assign_pooled_media(pr_fs, pr_fs.get_extension())
+					pr_funscript_rel = pr_fs_pool["rel"]
+					if pr_fs_pool["copy"]:
+						var pr_fs_dst: String = abs_dir + "/" + pr_funscript_rel
+						_copy_file(pr_fs, pr_fs_dst)
+						pr_fs_stats = JourneyData.read_funscript_stats(pr_fs_dst)
+						_pooled_fs_stats[pr_fs_pool["fingerprint"]] = pr_fs_stats
+					else:
+						pr_fs_stats = _pooled_fs_stats.get(pr_fs_pool["fingerprint"], pr_fs_stats)
+				# Journey-root-relative video path (VideoPath), pooled under content/ and
+				# shared across rounds that reuse the same source. Transcoded/copied only
+				# the first time the source is seen this save (_assign_pooled_media).
+				var pr_video_rel: String = ""
 				var pr_vid: String = pi_item.get("video_path","")
 				if pr_vid != "":
-					# Fork-path videos go through the same transcode-or-copy fork as
-					# top-level rounds. The plan (_transcode_plan) is built from a
-					# tree-wide walk in _on_save_pressed and keyed by source path so
-					# this lookup works the same regardless of nesting depth.
-					if _transcode_plan.has(pr_vid):
-						var pr_info: Dictionary = _transcode_plan[pr_vid]
-						var pr_vid_dst_path: String = pr_dir + "/video.mp4"
-						_update_modal_label(modal, "Fork round — %s  (transcoding %s → h264)" % [pr_name, pr_info["codec"]])
-						var pr_transcode_ok: bool = await _transcode_video(pr_vid, pr_vid_dst_path, pr_info["duration"], modal)
-						if not pr_transcode_ok:
-							_save_aborted = true
-							_save_abort_error = {
-								"result": {"ok": false, "reason": (CAUSE_CANCELLED if _transcode_cancel else CAUSE_TRANSCODE_FAILED), "detail": pr_vid},
-								"item":   "%s → Round \"%s\"" % [slug_prefix, pr_name],
-							}
-							return path_entry
-					else:
-						var pr_vid_dst_name: String = "video." + pr_vid.get_extension()
-						var pr_vid_dst_path: String = pr_dir + "/" + pr_vid_dst_name
-						# Same src==dst guard as the top-level round copy: skip when the
-						# video is already at its destination to avoid a 0 KB truncation.
-						var pr_vid_src_abs: String = ProjectSettings.globalize_path(pr_vid)
-						if pr_vid_src_abs != pr_vid_dst_path:
+					var pr_is_transcode: bool = _transcode_plan.has(pr_vid)
+					var pr_vid_ext: String = "mp4" if pr_is_transcode else pr_vid.get_extension()
+					var pr_vid_pool: Dictionary = _assign_pooled_media(pr_vid, pr_vid_ext)
+					pr_video_rel = pr_vid_pool["rel"]
+					if pr_vid_pool["copy"]:
+						var pr_vid_dst_path: String = abs_dir + "/" + pr_video_rel
+						if pr_is_transcode:
+							var pr_info: Dictionary = _transcode_plan[pr_vid]
+							_update_modal_label(modal, "Fork round — %s  (transcoding %s → h264)" % [pr_name, pr_info["codec"]])
+							var pr_transcode_ok: bool = await _transcode_video(pr_vid, pr_vid_dst_path, pr_info["duration"], modal)
+							if not pr_transcode_ok:
+								_save_aborted = true
+								_save_abort_error = {
+									"result": {"ok": false, "reason": (CAUSE_CANCELLED if _transcode_cancel else CAUSE_TRANSCODE_FAILED), "detail": pr_vid},
+									"item":   "%s → Round \"%s\"" % [slug_prefix, pr_name],
+								}
+								return path_entry
+						else:
 							_update_modal_label(modal, "Fork round — %s  (copying video)" % pr_name)
 							var pr_copy_result: Dictionary = await _copy_file_chunked(
 								pr_vid, pr_vid_dst_path,
@@ -2140,36 +2161,26 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 								# a specific error instead of a generic message.
 								_save_aborted = true
 								_save_abort_error = {
-								"result": pr_copy_result,
-								"item":   "%s → Round \"%s\"" % [slug_prefix, pr_name],
+									"result": pr_copy_result,
+									"item":   "%s → Round \"%s\"" % [slug_prefix, pr_name],
 								}
 								return path_entry
 				var pr_axis_in: Dictionary = pi_item.get("axis_scripts", {})
 				var pr_axis_rel: Dictionary = {}
 				for axis: String in pr_axis_in:
-					var ax_src: String = pr_axis_in[axis]
-					if ax_src == "":
-						continue
-					var ax_dst_name: String = "axis_" + axis + "." + ax_src.get_extension()
-					_copy_file(ax_src, pr_dir + "/" + ax_dst_name)
-					pr_axis_rel[axis] = pr_slug + "/" + ax_dst_name
+					var ax_rel: String = _pool_small_file(pr_axis_in[axis], abs_dir)
+					if ax_rel != "":
+						pr_axis_rel[axis] = ax_rel
 				var pr_vib_in: Dictionary = pi_item.get("vib_scripts", {})
 				var pr_vib_rel: Dictionary = {}
 				for ch_key: String in pr_vib_in:
-					var vib_src: String = pr_vib_in[ch_key]
-					if vib_src == "":
-						continue
-					var vib_dst_name: String = "vib_" + ch_key + "." + vib_src.get_extension()
-					_copy_file(vib_src, pr_dir + "/" + vib_dst_name)
-					pr_vib_rel[ch_key] = pr_slug + "/" + vib_dst_name
+					var vib_rel: String = _pool_small_file(pr_vib_in[ch_key], abs_dir)
+					if vib_rel != "":
+						pr_vib_rel[ch_key] = vib_rel
 				var pr_round_type: String = pi_item.get("round_type", "normal")
 				var pr_boss_image_rel: String = ""
 				if pr_round_type == "boss":
-					var pr_boss_src: String = pi_item.get("boss_image", "")
-					if pr_boss_src != "":
-						var pr_boss_dst_name: String = "boss." + pr_boss_src.get_extension()
-						_copy_file(pr_boss_src, pr_dir + "/" + pr_boss_dst_name)
-						pr_boss_image_rel = pr_slug + "/" + pr_boss_dst_name
+					pr_boss_image_rel = _pool_small_file(pi_item.get("boss_image", ""), abs_dir)
 				# (Renamed-round cleanup is implicit at swap time — see the
 				# top-level round save above. Deleting the live original mid-
 				# save would break the staging rollback if a later step fails.)
@@ -2180,7 +2191,8 @@ func _save_path(path_data: Dictionary, abs_dir: String, abs_media_dir: String, s
 				pr_json["FolderName"]    = pr_slug
 				pr_json["Order"]         = pr_pos
 				pr_json["BossImage"]     = pr_boss_image_rel
-				pr_json["FunscriptPath"] = (pr_slug + "/" + pr_fs_dst_name) if pr_fs_dst_name != "" else ""
+				pr_json["FunscriptPath"] = pr_funscript_rel
+				pr_json["VideoPath"]     = pr_video_rel
 				pr_json["AxisScripts"]   = pr_axis_rel
 				pr_json["VibScripts"]    = pr_vib_rel
 				pr_json["ActionCount"]   = pr_fs_stats["count"]
@@ -2490,6 +2502,35 @@ func _copy_image_deduped(src: String, abs_dir: String, candidate_fname: String, 
 	_copy_file(src, abs_dir + "/" + candidate_fname)
 	copied[src] = candidate_fname
 	return candidate_fname
+
+
+# Assigns a source file to the shared content pool for this save. Returns
+# {rel, copy, fingerprint}: `rel` is the journey-root-relative pooled path
+# (content/m_<fp>.<ext>), `copy` is true only the FIRST time this source is seen —
+# the caller does the actual transcode/copy then and skips it on repeats. `ext`
+# is the destination extension (mp4 for transcoded video, else the source ext).
+# Mirrors JourneyData.plan_media_pool's first-sighting logic with a live map.
+func _assign_pooled_media(src: String, ext: String) -> Dictionary:
+	var fp: String = JourneyData.media_fingerprint(src)
+	var rel: String = JourneyData.pooled_media_rel(fp, ext)
+	var is_new: bool = not _pooled_media.has(fp)
+	if is_new:
+		_pooled_media[fp] = rel
+	return {"rel": _pooled_media[fp], "copy": is_new, "fingerprint": fp}
+
+
+# Pools a small file (funscript / axis / vib / boss image) into content/ via the
+# synchronous _copy_file, copying only on the first sighting of its source so
+# reused assets are stored once. Returns the journey-root-relative pooled path
+# ("" for an empty source). A copy failure sets _save_aborted (surfaced at the
+# next checkpoint), matching the other _copy_file call sites.
+func _pool_small_file(src: String, abs_dir: String) -> String:
+	if src == "":
+		return ""
+	var pool: Dictionary = _assign_pooled_media(src, src.get_extension())
+	if pool["copy"]:
+		_copy_file(src, abs_dir + "/" + pool["rel"])
+	return pool["rel"]
 
 
 # Synchronous whole-file copy. Use only for small files (funscripts, images) —

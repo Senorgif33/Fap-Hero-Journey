@@ -44,6 +44,7 @@ func _roundtrip(item: Dictionary) -> Dictionary:
 	round_json["FolderName"] = "r001"
 	round_json["Order"] = 0
 	round_json["FunscriptPath"] = "r001/script.funscript"
+	round_json["VideoPath"] = "r001/video.mp4"
 	round_json["ActionCount"] = 5
 	round_json["LengthMs"] = 1000
 
@@ -75,6 +76,9 @@ func test_round_to_json_shape() -> void:
 func test_authored_roundtrip() -> void:
 	var item := _authored_item()
 	var r := _roundtrip(item)
+	# VideoPath is merged at the save call site (not in round_to_json) — assert it
+	# survives the round-trip resolved to an absolute path.
+	assert_str(r.video_path).is_equal(TEST_DIR + "/" + JOURNEY + "/r001/video.mp4")
 	assert_str(r.round_type).is_equal("cursed")
 	assert_int(int(r.coins)).is_equal(25)
 	assert_bool(r.is_checkpoint).is_true()

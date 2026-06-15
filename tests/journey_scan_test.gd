@@ -41,7 +41,8 @@ func _full_journey() -> Dictionary:
 		"Rounds": [
 			{
 				"Name": "Cursed One", "FolderName": "r001",
-				"FunscriptPath": "r001/script.funscript", "ActionCount": 42, "LengthMs": 120000,
+				"FunscriptPath": "r001/script.funscript", "VideoPath": "r001/video.mp4",
+				"ActionCount": 42, "LengthMs": 120000,
 				"RoundType": "Cursed", "IsCheckpoint": true,
 				"CurseReward": 75, "CleanseCost": 30, "CurseRandom": false,
 				"Curses": ["Shrunken", "Greed"],
@@ -77,7 +78,8 @@ func _full_journey() -> Dictionary:
 						"Weight": 3, "Threshold": 100, "RequiredItem": "key", "Cost": 20,
 						"Rounds": [
 							{"Name": "Path Round", "FolderName": "fork0_p0_r001",
-							 "FunscriptPath": "fork0_p0_r001/script.funscript", "ActionCount": 7, "LengthMs": 3000,
+							 "FunscriptPath": "fork0_p0_r001/script.funscript", "VideoPath": "fork0_p0_r001/video.mp4",
+							 "ActionCount": 7, "LengthMs": 3000,
 							 "RoundType": "cursed", "Curses": ["Inverted"],
 							 "Sensory": ["Bleary"], "SensoryIntensity": {"Bleary": 0.5},
 							 "ShowReveal": false, "Order": 0},
@@ -124,6 +126,8 @@ func test_cursed_round_fields() -> void:
 	assert_int(r.action_count).is_equal(42)
 	assert_int(r.length_ms).is_equal(120000)
 	assert_str(r.funscript_path).is_equal(TEST_DIR + "/" + JOURNEY + "/r001/script.funscript")
+	# Explicit VideoPath resolves to an absolute path under the journey folder.
+	assert_str(r.video_path).is_equal(TEST_DIR + "/" + JOURNEY + "/r001/video.mp4")
 
 
 # Boss round: modifiers parse to lowercase kind + params; omitted ShowReveal
@@ -134,6 +138,8 @@ func test_boss_round_fields_and_show_reveal_default() -> void:
 	assert_str(r.boss_tagline).is_equal("Face me")
 	assert_array(r.sensory).contains_exactly(["Tremor"])
 	assert_bool(r.show_reveal).is_true()  # omitted → default true
+	# No VideoPath authored → scanner emits "" (consumer folder-scan fallback handles it).
+	assert_str(r.video_path).is_equal("")
 	var bm: Array = r.boss_modifiers
 	assert_int(bm.size()).is_equal(2)
 	assert_str(bm[0]["kind"]).is_equal("scale")
@@ -168,6 +174,7 @@ func test_fork_path_round_fields() -> void:
 	assert_float(float(pr.sensory_intensity["Bleary"])).is_equal_approx(0.5, EPS)
 	assert_bool(pr.show_reveal).is_false()
 	assert_int(pr.action_count).is_equal(7)
+	assert_str(pr.video_path).is_equal(TEST_DIR + "/" + JOURNEY + "/fork0_p0_r001/video.mp4")
 
 
 func test_nested_fork() -> void:
@@ -201,3 +208,25 @@ func test_storyboard_fields() -> void:
 func test_missing_journey_returns_empty() -> void:
 	var parsed := JourneyScanner.parse_journey(TEST_DIR + "/does_not_exist", "does_not_exist")
 	assert_dict(parsed).is_empty()
+
+
+# Back-compat: a round with no explicit video_path resolves via the folder scan
+# (pre-VideoPath journeys), while an explicit video_path always wins. Guards
+# JourneyData._round_video — the consumer seam GameLoop/build_journey_model use.
+func test_round_video_explicit_and_folder_fallback() -> void:
+	var folder := TEST_DIR + "/vid_round"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(folder))
+	var vf := FileAccess.open(folder + "/clip.mp4", FileAccess.WRITE)
+	vf.store_string("not really a video")
+	vf.close()
+
+	# No video_path → folder scan finds the file on disk.
+	var scanned := JourneyData._round_video({"folder": folder})
+	assert_str(scanned).is_equal(folder + "/clip.mp4")
+
+	# Explicit video_path wins and is returned verbatim (no folder scan).
+	var explicit := JourneyData._round_video({"folder": folder, "video_path": "/abs/pool/m_x.mp4"})
+	assert_str(explicit).is_equal("/abs/pool/m_x.mp4")
+
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(folder) + "/clip.mp4")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(folder))
