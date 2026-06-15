@@ -379,6 +379,15 @@ func _setup_toolbar_buttons() -> void:
 	_top_bar.add_child(fit_btn)
 	_top_bar.move_child(fit_btn, _save_btn.get_index())
 
+	var img_btn: Button = Button.new()
+	img_btn.text = "📷 IMAGE"
+	img_btn.focus_mode = Control.FOCUS_NONE
+	img_btn.tooltip_text = "Export a high-res PNG of the whole journey layout (to share)"
+	UITheme.style_button(img_btn, UITheme.PURPLE_MID)
+	img_btn.pressed.connect(_on_export_image_pressed)
+	_top_bar.add_child(img_btn)
+	_top_bar.move_child(img_btn, _save_btn.get_index())
+
 	var keys_btn: Button = Button.new()
 	keys_btn.text = "⌨ SHORTCUTS"
 	keys_btn.focus_mode = Control.FOCUS_NONE
@@ -387,6 +396,145 @@ func _setup_toolbar_buttons() -> void:
 	keys_btn.pressed.connect(_show_shortcuts_overlay)
 	_top_bar.add_child(keys_btn)
 	_top_bar.move_child(keys_btn, _save_btn.get_index())
+
+
+# ---------------------------------------------------------------------------
+# Export image — high-res PNG of the whole journey layout (for sharing)
+# ---------------------------------------------------------------------------
+
+const CAPTURE_SCALE:          float = 1.0             # render multiplier (native = crisp text; >1 = more pixels but softer)
+const CAPTURE_MARGIN:         float = 48.0            # px padding around the graph
+const CAPTURE_MAX_DIM:        int   = 12000           # cap longest side
+const CAPTURE_MAX_MEGAPIXELS: float = 48.0            # cap total area (bounds the render target's GPU/RAM)
+const CAPTURE_MAX_BYTES:      int   = 8 * 1024 * 1024  # 8 MB site upload limit
+const CAPTURE_JPEG_QUALITY:   float = 0.9             # used when a PNG would blow the 8 MB budget
+
+
+func _on_export_image_pressed() -> void:
+	if _items.is_empty():
+		_show_status("Nothing to capture — add a round first.", true)
+		return
+	_show_status("Rendering layout image…", false)
+	var img: Image = await _render_graph_image()
+	if img == null:
+		_show_status("Couldn't render the layout image.", true)
+		return
+	_save_capture_with_dialog(_encode_for_sharing(img))
+
+
+# Renders a FRESH GraphView of the current items into an offscreen SubViewport at
+# full content size (× CAPTURE_SCALE) on a dark background, and reads it back as an
+# Image. The live builder graph is a separate instance and stays untouched.
+# Returns null on an empty graph / failure.
+func _render_graph_image() -> Image:
+	var svp: SubViewport = SubViewport.new()
+	svp.transparent_bg = false
+	svp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	svp.size = Vector2i(64, 64)
+
+	var bg: ColorRect = ColorRect.new()
+	bg.color = UITheme.BG
+	bg.anchor_right = 1.0; bg.anchor_bottom = 1.0
+	svp.add_child(bg)
+
+	var g: GraphView = GraphViewScene.instantiate()
+	g.anchor_right = 1.0; g.anchor_bottom = 1.0
+	svp.add_child(g)
+	add_child(svp)   # offscreen — a bare SubViewport still renders to its texture
+
+	g.set_items(_items)
+	# Wait for the deferred layout chain (refresh → _do_layout → centre) to settle.
+	var tries: int = 0
+	while g.content_bounds().is_empty() and tries < 30:
+		await get_tree().process_frame
+		tries += 1
+
+	var scale: float = CAPTURE_SCALE
+	var img_size: Vector2 = g.frame_for_capture(scale, CAPTURE_MARGIN)
+	if img_size == Vector2.ZERO:
+		svp.queue_free()
+		return null
+
+	# Bound BOTH the longest side and the total area so a huge journey never
+	# allocates an enormous render target. We shrink as little as possible — the
+	# JPEG encoder (below) carries the rest of the size budget so text stays large.
+	var dim_factor: float = 1.0
+	var longest: float = maxf(img_size.x, img_size.y)
+	if longest > float(CAPTURE_MAX_DIM):
+		dim_factor = float(CAPTURE_MAX_DIM) / longest
+	var area_factor: float = 1.0
+	var megapixels: float = (img_size.x * img_size.y) / 1_000_000.0
+	if megapixels > CAPTURE_MAX_MEGAPIXELS:
+		area_factor = sqrt(CAPTURE_MAX_MEGAPIXELS / megapixels)
+	var factor: float = minf(dim_factor, area_factor)
+	if factor < 1.0:
+		scale *= factor
+		img_size = g.frame_for_capture(scale, CAPTURE_MARGIN)
+
+	svp.size = Vector2i(ceili(img_size.x), ceili(img_size.y))
+	# Let it render at the final size before the CPU read-back.
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+
+	var img: Image = svp.get_texture().get_image()
+	svp.queue_free()
+	return img
+
+
+# Encodes the image for sharing under the upload budget, returning {data, ext}.
+# Prefers lossless PNG (crispest for graph text/edges). When a PNG would exceed
+# 8 MB — the usual case for big journeys — it switches to high-quality JPEG, which
+# holds ~3–5× more pixels per byte, so the layout keeps its resolution (and the
+# text stays readable) instead of being downscaled to a blur. Downscaling is the
+# last resort, only if even the JPEG is over budget.
+func _encode_for_sharing(img: Image) -> Dictionary:
+	var png: PackedByteArray = img.save_png_to_buffer()
+	if png.size() <= CAPTURE_MAX_BYTES:
+		return {"data": png, "ext": "png"}
+
+	var jpg: PackedByteArray = img.save_jpg_to_buffer(CAPTURE_JPEG_QUALITY)
+	while jpg.size() > CAPTURE_MAX_BYTES and img.get_width() > 200:
+		var ratio: float = sqrt(float(CAPTURE_MAX_BYTES) / float(jpg.size())) * 0.95
+		var nw: int = maxi(200, int(img.get_width() * ratio))
+		var nh: int = maxi(200, int(img.get_height() * ratio))
+		if nw >= img.get_width():
+			break
+		img.resize(nw, nh, Image.INTERPOLATE_LANCZOS)
+		jpg = img.save_jpg_to_buffer(CAPTURE_JPEG_QUALITY)
+	return {"data": jpg, "ext": "jpg"}
+
+
+# Native save dialog → writes the pre-encoded bytes (PNG or JPEG, per the encoder)
+# to the chosen path and opens the containing folder.
+func _save_capture_with_dialog(result: Dictionary) -> void:
+	var data: PackedByteArray = result["data"]
+	var ext: String = result["ext"]
+	var base: String = JourneyData.sanitize_folder_name(_journey_name.strip_edges())
+	if base == "":
+		base = "journey"
+
+	var dlg: FileDialog = FileDialog.new()
+	dlg.file_mode        = FileDialog.FILE_MODE_SAVE_FILE
+	dlg.access           = FileDialog.ACCESS_FILESYSTEM
+	dlg.use_native_dialog = true
+	dlg.add_filter("*." + ext, ext.to_upper() + " image")
+	dlg.current_file = "%s_layout.%s" % [base, ext]
+	add_child(dlg)
+	dlg.file_selected.connect(func(path: String) -> void:
+		if not path.to_lower().ends_with("." + ext):
+			path += "." + ext
+		var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+		if f == null:
+			_show_status("Couldn't write %s." % path.get_file(), true)
+		else:
+			f.store_buffer(data)
+			f.close()
+			_show_status("Saved layout image (%.1f MB) — %s" % [data.size() / 1048576.0, path.get_file()], false)
+			OS.shell_show_in_file_manager(ProjectSettings.globalize_path(path))
+		dlg.queue_free()
+	)
+	dlg.canceled.connect(dlg.queue_free)
+	dlg.popup_centered_ratio(0.6)
 
 
 # Centered modal listing every builder keyboard / mouse shortcut. Closeable via

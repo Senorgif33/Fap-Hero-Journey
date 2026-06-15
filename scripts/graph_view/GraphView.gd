@@ -928,7 +928,10 @@ func _apply_transform() -> void:
 
 # Frames the whole graph: zooms/pans so every node fits in the viewport with a
 # margin. Falls back to the default view when there's nothing to frame.
-func fit_to_view() -> void:
+# Bounding box of all laid-out node widgets in canvas-local space, as
+# {min, max, size}, or {} when there are no nodes. Shared by fit_to_view and the
+# image-capture path so both frame the exact same extent.
+func content_bounds() -> Dictionary:
 	var min_p: Vector2 = Vector2(INF, INF)
 	var max_p: Vector2 = Vector2(-INF, -INF)
 	var found: bool = false
@@ -941,12 +944,17 @@ func fit_to_view() -> void:
 		min_p.y = min(min_p.y, node.position.y)
 		max_p.x = max(max_p.x, node.position.x + node.size.x)
 		max_p.y = max(max_p.y, node.position.y + node.size.y)
-
 	if not found:
+		return {}
+	return {"min": min_p, "max": max_p, "size": max_p - min_p}
+
+
+func fit_to_view() -> void:
+	var b: Dictionary = content_bounds()
+	if b.is_empty():
 		reset_view()
 		return
-
-	var content: Vector2 = max_p - min_p
+	var content: Vector2 = b["size"]
 	if content.x <= 0.0 or content.y <= 0.0:
 		reset_view()
 		return
@@ -955,9 +963,24 @@ func fit_to_view() -> void:
 	var z: float = clamp(min(avail.x / content.x, avail.y / content.y), ZOOM_MIN, ZOOM_MAX)
 	_zoom = z
 	# Map the content's center to the viewport center.
-	var content_center: Vector2 = (min_p + max_p) * 0.5
+	var content_center: Vector2 = (b["min"] + b["max"]) * 0.5
 	_pan_offset = size * 0.5 - content_center * _zoom
 	_apply_transform()
+
+
+# Frames the ENTIRE graph for an offscreen image capture: pins the content at
+# `margin` px from the top-left at `scale`× zoom, with no interactive centering.
+# Returns the pixel size the render target needs (content×scale + 2×margin), or
+# Vector2.ZERO when the graph is empty. Used by the builder's "export image".
+func frame_for_capture(scale: float, margin: float) -> Vector2:
+	var b: Dictionary = content_bounds()
+	if b.is_empty():
+		return Vector2.ZERO
+	_has_initial_center = true   # block any pending _center_initial_view re-pan
+	_zoom = scale
+	_pan_offset = Vector2(margin, margin) - (b["min"] as Vector2) * scale
+	_apply_transform()
+	return (b["size"] as Vector2) * scale + Vector2(margin, margin) * 2.0
 
 
 # Restores the default zoom + top-center framing.

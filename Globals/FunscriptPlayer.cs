@@ -740,10 +740,12 @@ public partial class FunscriptPlayer : Node
         int currentPos = TransformPos(index, effects);
         int nextPos = index + 1 < _actions.Count ? TransformPos(index + 1, effects) : currentPos;
 
-        // Apply user-configured hard range clamp (device settings → Position Clamp).
-        // Runs after inventory effects so shop modifiers compose correctly with the limit.
-        currentPos = Math.Clamp(currentPos, _rangeMin, _rangeMax);
-        nextPos = Math.Clamp(nextPos, _rangeMin, _rangeMax);
+        // Apply the user-configured device range as a RESCALE (lerp 0–100 → [min,max]),
+        // not a hard clamp: strokes keep their shape/rhythm at reduced amplitude rather
+        // than flat-topping and dwelling at the limit. Runs after inventory effects so
+        // shop/curse modifiers compose first, then the whole motion is fit to the window.
+        currentPos = RescaleToRange(currentPos);
+        nextPos = RescaleToRange(nextPos);
 
         // Ease-in blend: interpolate from neutral (50) toward the script positions
         // over the computed ease duration. Both current and next are blended so the
@@ -764,6 +766,12 @@ public partial class FunscriptPlayer : Node
             if (elapsed >= _easeDurationMs)
                 _easing = false;
         }
+
+        // Safety net: the device must never receive an out-of-range command. The
+        // rescale above keeps script motion in-window; this hard clamp backstops the
+        // ease-from-home blend (home can sit outside a tight range) and any rounding.
+        currentPos = Math.Clamp(currentPos, _rangeMin, _rangeMax);
+        nextPos = Math.Clamp(nextPos, _rangeMin, _rangeMax);
 
         // Scoring is always driven by the main (L0) funscript's position deltas,
         // even when vib scripts are loaded and actually driving the device. This
@@ -867,6 +875,17 @@ public partial class FunscriptPlayer : Node
     // of being squashed by the 0–100 clamp. Multiple scale effects stack
     // multiplicatively; clamps apply successively. The mirror uses the eased
     // _mirrorBlend so it is never an instant reversal — see UpdateMirrorBlend.
+    // Maps a 0–100 script position into the user's device range window by RESCALING
+    // (lerp), not hard-clamping — so a stroke keeps its shape and rhythm at reduced
+    // amplitude instead of flat-topping/dwelling at the limit. Output is guaranteed
+    // within [_rangeMin, _rangeMax] for in-range input; a final Math.Clamp safety
+    // net at the send site backstops the ease-from-home blend and any rounding.
+    private int RescaleToRange(int pos)
+    {
+        double n = Math.Clamp(pos, 0, 100) / 100.0;
+        return (int)Math.Round(_rangeMin + (_rangeMax - _rangeMin) * n);
+    }
+
     private int TransformPos(int index, Godot.Collections.Array effects)
     {
         float pos = MirrorOne(_actions[index].Pos);

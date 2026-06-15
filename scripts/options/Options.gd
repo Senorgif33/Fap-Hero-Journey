@@ -481,7 +481,7 @@ func _apply_layout() -> void:
 	range_section.add_child(range_row)
 
 	var range_lbl: Label = Label.new()
-	range_lbl.text = "Position Clamp"
+	range_lbl.text = "Stroke Range"
 	range_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
 	_style_label(range_lbl, UITheme.WHITE_SOFT, 14, false)
 	range_row.add_child(range_lbl)
