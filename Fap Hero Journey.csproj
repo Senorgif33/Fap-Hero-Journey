@@ -3,6 +3,13 @@
     <TargetFramework>net8.0</TargetFramework>
     <TargetFramework Condition=" '$(GodotTargetPlatform)' == 'android' ">net9.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
+    <!-- Do NOT trim the exported build. Buttplug/Intiface (and the serial T-code path)
+         resolve framework assemblies via reflection at runtime — e.g.
+         System.Text.Encoding.Extensions and System.Linq.Expressions — which the IL trimmer
+         can't see and strips. A trimmed export then crashes on device connect with those
+         DLLs missing from the data_*/ folder. Shipping the full runtime is the reliable fix
+         for reflection-heavy deps; the size cost is minor next to the bundled video/ffmpeg. -->
+    <PublishTrimmed>false</PublishTrimmed>
     <RootNamespace>FapHeroJourney</RootNamespace>
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
     <CompilerGeneratedFilesOutputPath>$(BaseIntermediateOutputPath)\GeneratedFiles</CompilerGeneratedFilesOutputPath>
