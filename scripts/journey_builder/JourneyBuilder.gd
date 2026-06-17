@@ -169,8 +169,9 @@ var _invalidated_save_count: int = 0
 #   {"chain": Array[[fork_local_idx, path_idx]], "final": int}
 # An empty chain means a top-level node ("final" is its _items index); each chain
 # entry descends into a fork path, so nodes nested inside forks are reachable.
-# Set by _save_and_test_from, consulted at the tail of _do_save, reset in
-# _reset_save_state. See _seek_to_location for how it drives GameState.
+# Set by _save_and_test_from, reset in _reset_save_state.
+# NOTE (graph cutover): currently computed but NOT consumed — test play starts from the
+# journey beginning. Phase 3 maps this to a graph node id so "Test from here" jumps again.
 var _pending_test_location: Dictionary = {}
 
 # Starting score / coin balance for a test play, applied by GameLoop before the
@@ -1560,57 +1561,36 @@ func _find_arr_chain(level_items: Array, target_arr: Array, chain: Array) -> boo
 	return false
 
 
-# Parses the just-saved journey back into the runtime model (same path the
-# catalogue uses), starts it in GameState, seeks to the chosen node, and hands
-# off to GameLoop in test mode. Called from _do_save after the staging swap, so
+# Parses the just-saved journey into the runtime GRAPH, starts it in GameState, and
+# hands off to GameLoop in test mode. Called from _do_save after the staging swap, so
 # the on-disk journey is final and complete.
+#
+# Phase-2 graph cutover: test play starts from the BEGINNING. The old "from here" seek
+# walked the linear sequence index, which the graph runtime no longer exposes; restoring
+# a mid-journey start (seek to the selected node's id) lands with the Phase 3 builder/
+# graph authoring, which owns node ids. _locate_node_for_test still runs in
+# _save_and_test_from, so the seam is in place — its result is just not consumed yet.
 func _launch_test_play(paths: Dictionary) -> void:
-	var location: Dictionary = _pending_test_location
 	_pending_test_location = {}
 
 	var folder_name: String   = (paths["final_abs_dir"] as String).get_file()
 	var journey_path: String  = SettingsService.get_journeys_dir() + "/" + folder_name
-	var journey: Dictionary   = JourneyScanner.parse_journey(journey_path, folder_name)
+	var journey: Dictionary   = JourneyScanner.parse_graph(journey_path, folder_name)
 	if journey.is_empty():
 		_show_status("Test play failed: could not read the saved journey.", true)
 		_save_btn.disabled = false
 		return
 
 	GameState.StartJourney(journey)
-	_seek_to_location(location)
 
-	# Handshake metas read (and cleared) by GameLoop._ready. The return journey
-	# is the catalogue-model dict the builder reloads when the test exits.
+	# Handshake metas read (and cleared) by GameLoop._ready. The return journey is the
+	# combined dict the builder reloads when the test exits — it still carries the nested
+	# catalogue model for legacy journeys, which _load_journey reads.
 	GameState.set_meta("_test_mode", true)
 	GameState.set_meta("_test_return_journey", journey)
 	GameState.set_meta("_test_seed_score", _test_seed_score)
 	GameState.set_meta("_test_seed_coins", _test_seed_coins)
 	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
-
-
-# Drives GameState from a fresh StartJourney to the located node. For each fork
-# decision in the chain we advance to that fork and resolve it down the chosen
-# path (which splices the path's items into the sequence in authoring order),
-# then advance to the next level's fork — finally stepping to the target's index
-# within the deepest level. Positions map 1:1 because each authored item yields
-# exactly one sequence entry, and we never advance past a path's tail sentinel
-# (we only ever move forward to a fork or the target, both inside the path).
-func _seek_to_location(location: Dictionary) -> void:
-	var chain: Array = location.get("chain", [])
-	var final_idx: int = int(location.get("final", 0))
-	var level_start: int = 0
-	for decision: Array in chain:
-		var fork_seq: int = level_start + int(decision[0])
-		while GameState.RoundIndex < fork_seq:
-			GameState.Advance()
-		if GameState.CurrentItemType() != "fork":
-			push_warning("Test play: expected a fork at sequence index %d; starting from the journey beginning." % fork_seq)
-			return
-		GameState.ResolveFork(int(decision[1]))
-		level_start = GameState.RoundIndex  # first item of the spliced path
-	var target: int = level_start + final_idx
-	while GameState.RoundIndex < target:
-		GameState.Advance()
 
 
 # Returns true on a fully successful save (which transitions the user away

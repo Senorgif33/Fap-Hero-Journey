@@ -3,327 +3,268 @@ using Godot.Collections;
 using System.Collections.Generic;
 using System.Linq;
 
+// Runtime journey driver. Walks the DAG produced by JourneyScanner.parse_graph
+// ({start, nodes} + journey meta): the current node id advances along out-edges,
+// and a fork node resolves by picking one of its edges. This replaced the old
+// pre-spliced sequence + fork_end sentinel model — migrated journeys play identically.
 public partial class GameState : Node
 {
+	// The combined dict from parse_graph: journey meta + the graph under start/nodes
+	// (+ the legacy nested arrays during the Phase-2 transition, which the map/catalogue
+	// still read). The runtime only touches start/nodes.
 	public Dictionary Journey { get; private set; } = new Dictionary();
 
-	private List<Dictionary> _sequence = new();
-	private int _seqIndex = 0;
+	private Dictionary _nodes = new Dictionary();   // id -> { type, data, out:[{to,...}] }
+	private string _currentId = "";
 
-	// Chronological play log — entries are either:
-	//   { "type": "fork_choice", "fork_title": string, "path_name": string, "path_index": int, "depth": int }
-	//   { "type": "round",       "data": Dictionary, "depth": int }
+	// Round nodes entered so far this run = the 1-based "current round number". A DAG is
+	// acyclic, so each node is entered at most once — no double counting.
+	private int _roundsEntered = 0;
+
+	// Chronological play log (shape unchanged): fork_choice / round entries. "depth" is the
+	// node's tree-nesting depth (stamped by build_graph), reproducing the old fork_depth so
+	// the end screen indents nested forks. Author-rewired convergence (Phase 3) could make
+	// depth ambiguous, but migrated tree journeys are exact.
 	private List<Dictionary> _playLog = new();
 
-	// Nesting depth of the currently-active fork path. 0 = top-level sequence.
-	// Incremented each time a fork is resolved; decremented when the sequence
-	// passes a fork_end sentinel (inserted at the tail of each spliced path).
-	private int _forkDepth = 0;
-
-	// Current position in the sequence (includes fork markers before resolution).
-	public int RoundIndex => _seqIndex;
-
-	// 1-based number of the current round among round-type items only.
-	public int RoundNumber => _sequence
-		.Take(_seqIndex + 1)
-		.Count(item => item["type"].AsString() == "round");
+	// 1-based number of the current round among round-type nodes entered so far.
+	public int RoundNumber => _roundsEntered;
 
 	public void StartJourney(Dictionary data)
 	{
-		Journey    = data;
-		_seqIndex  = 0;
-		_forkDepth = 0;
-		_sequence  = BuildSequence(data);
+		Journey = data;
+		_nodes = data.ContainsKey("nodes") ? data["nodes"].AsGodotDictionary() : new Dictionary();
+		_currentId = data.ContainsKey("start") ? data["start"].AsString() : "";
+		_roundsEntered = 0;
 		_playLog.Clear();
+		CountIfRound();
 	}
 
-	private static List<Dictionary> BuildSequence(Dictionary journeyData)
+	// ---------------------------------------------------------------------------
+	// Walking
+	// ---------------------------------------------------------------------------
+
+	private Dictionary NodeOf(string id) =>
+		(id != "" && _nodes.ContainsKey(id)) ? _nodes[id].AsGodotDictionary() : new Dictionary();
+
+	private Array OutEdges(string id)
 	{
-		var items = new List<(int SortKey, Dictionary Data)>();
-
-		var rounds = journeyData.ContainsKey("rounds") ? journeyData["rounds"].AsGodotArray() : new Array();
-		foreach (var roundVariant in rounds)
-		{
-			var roundData = roundVariant.AsGodotDictionary();
-			int order = roundData.ContainsKey("order") ? roundData["order"].AsInt32() : 0;
-			items.Add((order * 3, new Dictionary { ["type"] = "round", ["data"] = roundData }));
-		}
-
-		var shops = journeyData.ContainsKey("shops") ? journeyData["shops"].AsGodotArray() : new Array();
-		foreach (var shopVariant in shops)
-		{
-			Dictionary shopData;
-			int afterOrder;
-			if (shopVariant.VariantType == Variant.Type.Dictionary)
-			{
-				shopData = shopVariant.AsGodotDictionary();
-				afterOrder = shopData.ContainsKey("after_order") ? shopData["after_order"].AsInt32() : 0;
-			}
-			else
-			{
-				// Legacy format: "shops": [orderNum, ...]
-				afterOrder = shopVariant.AsInt32();
-				shopData = new Dictionary { ["after_order"] = afterOrder };
-			}
-			items.Add((afterOrder * 3 + 1, new Dictionary { ["type"] = "shop", ["data"] = shopData }));
-		}
-
-		var storyboards = journeyData.ContainsKey("storyboards") ? journeyData["storyboards"].AsGodotArray() : new Array();
-		foreach (var storyboardVariant in storyboards)
-		{
-			var storyboardData = storyboardVariant.AsGodotDictionary();
-			int order = storyboardData.ContainsKey("order") ? storyboardData["order"].AsInt32() : 0;
-			items.Add((order * 3, new Dictionary { ["type"] = "storyboard", ["data"] = storyboardData }));
-		}
-
-		var forks = journeyData.ContainsKey("forks") ? journeyData["forks"].AsGodotArray() : new Array();
-		foreach (var forkVariant in forks)
-		{
-			var forkData = forkVariant.AsGodotDictionary();
-			int afterOrder = forkData.ContainsKey("after_order") ? forkData["after_order"].AsInt32() : 0;
-			items.Add((afterOrder * 3 + 2, new Dictionary { ["type"] = "fork", ["data"] = forkData }));
-		}
-
-		items.Sort((a, b) => a.SortKey.CompareTo(b.SortKey));
-		return items.Select(item => item.Data).ToList();
+		var n = NodeOf(id);
+		return n.ContainsKey("out") ? n["out"].AsGodotArray() : new Array();
 	}
 
-	public Dictionary CurrentItem()
+	private string TypeOf(string id)
 	{
-		if (_seqIndex >= _sequence.Count) return new Dictionary();
-		return _sequence[_seqIndex];
+		var n = NodeOf(id);
+		return n.ContainsKey("type") ? n["type"].AsString() : "";
 	}
 
-	public string CurrentItemType()
+	// Bumps the round counter when the node we just landed on is a round.
+	private void CountIfRound()
 	{
-		var item = CurrentItem();
-		return item.ContainsKey("type") ? item["type"].AsString() : "round";
+		if (TypeOf(_currentId) == "round")
+			_roundsEntered++;
 	}
 
-	// Returns the current round's data dict. Empty if current item is a fork or sequence is done.
-	public Dictionary CurrentRound()
-	{
-		var item = CurrentItem();
-		if (item.ContainsKey("type") && item["type"].AsString() == "round")
-			return item["data"].AsGodotDictionary();
+	public Dictionary CurrentItem() => NodeOf(_currentId);
 
+	// The current node's type ("round"/"shop"/"storyboard"/"fork"); "" when the journey is
+	// done. Drives GameLoop's dispatch and the map keying.
+	public string CurrentItemType() => TypeOf(_currentId);
+
+	public Dictionary CurrentRound()      => DataIfType("round");
+	public Dictionary CurrentShop()       => DataIfType("shop");
+	public Dictionary CurrentStoryboard() => DataIfType("storyboard");
+
+	private Dictionary DataIfType(string type)
+	{
+		var n = NodeOf(_currentId);
+		if (n.ContainsKey("type") && n["type"].AsString() == type)
+			return n["data"].AsGodotDictionary();
 		return new Dictionary();
 	}
 
-	// Returns the current fork's data dict. Empty if current item is a round.
+	// Reconstructs the paths-shaped fork dict that ForkScreen / ForkResolver / GameLoop
+	// expect, from the fork node's meta + its out-edges (one edge == one path). Empty when
+	// the current node isn't a fork.
 	public Dictionary CurrentFork()
 	{
-		var item = CurrentItem();
-		if (item.ContainsKey("type") && item["type"].AsString() == "fork")
-			return item["data"].AsGodotDictionary();
+		var n = NodeOf(_currentId);
+		if (!(n.ContainsKey("type") && n["type"].AsString() == "fork"))
+			return new Dictionary();
 
-		return new Dictionary();
+		var data = n["data"].AsGodotDictionary();
+		var paths = new Array();
+		foreach (var edgeVariant in OutEdges(_currentId))
+		{
+			var e = edgeVariant.AsGodotDictionary();
+			paths.Add(new Dictionary {
+				["name"]          = e.ContainsKey("name")          ? e["name"].AsString()          : "",
+				["description"]   = e.ContainsKey("description")   ? e["description"].AsString()   : "",
+				["image_path"]    = e.ContainsKey("image_path")    ? e["image_path"].AsString()    : "",
+				["weight"]        = e.ContainsKey("weight")        ? e["weight"].AsInt32()         : 1,
+				["threshold"]     = e.ContainsKey("threshold")     ? e["threshold"].AsInt32()      : 0,
+				["required_item"] = e.ContainsKey("required_item") ? e["required_item"].AsString() : "",
+				["cost"]          = e.ContainsKey("cost")          ? e["cost"].AsInt32()           : 0,
+			});
+		}
+		return new Dictionary {
+			["title"]        = data.ContainsKey("title")        ? data["title"].AsString()        : "",
+			["description"]  = data.ContainsKey("description")  ? data["description"].AsString()  : "",
+			["resolution"]   = data.ContainsKey("resolution")  ? data["resolution"].AsString()   : "choice",
+			["cond_metric"]  = data.ContainsKey("cond_metric") ? data["cond_metric"].AsString()  : "score",
+			["default_path"] = data.ContainsKey("default_path")? data["default_path"].AsInt32()  : 0,
+			// Carried through so GameLoop._current_map_key can key the fork's map marker.
+			["after_order"]  = data.ContainsKey("after_order") ? data["after_order"].AsInt32()   : 0,
+			["paths"]        = paths,
+		};
 	}
 
-	// Returns the current shop's data dict. Empty if current item is not a shop.
-	public Dictionary CurrentShop()
-	{
-		var item = CurrentItem();
-		if (item.ContainsKey("type") && item["type"].AsString() == "shop")
-			return item["data"].AsGodotDictionary();
-
-		return new Dictionary();
-	}
-
-	// Returns the current storyboard's data dict. Empty if current item is not a storyboard.
-	public Dictionary CurrentStoryboard()
-	{
-		var item = CurrentItem();
-		if (item.ContainsKey("type") && item["type"].AsString() == "storyboard")
-			return item["data"].AsGodotDictionary();
-
-		return new Dictionary();
-	}
-
-	// Replaces the current fork marker with the chosen path's rounds, then leaves
-	// _seqIndex pointing at the first round of the chosen path.
-	public void ResolveFork(int pathIndex)
-	{
-		var item = CurrentItem();
-		if (!item.ContainsKey("type") || item["type"].AsString() != "fork")
-			return;
-
-		var forkData = item["data"].AsGodotDictionary();
-		if (!forkData.ContainsKey("paths"))
-			return;
-
-		var paths = forkData["paths"].AsGodotArray();
-		if (pathIndex < 0 || pathIndex >= paths.Count)
-			pathIndex = 0;
-
-		var chosen = paths[pathIndex].AsGodotDictionary();
-
-		// Record this choice in the play log so the end screen can show the path taken.
-		// Depth is captured BEFORE incrementing so the header aligns with where the fork
-		// appeared (e.g. depth 0 = top-level, depth 1 = inside another fork's path).
-		_playLog.Add(new Dictionary {
-			["type"]       = "fork_choice",
-			["fork_title"] = forkData.ContainsKey("title") ? forkData["title"].AsString() : "",
-			["path_name"]  = chosen.ContainsKey("name") ? chosen["name"].AsString() : "Path " + (pathIndex + 1),
-			["path_index"] = pathIndex,
-			["depth"]      = _forkDepth,
-		});
-
-		var chosenRounds = chosen.ContainsKey("rounds")  ? chosen["rounds"].AsGodotArray() : new Array();
-		var chosenShops = chosen.ContainsKey("shops") ? chosen["shops"].AsGodotArray() : new Array();
-		var chosenStoryboards = chosen.ContainsKey("storyboards") ? chosen["storyboards"].AsGodotArray() : new Array();
-		var chosenForks = chosen.ContainsKey("forks")  ? chosen["forks"].AsGodotArray() : new Array();
-
-		// Interleave path rounds, shops, storyboards, and nested forks by the same sort-key
-		// scheme as BuildSequence so authoring order is preserved on resolution.
-		var subItems = new List<(int SortKey, Dictionary Data)>();
-		foreach (var chosenRound in chosenRounds)
-		{
-			var roundData = chosenRound.AsGodotDictionary();
-			int order = roundData.ContainsKey("order") ? roundData["order"].AsInt32() : 0;
-			subItems.Add((order * 3, new Dictionary { ["type"] = "round", ["data"] = roundData }));
-		}
-		foreach (var chosenStoryboard in chosenStoryboards)
-		{
-			var storyboardData = chosenStoryboard.AsGodotDictionary();
-			int order = storyboardData.ContainsKey("order") ? storyboardData["order"].AsInt32() : 0;
-			subItems.Add((order * 3, new Dictionary { ["type"] = "storyboard", ["data"] = storyboardData }));
-		}
-		foreach (var chosenShop in chosenShops)
-		{
-			var shopData = chosenShop.AsGodotDictionary();
-			int afterOrder = shopData.ContainsKey("after_order") ? shopData["after_order"].AsInt32() : 0;
-			subItems.Add((afterOrder * 3 + 1, new Dictionary { ["type"] = "shop", ["data"] = shopData }));
-		}
-		foreach (var chosenFork in chosenForks)
-		{
-			var chosenForkData = chosenFork.AsGodotDictionary();
-			int afterOrder = chosenForkData.ContainsKey("after_order") ? chosenForkData["after_order"].AsInt32() : 0;
-			subItems.Add((afterOrder * 3 + 2, new Dictionary { ["type"] = "fork", ["data"] = chosenForkData }));
-		}
-		subItems.Sort((a, b) => a.SortKey.CompareTo(b.SortKey));
-
-		_sequence.RemoveAt(_seqIndex);
-		for (int i = subItems.Count - 1; i >= 0; i--)
-		{
-			_sequence.Insert(_seqIndex, subItems[i].Data);
-		}
-		// Insert a fork_end sentinel right after the last item of the spliced path.
-		// Advance() skips these sentinels automatically and decrements _forkDepth.
-		_sequence.Insert(_seqIndex + subItems.Count, new Dictionary { ["type"] = "fork_end" });
-		_forkDepth++;
-		// _seqIndex now points at the first item of the chosen path.
-	}
-
+	// Follows the current node's single out-edge (linear/round/shop/storyboard nodes).
+	// Lands on "" (done) at an end. Fork nodes are advanced via ResolveFork, not here.
 	public void Advance()
 	{
-		_seqIndex++;
-		// Consume any fork_end sentinels, decrementing depth for each one.
-		// This correctly handles back-to-back sentinel runs when nested forks end together.
-		while (_seqIndex < _sequence.Count && _sequence[_seqIndex].ContainsKey("type") &&  _sequence[_seqIndex]["type"].AsString() == "fork_end")
-		{
-			_forkDepth = _forkDepth > 0 ? _forkDepth - 1 : 0;
-			_seqIndex++;
-		}
+		var edges = OutEdges(_currentId);
+		_currentId = edges.Count > 0 ? edges[0].AsGodotDictionary()["to"].AsString() : "";
+		CountIfRound();
 	}
 
-	public bool IsSequenceDone() => _seqIndex >= _sequence.Count;
-
-	// True when there are no more non-sentinel items after the current position.
-	// fork_end entries are internal bookkeeping and must not be counted as real items.
-	public bool IsLastRound()
+	// Picks the fork's pathIndex-th out-edge and moves to its target. Out-of-range /
+	// negative clamps to edge 0 (mirrors the old behaviour). No-op off a fork.
+	public void ResolveFork(int pathIndex)
 	{
-		for (int i = _seqIndex + 1; i < _sequence.Count; i++)
-		{
-			string t = _sequence[i].ContainsKey("type") ? _sequence[i]["type"].AsString() : "";
-			if (t != "fork_end")
-				return false;
-		}
-		return true;
+		var n = NodeOf(_currentId);
+		if (!(n.ContainsKey("type") && n["type"].AsString() == "fork"))
+			return;
+
+		var edges = OutEdges(_currentId);
+		if (edges.Count == 0) { _currentId = ""; return; }
+		if (pathIndex < 0 || pathIndex >= edges.Count)
+			pathIndex = 0;
+
+		var edge = edges[pathIndex].AsGodotDictionary();
+		var data = n["data"].AsGodotDictionary();
+		_playLog.Add(new Dictionary {
+			["type"]       = "fork_choice",
+			["fork_title"] = data.ContainsKey("title") ? data["title"].AsString() : "",
+			["path_name"]  = edge.ContainsKey("name") ? edge["name"].AsString() : "Path " + (pathIndex + 1),
+			["path_index"] = pathIndex,
+			["depth"]      = n.ContainsKey("depth") ? n["depth"].AsInt32() : 0,
+		});
+
+		_currentId = edge.ContainsKey("to") ? edge["to"].AsString() : "";
+		CountIfRound();
 	}
 
-	// Count of round-type items currently in the sequence (grows after fork resolution).
-	public int TotalRounds() => _sequence.Count(item => item["type"].AsString() == "round");
+	// The journey is done once the current id is the "" sentinel (or points nowhere).
+	public bool IsSequenceDone() => _currentId == "" || !_nodes.ContainsKey(_currentId);
 
+	// True when no out-edge leads to another node — i.e. the current node is a terminal
+	// item, so the run should route to the end screen instead of advancing. Trailing
+	// shops/storyboards still count as "more items" and keep this false (preserves the
+	// old "no real items after" semantics, not a rounds-only check).
+	public bool IsLastRound() =>
+		!OutEdges(_currentId).Any(e => e.AsGodotDictionary()["to"].AsString() != "");
+
+	// Trajectory-relative total: rounds entered before the current node + the longest
+	// round path forward from it (DAG longest path). The denominator shifts as the player
+	// picks shorter/longer forks — and the bar jumps forward on a skip.
+	public int TotalRounds()
+	{
+		int currentIsRound = TypeOf(_currentId) == "round" ? 1 : 0;
+		return (_roundsEntered - currentIsRound) + LongestRoundPath(_currentId);
+	}
+
+	// All round nodes' data (every node, not traversal-filtered). Kept for API parity;
+	// no current GDScript consumer.
 	public Array GetPlayedRounds()
 	{
 		var result = new Array();
-		foreach (var item in _sequence)
+		foreach (var keyVariant in _nodes.Keys)
 		{
-			if (item.ContainsKey("type") && item["type"].AsString() == "round")
-				result.Add(item["data"]);
+			var n = _nodes[keyVariant.AsString()].AsGodotDictionary();
+			if (n.ContainsKey("type") && n["type"].AsString() == "round")
+				result.Add(n["data"]);
 		}
 		return result;
+	}
+
+	// Longest count of round nodes from `fromId` to any end (inclusive of fromId if it is
+	// a round). DAG → the memoised DFS terminates; `seen` backstops a malformed cycle.
+	private int LongestRoundPath(string fromId) =>
+		LongestRoundPathRec(fromId, new System.Collections.Generic.Dictionary<string, int>(), new HashSet<string>());
+
+	private int LongestRoundPathRec(string id, System.Collections.Generic.Dictionary<string, int> memo, HashSet<string> seen)
+	{
+		if (id == "" || !_nodes.ContainsKey(id) || seen.Contains(id)) return 0;
+		if (memo.TryGetValue(id, out int cached)) return cached;
+		seen.Add(id);
+		int here = TypeOf(id) == "round" ? 1 : 0;
+		int best = 0;
+		foreach (var e in OutEdges(id))
+			best = System.Math.Max(best, LongestRoundPathRec(e.AsGodotDictionary()["to"].AsString(), memo, seen));
+		seen.Remove(id);
+		int total = here + best;
+		memo[id] = total;
+		return total;
 	}
 
 	// ---------------------------------------------------------------------------
 	// Save / Resume
 	// ---------------------------------------------------------------------------
 
-	// Returns the part of the save record that lives in GameState: the spliced
-	// sequence (preserves any fork choices already made) and the current index.
-	// CoinService, ScoreService, and GameLoop add their own portions on top.
-	public Dictionary CaptureSaveData()
-	{
-		var sequenceSnapshot = new Array();
-		foreach (var item in _sequence)
-			sequenceSnapshot.Add(item);
+	// GameState's slice of the save record: the current node id + rounds-entered count
+	// (so the resumed run restores its progress number). CoinService / ScoreService /
+	// GameLoop add their own portions.
+	public Dictionary CaptureSaveData() => new Dictionary {
+		["current_node"]   = _currentId,
+		["rounds_entered"] = _roundsEntered,
+	};
 
-		return new Dictionary
-		{
-			["sequence_index"] = _seqIndex,
-			["sequence"]       = sequenceSnapshot,
-			["fork_depth"]     = _forkDepth,
-		};
-	}
-
-	// Loads a journey directly from a save record, bypassing the normal
-	// BuildSequence path. The journey metadata still comes from disk (cover,
-	// title, etc.) so the catalogue/end-screen display is correct; only the
-	// sequence + position are restored from the save.
+	// Restores position from a save record. New saves carry current_node; a pre-graph
+	// save (sequence_index, no current_node) or a node that no longer exists (journey
+	// edited) falls back to the journey start — saves are single-use and short-lived, so
+	// losing position across the format change is acceptable.
 	public void LoadFromSave(Dictionary journeyData, Dictionary saveData)
 	{
-		Journey    = journeyData;
-		_seqIndex  = saveData.ContainsKey("sequence_index") ? saveData["sequence_index"].AsInt32() : 0;
-		_forkDepth = saveData.ContainsKey("fork_depth") ? saveData["fork_depth"].AsInt32() : 0;
+		Journey = journeyData;
+		_nodes = journeyData.ContainsKey("nodes") ? journeyData["nodes"].AsGodotDictionary() : new Dictionary();
 		_playLog.Clear();
 
-		_sequence = new List<Dictionary>();
-		if (saveData.ContainsKey("sequence"))
+		if (saveData.ContainsKey("current_node") && _nodes.ContainsKey(saveData["current_node"].AsString()))
 		{
-			foreach (var entry in saveData["sequence"].AsGodotArray())
-				_sequence.Add(entry.AsGodotDictionary());
+			_currentId = saveData["current_node"].AsString();
+			_roundsEntered = saveData.ContainsKey("rounds_entered") ? saveData["rounds_entered"].AsInt32() : 0;
 		}
-
-		// Defensive: if the saved index is out of bounds (e.g. journey was edited
-		// after the save was written and is now shorter), clamp to the end so
-		// the catalogue immediately routes to the end screen rather than crash.
-		if (_seqIndex < 0) _seqIndex = 0;
-		if (_seqIndex > _sequence.Count) _seqIndex = _sequence.Count;
+		else
+		{
+			_currentId = journeyData.ContainsKey("start") ? journeyData["start"].AsString() : "";
+			_roundsEntered = 0;
+			CountIfRound();
+		}
 	}
 
 	// Called by GameLoop after each round ends (before ScoreService.EndRound).
-	// roundName and lengthMs are passed explicitly from GDScript (where Dictionary
-	// access is known to work) to avoid C# String/StringName key-lookup mismatches.
+	// roundName / lengthMs are passed explicitly from GDScript to avoid C# key-lookup
+	// mismatches on the Variant dict.
 	public void LogRound(Dictionary roundData, string roundName, int lengthMs)
 	{
+		var n = NodeOf(_currentId);
 		_playLog.Add(new Dictionary {
 			["type"]      = "round",
 			["name"]      = roundName,
 			["length_ms"] = lengthMs,
 			["data"]      = roundData,
-			["depth"]     = _forkDepth,
+			["depth"]     = n.ContainsKey("depth") ? n["depth"].AsInt32() : 0,
 		});
 	}
 
-	// Returns the full chronological log of fork choices and rounds played.
+	// Full chronological log of fork choices and rounds played (for the end screen).
 	public Array GetPlayLog()
 	{
 		var result = new Array();
 		foreach (var entry in _playLog)
 			result.Add(entry);
-
 		return result;
 	}
-
 }

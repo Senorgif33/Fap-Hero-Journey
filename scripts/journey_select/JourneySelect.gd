@@ -959,7 +959,11 @@ func _on_resume_pressed() -> void:
 		_on_play_pressed_unguarded()
 		return
 
-	GameState.LoadFromSave(_current_journey, save_data)
+	# The runtime walks the journey GRAPH (parse_graph migrates legacy journeys on the
+	# fly); _current_journey stays the catalogue model for the detail panel.
+	var play_journey: Dictionary = JourneyScanner.parse_graph(
+		_current_journey.get("folder", ""), _current_journey.get("folder_name", ""))
+	GameState.LoadFromSave(play_journey, save_data)
 	CoinService.SetBalance(int(save_data.get("coins", 0)))
 	ScoreService.LoadFromSave({
 		"score":   save_data.get("score", 0),
@@ -993,7 +997,9 @@ func _on_resume_pressed() -> void:
 # path when a save is unreadable.
 func _on_play_pressed_unguarded() -> void:
 	JourneySaveService.delete_save(_current_journey.get("folder_name", ""))
-	GameState.StartJourney(_current_journey)
+	var play_journey: Dictionary = JourneyScanner.parse_graph(
+		_current_journey.get("folder", ""), _current_journey.get("folder_name", ""))
+	GameState.StartJourney(play_journey)
 	UISound.start_journey()
 	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
 

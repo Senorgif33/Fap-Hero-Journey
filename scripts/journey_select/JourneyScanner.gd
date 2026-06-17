@@ -22,6 +22,11 @@ const EXTRA_AXIS_SUFFIXES: Array[String] = ["_L1", "_L2", "_R0", "_R1", "_R2"]
 
 # Scans `journeys_dir` for sub-folders containing a journey.json and returns the
 # parsed catalogue model for each. Creates the directory if it doesn't exist.
+#
+# Uses parse_graph so the catalogue is graph-aware: legacy journeys come back with the
+# same meta + totals (plus the migrated graph under start/nodes, which the cards ignore),
+# and new graph-format journeys will scan correctly once the builder writes them. Cost is
+# one in-memory tree→graph migration per journey, which is negligible.
 static func scan_all(journeys_dir: String) -> Array:
 	var result: Array = []
 	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(journeys_dir)):
@@ -34,7 +39,7 @@ static func scan_all(journeys_dir: String) -> Array:
 	var entry: String = dir.get_next()
 	while entry != "":
 		if dir.current_is_dir() and not entry.begins_with("."):
-			var journey: Dictionary = parse_journey(journeys_dir + "/" + entry, entry)
+			var journey: Dictionary = parse_graph(journeys_dir + "/" + entry, entry)
 			if not journey.is_empty():
 				result.append(journey)
 		entry = dir.get_next()
@@ -213,6 +218,88 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		journey["total_rounds"]    = (journey["total_rounds"] as int)    + (lps["round_count"] as int)
 
 	return journey
+
+
+# Reads a journey folder into the runtime GRAPH model ({start, nodes}, absolute paths).
+# New journeys store the graph directly (Format 2 / "Nodes"); legacy tree journeys are
+# parsed the old way (which resolves paths) and migrated via JourneyGraph.build_graph.
+# Returns {} when journey.json is missing or malformed.
+#
+# Additive: parse_journey still serves the catalogue/builder/map consumers until the
+# graph cutover wires them over to this. No path resolution duplication — the new-format
+# branch resolves via JourneyGraph.resolve_paths, the legacy branch inherits parse_journey's.
+static func parse_graph(path: String, folder: String) -> Dictionary:
+	var json_path: String = path + "/journey.json"
+	if not FileAccess.file_exists(json_path):
+		return {}
+	var file: FileAccess = FileAccess.open(json_path, FileAccess.READ)
+	if file == null:
+		return {}
+	var parser: JSON = JSON.new()
+	var err: int = parser.parse(file.get_as_text())
+	file.close()
+	if err != OK:
+		return {}
+	var data: Dictionary = parser.data
+	if JourneyGraph.is_graph_json(data):
+		# New graph format: read the graph + journey meta straight from journey.json.
+		var graph: Dictionary = JourneyGraph.from_json(data)
+		JourneyGraph.resolve_paths(graph, path)
+		var result: Dictionary = _graph_meta(data, path, folder)
+		result["start"] = graph["start"]
+		result["nodes"] = graph["nodes"]
+		# DAG totals: the longest round path is the most a player can hit; node sums
+		# feed the catalogue (see _graph_node_totals for the Phase-3 refinement note).
+		result["total_rounds"] = JourneyGraph.longest_round_path(graph, str(graph["start"]))
+		var totals: Dictionary = _graph_node_totals(graph)
+		result["total_actions"]   = totals["actions"]
+		result["total_length_ms"] = totals["length_ms"]
+		return result
+
+	# Legacy tree format → parse the old way (full nested model + meta + totals), then
+	# migrate and attach the graph under start/nodes. Existing nested-model consumers
+	# (map / catalogue) keep working off the same dict until the Phase 3 cutover.
+	var tree: Dictionary = parse_journey(path, folder)
+	if tree.is_empty():
+		return {}
+	var g: Dictionary = JourneyGraph.build_graph(tree)
+	tree["start"] = g["start"]
+	tree["nodes"] = g["nodes"]
+	return tree
+
+
+# Journey-level meta for a new (graph-format) journey.json — mirrors parse_journey's
+# meta block. The nested rounds/forks/shops/storyboards arrays are intentionally empty
+# (graph journeys carry structure in start/nodes); the map/catalogue switch to the graph
+# in Phase 3, at which point those consumers stop reading the nested arrays.
+static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dictionary:
+	return {
+		"folder":        path,
+		"folder_name":   folder,
+		"title":         data.get("Name", folder),
+		"description":   data.get("Description", ""),
+		"difficulty":    data.get("Difficulty", "Unknown"),
+		"author":        data.get("Author", "Unknown"),
+		"tags":          TagRegistry.sanitize(data.get("Tags", [])),
+		"map_enabled":   bool(data.get("MapEnabled", true)),
+		"cover_path":    find_cover_image(path),
+		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
+		"rounds": [], "forks": [], "shops": [], "storyboards": [],
+	}
+
+
+# Catalogue action/length totals for a graph journey. Phase-2 placeholder: sums EVERY
+# round node (an overestimate vs. any single traversal). Phase 3 should swap this for the
+# longest-by-length path once the catalogue reads the graph directly.
+static func _graph_node_totals(graph: Dictionary) -> Dictionary:
+	var actions: int = 0
+	var length: int = 0
+	for id: String in graph.get("nodes", {}):
+		var n: Dictionary = graph["nodes"][id]
+		if n.get("type", "") == "round":
+			actions += int((n.get("data", {}) as Dictionary).get("action_count", 0))
+			length  += int((n.get("data", {}) as Dictionary).get("length_ms", 0))
+	return {"actions": actions, "length_ms": length}
 
 
 # Recursively parses a fork's JSON dict. Each path can contain nested forks
