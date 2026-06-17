@@ -39,6 +39,15 @@ const VIB_SUFFIXES: Dictionary = {
 	"vib1": "vibe1", "vib2": "vibe2",
 }
 
+# Stable per-item key for the journey map's "you are here" correlation. Rounds use
+# their globally-unique folder slug; other item types use their order/after_order.
+# Computed identically on the graph side (stamped as `_map_key` by parse_journey)
+# and the runtime side (GameLoop), so the marker can find the node for the current
+# sequence item. NOTE: non-round keys can collide across fork levels — the map
+# resolves that by advancing the marker monotonically down the graph.
+static func map_key(item_type: String, id: Variant) -> String:
+	return "%s:%s" % [item_type, str(id)]
+
 # Curse catalog — the GAMEPLAY afflictions a cursed round can apply (they change
 # the device output, the economy, or the controls). Non-gameplay visual/audio
 # effects live in SENSORY_CATALOG below. Single source of truth shared by the
@@ -267,6 +276,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 				"video_path":      _round_video(r),
 				"coins":           r.get("coins", 0),
 				"original_folder": r.get("folder", ""),
+				"_map_key":        map_key("round", r.get("folder", "")),
 			},
 		})
 	for sb: Dictionary in storyboards:
@@ -278,6 +288,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 				"item":  sb.get("item", ""),
 				"image": sb.get("image", ""),
 				"lines": sb.get("lines", []),
+				"_map_key": map_key("storyboard", sb.get("order", 0)),
 			},
 		})
 	for sh: Dictionary in shops:
@@ -290,7 +301,17 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 			"key":  (f.get("after_order", 0) as int) * 3 + 2,
 			"data": _build_fork_item(f),
 		})
-	seq.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return (a["key"] as int) < (b["key"] as int))
+	# Sort by runtime key, tie-break by append index. Current saves give every
+	# item a unique key (monotonic position), so ties never happen — but a journey
+	# last saved under the old "anchor shops/forks to the previous round" scheme can
+	# have colliding keys, and a bare sort_custom is NOT stable, so those journeys
+	# would load in a different item order on each open. That nondeterminism is what
+	# made Test-From-Here behave differently per reopen. The index tie-break pins a
+	# deterministic order.
+	for i in seq.size():
+		seq[i]["_ord"] = i
+	seq.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return (a["key"] as int) < (b["key"] as int) if a["key"] != b["key"] else (a["_ord"] as int) < (b["_ord"] as int))
 
 	var items: Array = []
 	for s in seq:
@@ -303,6 +324,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 		"difficulty_idx": diff_idx,
 		"cover_path":     cover_path,
 		"tags":           journey.get("tags", []),
+		"map_enabled":    bool(journey.get("map_enabled", true)),
 		"items":          items,
 	}
 
@@ -319,6 +341,7 @@ static func _build_shop_item(sh: Dictionary) -> Dictionary:
 		"count":            int(sh.get("count", 3)),
 		"items":            (sh.get("items", []) as Array).duplicate(),
 		"price_multiplier": float(sh.get("price_multiplier", 1.0)),
+		"_map_key":         map_key("shop", sh.get("after_order", 0)),
 	}
 
 
@@ -343,6 +366,7 @@ static func _build_fork_item(f: Dictionary) -> Dictionary:
 		"cond_metric":  str(f.get("cond_metric", "score")),
 		"default_path": int(f.get("default_path", 0)),
 		"paths":        paths_out,
+		"_map_key":     map_key("fork", f.get("after_order", 0)),
 	}
 
 
@@ -378,6 +402,7 @@ static func _build_path_items(p: Dictionary) -> Array:
 				"video_path":      _round_video(pr),
 				"coins":           pr.get("coins", 0),
 				"original_folder": pr.get("folder", ""),
+				"_map_key":        map_key("round", pr.get("folder", "")),
 			},
 		})
 	for psb: Dictionary in p.get("storyboards", []):
@@ -389,6 +414,7 @@ static func _build_path_items(p: Dictionary) -> Array:
 				"item":  psb.get("item", ""),
 				"image": psb.get("image", ""),
 				"lines": psb.get("lines", []),
+				"_map_key": map_key("storyboard", psb.get("order", 0)),
 			},
 		})
 	for ps: Dictionary in p.get("shops", []):
@@ -401,7 +427,12 @@ static func _build_path_items(p: Dictionary) -> Array:
 			"key":  (nf.get("after_order", 0) as int) * 3 + 2,
 			"data": _build_fork_item(nf),
 		})
-	sub.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return (a["key"] as int) < (b["key"] as int))
+	# Stable tie-break by append index (see parse_journey) so a fork path with
+	# legacy colliding keys orders deterministically instead of varying per open.
+	for i in sub.size():
+		sub[i]["_ord"] = i
+	sub.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return (a["key"] as int) < (b["key"] as int) if a["key"] != b["key"] else (a["_ord"] as int) < (b["_ord"] as int))
 	var items: Array = []
 	for s in sub:
 		items.append(s["data"])

@@ -6,6 +6,7 @@ const ShopScene            = preload("res://scenes/shop_screen/ShopScreen.tscn")
 const StoryboardScene      = preload("res://scenes/storyboard_screen/StoryboardScreen.tscn")
 const InventoryPanelScene  = preload("res://scenes/inventory/InventoryPanel.tscn")
 const BeatBarScript        = preload("res://scripts/game_loop/BeatBar.gd")
+const GraphViewScene       = preload("res://scenes/graph_view/GraphView.tscn")
 
 # ---------------------------------------------------------------------------
 # GameLoop.gd  –  Round controller and video player
@@ -81,6 +82,24 @@ var _is_overlay_open: bool = false
 # freed by the transition (after the black covers it), not by itself — see
 # _transition_swap.
 var _current_overlay: Control = null
+
+# Journey map (read-only GraphView of the authored graph + "you are here" marker).
+# Opened on demand (HUD button / M / overlay buttons). Self-managed (NOT
+# _current_overlay, which the transition frees). Availability is authored per
+# journey (_map_enabled): an author can disable it to enforce surprise, in which
+# case the map is never built and the buttons never appear.
+var _map_enabled: bool      = true   # journey-level: author allows the player map
+var _map_view:    GraphView = null
+var _map_overlay: Control   = null   # full-screen host (backdrop + map + chrome)
+var _map_close_btn: Button  = null
+var _map_open:    bool      = false
+# True while the active full-screen overlay permits opening the journey map over it
+# (shop, storyboard, and INTERACTIVE forks). Lets the map open even though
+# _is_overlay_open is set. Auto-resolving forks (random / conditional) leave it false
+# so the map can't interrupt their reveal; transient banners (checkpoint / reveal
+# card) never set it. While the map is open the overlay's own input is suspended (see
+# _set_overlay_input_enabled) so clicks/keys can't leak through to it.
+var _overlay_map_allowed: bool = false
 
 # True for the duration of a boss round (set when the round loads, cleared at
 # round end). Drives item lockout, the red frame, and the climax pulse.
@@ -161,6 +180,9 @@ func _ready() -> void:
 	_build_boss_frame()
 	_build_curse_overlay()
 	_build_beat_bar()
+	# Journey-level: the author can disable the player map to enforce surprise.
+	_map_enabled = bool(GameState.Journey.get("map_enabled", true))
+	_build_map()
 	_connect_signals()
 	# Resume vs fresh start: when the player picked Resume from the catalogue,
 	# JourneySelect already populated the run-state autoloads (coins, score,
@@ -271,9 +293,12 @@ func _show_storyboard_screen(sb_data: Dictionary) -> void:
 	FunscriptPlayer.Pause()
 	_start_storyboard_filler()
 	var storyboard: Control = StoryboardScene.instantiate()
+	storyboard.show_map_button = _map_enabled
 	storyboard.completed.connect(_on_storyboard_completed)
+	storyboard.map_requested.connect(_open_map_viewer)
 	add_child(storyboard)
 	_current_overlay = storyboard
+	_overlay_map_allowed = true
 	storyboard.setup(sb_data)
 
 
@@ -289,6 +314,7 @@ func _start_storyboard_filler() -> void:
 func _on_storyboard_completed(coins: int) -> void:
 	FunscriptPlayer.StopFiller()
 	_is_overlay_open = false
+	_overlay_map_allowed = false
 	if coins > 0:
 		CoinService.AddCoins(coins)
 	# Optional item reward — read before Advance() moves off the storyboard.
@@ -311,14 +337,18 @@ func _show_shop_screen(shop_data: Dictionary) -> void:
 	_video.paused = true
 	FunscriptPlayer.Pause()
 	var shop: Control = ShopScene.instantiate()
+	shop.show_map_button = _map_enabled
 	shop.closed.connect(_on_shop_closed)
+	shop.map_requested.connect(_open_map_viewer)
 	add_child(shop)
 	_current_overlay = shop
+	_overlay_map_allowed = true
 	shop.setup(shop_data)
 
 
 func _on_shop_closed() -> void:
 	_is_overlay_open = false
+	_overlay_map_allowed = false
 	GameState.Advance()
 	if GameState.IsSequenceDone():
 		_transition_to_end_screen()
@@ -335,14 +365,20 @@ func _show_fork_screen(fork_data: Dictionary) -> void:
 	_video.paused = true
 	FunscriptPlayer.Pause()
 	var fork_screen = ForkScene.instantiate()
+	fork_screen.show_map_button = _map_enabled
 	fork_screen.path_chosen.connect(_on_fork_path_chosen)
+	fork_screen.map_requested.connect(_open_map_viewer)
 	add_child(fork_screen)
 	_current_overlay = fork_screen
 	fork_screen.setup(fork_data)
 
 	# Auto-resolved fork types pick a path and play a reveal instead of waiting
 	# for the player. (Sacrifice stays interactive — the player picks & pays.)
-	match fork_data.get("resolution", "choice"):
+	var resolution: String = fork_data.get("resolution", "choice")
+	# Interactive forks let the player consult the journey map mid-decision; the
+	# auto-resolving reveals run on timers, so the map stays suppressed there.
+	_overlay_map_allowed = resolution != "random" and resolution != "conditional"
+	match resolution:
 		"random":
 			fork_screen.reveal(_weighted_random_path(fork_data.get("paths", [])))
 		"conditional":
@@ -395,6 +431,7 @@ func _conditional_caption(fork_data: Dictionary) -> String:
 
 func _on_fork_path_chosen(path_index: int) -> void:
 	_is_overlay_open = false
+	_overlay_map_allowed = false
 	GameState.ResolveFork(path_index)
 	await _transition_swap(func() -> void:
 		_video.paused = false
@@ -1420,6 +1457,7 @@ func _transition_swap(swap_action: Callable) -> void:
 	# black clears; it's faded back in below once we land on a round.
 	_hud.modulate.a = 0.0
 
+	# Hold on the black, then run the swap so the next round's video loads behind it.
 	await get_tree().create_timer(TRANSITION_HOLD_TIME).timeout
 	swap_action.call()
 
@@ -1459,6 +1497,139 @@ func _free_current_overlay() -> void:
 	if is_instance_valid(_current_overlay):
 		_current_overlay.queue_free()
 	_current_overlay = null
+
+
+# ---------------------------------------------------------------------------
+# Journey map — read-only GraphView of the authored graph with a "you are here"
+# marker. Opened on demand: the HUD ◇ MAP button, the M key, or the map button on
+# a shop / storyboard / interactive-fork overlay. Availability is authored per
+# journey (_map_enabled); a journey can hide it to keep its layout a surprise.
+# ---------------------------------------------------------------------------
+
+# Builds the persistent map (hidden) on its own CanvasLayer, plus the HUD map
+# button. Self-contained: reads the journey accent locally. Skipped entirely when
+# the author has disabled the map for this journey — _map_view stays null, so
+# _open_map_viewer no-ops and the overlay map buttons aren't shown.
+func _build_map() -> void:
+	if not _map_enabled:
+		return
+	var accent: Color = UITheme.PURPLE_BRIGHT
+
+	var layer: CanvasLayer = CanvasLayer.new()
+	layer.layer = 2  # above TransitionLayer (1) and the overlays, so the map sits on top
+	add_child(layer)
+
+	_map_overlay = Control.new()
+	_map_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_map_overlay.visible = false
+	layer.add_child(_map_overlay)
+
+	var backdrop: ColorRect = ColorRect.new()
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.color = Color(0.0, 0.0, 0.0, 0.85)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP  # block clicks reaching the game
+	_map_overlay.add_child(backdrop)
+
+	_map_view = GraphViewScene.instantiate()
+	_map_view.map_mode = true
+	_map_view.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_map_view.offset_top = 56; _map_view.offset_bottom = -16
+	_map_view.offset_left = 16; _map_view.offset_right = -16
+	_map_overlay.add_child(_map_view)
+	_map_view.set_marker_color(accent)
+	_map_view.set_items(JourneyData.parse_journey(GameState.Journey).get("items", []) as Array)
+
+	var title: Label = Label.new()
+	title.text = "◇  JOURNEY MAP"
+	title.add_theme_color_override("font_color", accent)
+	title.add_theme_font_size_override("font_size", 18)
+	title.position = Vector2(22, 16)
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_map_overlay.add_child(title)
+
+	var hint: Label = Label.new()
+	hint.text = "DRAG TO PAN  ·  SCROLL TO ZOOM  ·  ESC TO CLOSE"
+	hint.add_theme_color_override("font_color", UITheme.DARK_TEXT)
+	hint.add_theme_font_size_override("font_size", 11)
+	hint.position = Vector2(24, 39)
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_map_overlay.add_child(hint)
+
+	_map_close_btn = Button.new()
+	_map_close_btn.text = "✕ CLOSE"
+	_map_close_btn.focus_mode = Control.FOCUS_NONE
+	_style_button(_map_close_btn, UITheme.MAGENTA)
+	_map_close_btn.anchor_left = 1.0; _map_close_btn.anchor_right = 1.0
+	_map_close_btn.offset_left = -132; _map_close_btn.offset_right = -16
+	_map_close_btn.offset_top = 14;   _map_close_btn.offset_bottom = 48
+	_map_close_btn.pressed.connect(_close_map_viewer)
+	_map_overlay.add_child(_map_close_btn)
+
+	# HUD map button, inserted before the inventory button.
+	var map_btn: Button = Button.new()
+	map_btn.text = "◇ MAP"
+	map_btn.focus_mode = Control.FOCUS_NONE
+	map_btn.tooltip_text = "View the journey map (M)"
+	_style_button(map_btn, accent)
+	_hud_layout.add_child(map_btn)
+	_hud_layout.move_child(map_btn, _inv_btn.get_index())
+	map_btn.pressed.connect(_on_map_pressed)
+	map_btn.mouse_entered.connect(_show_hud)
+
+
+# Stable map key for the CURRENT sequence item — mirrors JourneyData's _map_key
+# stamping so the marker can find the node.
+func _current_map_key() -> String:
+	match GameState.CurrentItemType():
+		"round":      return JourneyData.map_key("round", str(GameState.CurrentRound().get("folder", "")))
+		"shop":       return JourneyData.map_key("shop", GameState.CurrentShop().get("after_order", 0))
+		"storyboard": return JourneyData.map_key("storyboard", GameState.CurrentStoryboard().get("order", 0))
+		"fork":       return JourneyData.map_key("fork", GameState.CurrentFork().get("after_order", 0))
+	return ""
+
+
+func _on_map_pressed() -> void:
+	if _map_open:
+		_close_map_viewer()
+	else:
+		_open_map_viewer()
+
+
+func _open_map_viewer() -> void:
+	if _map_open or _map_view == null:
+		return
+	_map_open = true
+	# Suspend the underlying overlay's input so a click/key meant for the map can't
+	# leak through to it (shop/storyboard handle raw _input, which a backdrop's
+	# mouse_filter does NOT block). The map's own modal handling stays in GameLoop.
+	_set_overlay_input_enabled(false)
+	_map_close_btn.visible = true
+	var key: String = _current_map_key()
+	_map_view.set_marker_at(key)
+	_map_view.center_on(key)
+	_map_overlay.modulate.a = 0.0
+	_map_overlay.visible = true
+	create_tween().tween_property(_map_overlay, "modulate:a", 1.0, 0.18)
+
+
+func _close_map_viewer() -> void:
+	if not _map_open:
+		return
+	_map_open = false
+	# Hand input back to the overlay (shop / storyboard / fork) underneath.
+	_set_overlay_input_enabled(true)
+	var t: Tween = create_tween()
+	t.tween_property(_map_overlay, "modulate:a", 0.0, 0.15)
+	await t.finished
+	_map_overlay.visible = false
+
+
+# Suspends or restores the active overlay's input callbacks while the map is open.
+# No-op outside an overlay (plain in-round map open) — _current_overlay is null then.
+func _set_overlay_input_enabled(enabled: bool) -> void:
+	if is_instance_valid(_current_overlay):
+		_current_overlay.set_process_input(enabled)
+		_current_overlay.set_process_unhandled_input(enabled)
 
 
 func _go_to_menu() -> void:
@@ -1734,7 +1905,20 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		var key_event := event as InputEventKey
 		if key_event.pressed and not key_event.echo:
+			# Map viewer is modal while open: Esc / M close it; swallow the rest.
+			if _map_open:
+				if key_event.keycode == KEY_ESCAPE or key_event.keycode == KEY_M:
+					_close_map_viewer()
+				get_viewport().set_input_as_handled()
+				return
 			match key_event.keycode:
+				KEY_M:
+					# M: open the journey map (when the author enabled it). Blocked while a
+					# full-screen overlay is up, except shops / storyboards / interactive
+					# forks, which allow it.
+					if _map_enabled and (not _is_overlay_open or _overlay_map_allowed):
+						_open_map_viewer()
+						get_viewport().set_input_as_handled()
 				KEY_SPACE:
 					# Space: pause / resume — blocked while a full-screen overlay is open
 					# (shop / fork / storyboard handles its own input first).

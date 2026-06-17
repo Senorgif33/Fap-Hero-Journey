@@ -1,6 +1,7 @@
 extends Control
 
 signal path_chosen(index: int)
+signal map_requested  # player tapped the in-fork "◇ MAP" button (GameLoop owns the map)
 
 @onready var _backdrop:   ColorRect    = $Backdrop
 @onready var _center_box: VBoxContainer = $CenterBox
@@ -15,6 +16,7 @@ var _paths:          Array = []  # the fork's path data dicts
 var _resolution:     String = "choice"  # how this fork resolves
 var _cond_metric:    String = "score"   # conditional metric (score/coins/item)
 var _default_path:   int    = 0          # conditional fallback path index
+var show_map_button: bool   = true       # GameLoop clears this when the journey hides the map
 
 
 func _ready() -> void:
@@ -40,6 +42,12 @@ func setup(fork_data: Dictionary) -> void:
 		var card: Control = _make_card(i, path_data)
 		_cards.append(card)
 		_cards_row.add_child(card)
+
+	# Interactive forks (player choice / sacrifice) let the player consult the
+	# journey map before committing. Auto-resolving forks play a reveal on timers
+	# instead, so the button is omitted there (GameLoop also blocks the M key).
+	if _resolution != "random" and _resolution != "conditional":
+		_add_map_button()
 
 
 func _make_card(index: int, path_data: Dictionary) -> Control:
@@ -341,6 +349,24 @@ func _path_display_name(index: int) -> String:
 		if n != "":
 			return n
 	return "Path %d" % (index + 1)
+
+
+# A small top-right "◇ MAP" button so the player can open the read-only journey
+# map while deciding which path to take. GameLoop owns the map, so we just emit a
+# request and let it open the viewer over this screen.
+func _add_map_button() -> void:
+	if not show_map_button:
+		return
+	var btn: Button = Button.new()
+	btn.text = "◇ MAP"
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.tooltip_text = "View the journey map (M)"
+	_style_button(btn, UITheme.PURPLE_BRIGHT)
+	btn.anchor_left = 1.0; btn.anchor_right = 1.0
+	btn.offset_left = -132; btn.offset_right = -16
+	btn.offset_top  = 16;   btn.offset_bottom = 50
+	btn.pressed.connect(func() -> void: emit_signal("map_requested"))
+	add_child(btn)
 
 
 func _apply_layout() -> void:

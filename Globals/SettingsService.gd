@@ -109,6 +109,14 @@ func get_range_min() -> int:
 func get_range_max() -> int:
 	return int(_config.get_value("device", "range_max", DEFAULT_RANGE_MAX))
 
+# Per-axis range for the secondary positional axes (T-code L1/L2/R0/R1/R2). Each
+# axis has its own [min,max] travel window; the stroke axis uses range_min/range_max.
+func get_axis_range_min(axis: String) -> int:
+	return int(_config.get_value("device", "axis_%s_range_min" % axis, DEFAULT_RANGE_MIN))
+
+func get_axis_range_max(axis: String) -> int:
+	return int(_config.get_value("device", "axis_%s_range_max" % axis, DEFAULT_RANGE_MAX))
+
 func get_home_position() -> int:
 	return int(_config.get_value("device", "home_position", DEFAULT_HOME_POSITION))
 
@@ -248,6 +256,12 @@ func set_range_min(value: int) -> void:
 
 func set_range_max(value: int) -> void:
 	_config.set_value("device", "range_max", value)
+
+func set_axis_range_min(axis: String, value: int) -> void:
+	_config.set_value("device", "axis_%s_range_min" % axis, value)
+
+func set_axis_range_max(axis: String, value: int) -> void:
+	_config.set_value("device", "axis_%s_range_max" % axis, value)
 
 func set_home_position(value: int) -> void:
 	_config.set_value("device", "home_position", value)

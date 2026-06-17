@@ -3,6 +3,7 @@ using Buttplug.Client;
 using Buttplug.Core.Messages;
 using System;
 using System.Linq;
+using System.Threading.Tasks;
 
 public partial class ButtplugService : Node
 {
@@ -14,6 +15,12 @@ public partial class ButtplugService : Node
 	[Signal] public delegate void ErrorOccurredEventHandler(string message);
 
 	public const string DefaultAddress = "ws://localhost:12345";
+
+	// How long to wait for the connect + Buttplug handshake before giving up. On
+	// some machines the handshake stalls (the websocket opens but RequestServerInfo
+	// never completes); the timeout turns that into a clear error + clean retry
+	// instead of a silent hang that Intiface eventually drops on its keepalive.
+	private const int ConnectTimeoutMs = 10000;
 
 	private ButtplugClient _client;
 
@@ -31,31 +38,69 @@ public partial class ButtplugService : Node
 
 	public async void ConnectToIntiface(string address)
 	{
-		if (_client?.Connected == true)
+		// Tear down any previous client first so a retry always starts clean. Do
+		// NOT await DisconnectAsync on a possibly half-dead socket (it can hang) —
+		// unsubscribe, fire-and-forget the disconnect, and drop the reference. While
+		// _client is null the other methods (StartScan / SendLinear / …) no-op safely.
+		if (_client != null)
 		{
-			_client.DeviceAdded -= OnDeviceAdded;
-			_client.DeviceRemoved -= OnDeviceRemoved;
-			_client.ScanningFinished -= OnScanFinished;
-			_client.ServerDisconnect -= OnServerDisconnect;
-			await _client.DisconnectAsync();
+			var old = _client;
+			_client = null;
+			old.DeviceAdded -= OnDeviceAdded;
+			old.DeviceRemoved -= OnDeviceRemoved;
+			old.ScanningFinished -= OnScanFinished;
+			old.ServerDisconnect -= OnServerDisconnect;
+			try { _ = old.DisconnectAsync(); } catch { /* best effort */ }
 		}
+
+		var client = new ButtplugClient("Fap Hero Journey");
+		client.DeviceAdded += OnDeviceAdded;
+		client.DeviceRemoved += OnDeviceRemoved;
+		client.ScanningFinished += OnScanFinished;
+		client.ServerDisconnect += OnServerDisconnect;
 
 		try
 		{
-			_client = new ButtplugClient("Fap Hero Journey");
-			_client.DeviceAdded += OnDeviceAdded;
-			_client.DeviceRemoved += OnDeviceRemoved;
-			_client.ScanningFinished += OnScanFinished;
-			_client.ServerDisconnect += OnServerDisconnect;
-
 			var connector = new ButtplugWebsocketConnector(new Uri(address));
-			await _client.ConnectAsync(connector);
+			// Run the connect + handshake on a thread-pool thread so it never depends
+			// on Godot's main-thread SynchronizationContext pumping continuations —
+			// that stall is what hangs the handshake (websocket opens but
+			// RequestServerInfo never sends) on some machines. WaitAsync enforces the
+			// timeout so a stall surfaces as an error rather than hanging forever.
+			// ConfigureAwait(false): resume the continuation off the Godot context too,
+			// so even setting _client / emitting the signal never waits on the main
+			// thread. EmitSignal is marshalled back via CallDeferred (thread-safe).
+			await Task.Run(() => client.ConnectAsync(connector))
+				.WaitAsync(TimeSpan.FromMilliseconds(ConnectTimeoutMs))
+				.ConfigureAwait(false);
+
+			_client = client;
 			Callable.From(() => EmitSignal(SignalName.Connected)).CallDeferred();
+		}
+		catch (TimeoutException)
+		{
+			_CleanupFailedClient(client);
+			Callable.From(() => EmitSignal(SignalName.ErrorOccurred,
+				"Connection timed out — Intiface accepted the connection but the handshake didn't finish. Try Connect again, or restart Intiface.")).CallDeferred();
 		}
 		catch (Exception e)
 		{
+			_CleanupFailedClient(client);
 			Callable.From(() => EmitSignal(SignalName.ErrorOccurred, e.Message)).CallDeferred();
 		}
+	}
+
+	// Unhooks and disposes a client that failed to connect, so a retry isn't left
+	// fighting a half-open socket / orphaned receive loop.
+	private void _CleanupFailedClient(ButtplugClient client)
+	{
+		client.DeviceAdded -= OnDeviceAdded;
+		client.DeviceRemoved -= OnDeviceRemoved;
+		client.ScanningFinished -= OnScanFinished;
+		client.ServerDisconnect -= OnServerDisconnect;
+		try { _ = client.DisconnectAsync(); } catch { /* best effort */ }
+		if (_client == client)
+			_client = null;
 	}
 
 	public async void DisconnectFromIntiface()

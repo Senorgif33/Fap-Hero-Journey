@@ -67,6 +67,7 @@ var _journey_author:         String = ""
 var _journey_desc:           String = ""
 var _journey_difficulty_idx: int    = 0
 var _journey_tags:           Array  = []  # Array[String] of tag ids (see TagRegistry)
+var _journey_map_enabled:    bool   = true  # author allows the in-play journey map (off = enforce surprise)
 
 # Folder the journey was loaded from when editing. If the journey is renamed,
 # the save writes a new folder; this lets us delete the stale original.
@@ -1450,6 +1451,7 @@ func _load_journey(journey: Dictionary) -> void:
 	_journey_desc           = parsed["description"]
 	_journey_difficulty_idx = parsed["difficulty_idx"]
 	_journey_tags           = (parsed.get("tags", []) as Array).duplicate()
+	_journey_map_enabled    = bool(parsed.get("map_enabled", true))
 	if (parsed["cover_path"] as String) != "":
 		_cover_path = parsed["cover_path"]
 		_update_cover_preview()
@@ -1515,25 +1517,35 @@ func _save_and_test_from(item: Dictionary, arr: Array) -> void:
 
 # Resolves a selected node to a test-play location: a chain of fork decisions
 # from the top level down to the node's containing array, plus the node's
-# position within that array. Returns {} if the node can't be found. Positions
-# are runtime-sequence positions (see _seq_pos_in_level), not raw array indices.
+# position within that array. Returns {} if the node can't be found.
+#
+# Positions are plain ARRAY INDICES. The save writes every item with a unique,
+# strictly-increasing position in array order (see _save_all_items / _save_path:
+# `pos`/`pr_pos` += 1 per item, key = pos*3 [+1 shop / +2 fork]), and
+# GameState.BuildSequence sorts by that exact key scheme — so the runtime
+# sequence preserves authoring order 1:1 and an item's runtime position IS its
+# array index. (Previously this used a separate "anchor shops/forks to the
+# previous round" ranking that diverged from the monotonic save — it skipped a
+# fork that was immediately followed by a shop, so Test-From-Here inside that
+# fork's path seeked past the fork to the step after the join.)
 func _locate_node_for_test(target_arr: Array, target_item: Dictionary) -> Dictionary:
 	var raw_final: int = _index_in_arr(target_arr, target_item)
 	if raw_final < 0:
 		return {}
-	var final_pos: int = _seq_pos_in_level(target_arr, raw_final)
 	if is_same(target_arr, _items):
-		return {"chain": [], "final": final_pos}
+		return {"chain": [], "final": raw_final}
 	var chain: Array = []
 	if _find_arr_chain(_items, target_arr, chain):
-		return {"chain": chain, "final": final_pos}
+		return {"chain": chain, "final": raw_final}
 	return {}
 
 
 # Depth-first search for `target_arr` among the fork paths reachable from
 # `level_items`. On success, `chain` is filled (outermost first) with
-# [fork_seq_pos, path_idx] entries describing the descent and returns true.
-# fork_seq_pos is the fork's position in its level's runtime sequence.
+# [fork_array_idx, path_idx] entries describing the descent and returns true.
+# A fork's runtime-sequence position equals its array index (the monotonic save
+# preserves authoring order 1:1 — see _locate_node_for_test), so the loop index
+# `li` is exactly the seek position the fork lands at.
 func _find_arr_chain(level_items: Array, target_arr: Array, chain: Array) -> bool:
 	for li in level_items.size():
 		var it: Dictionary = level_items[li]
@@ -1543,40 +1555,9 @@ func _find_arr_chain(level_items: Array, target_arr: Array, chain: Array) -> boo
 		for p in paths.size():
 			var path_items: Array = (paths[p] as Dictionary).get("items", [])
 			if is_same(path_items, target_arr) or _find_arr_chain(path_items, target_arr, chain):
-				chain.push_front([_seq_pos_in_level(level_items, li), p])
+				chain.push_front([li, p])
 				return true
 	return false
-
-
-# Position of items[raw_idx] within its level's runtime sequence. The runtime
-# orders a level by sort key — round/storyboard = order*3, shop = after*3+1,
-# fork = after*3+2 (see GameState.BuildSequence / ResolveFork and the _save_path
-# scheme) — which can differ from authoring order (e.g. a shop authored right
-# after a fork sorts ahead of it). Replicating that here keeps the seek correct
-# regardless of how the level was authored. Ties break by authoring order.
-func _seq_pos_in_level(items: Array, raw_idx: int) -> int:
-	var keyed: Array = []  # [[sort_key, raw_i], …]
-	var order: int = 0
-	var last_order: int = 0
-	for i in items.size():
-		var t: String = (items[i] as Dictionary).get("type", "round")
-		var key: int
-		match t:
-			"shop":
-				key = last_order * 3 + 1
-			"fork":
-				key = last_order * 3 + 2
-			_:  # round or storyboard — both advance the order counter
-				order += 1
-				last_order = order
-				key = order * 3
-		keyed.append([key, i])
-	keyed.sort_custom(func(a: Array, b: Array) -> bool:
-		return a[0] < b[0] if a[0] != b[0] else a[1] < b[1])
-	for pos in keyed.size():
-		if int(keyed[pos][1]) == raw_idx:
-			return pos
-	return raw_idx
 
 
 # Parses the just-saved journey back into the runtime model (same path the
@@ -2061,6 +2042,7 @@ func _save_all_items(paths: Dictionary, modal: Control) -> Dictionary:
 		"Description": _journey_desc.strip_edges(),
 		"Difficulty":  JourneyData.DIFFICULTIES[_journey_difficulty_idx],
 		"Tags":        TagRegistry.sanitize(_journey_tags),
+		"MapEnabled":  _journey_map_enabled,
 		"Rounds":      rounds_json,
 		"Forks":       forks_json,
 		"Shops":       shops_json,

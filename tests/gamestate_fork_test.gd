@@ -47,6 +47,32 @@ func test_build_sequence_ordering() -> void:
 	assert_bool(GameState.IsSequenceDone()).is_true()
 
 
+# A fork authored before a shop keeps that order at runtime — the exact case that
+# broke "Test From Here". Under the monotonic save every item gets a unique,
+# increasing position (round 1, fork 2, shop 3), so the fork's key (2*3+2 = 8)
+# sorts before the shop's (3*3+1 = 10): the fork lands at sequence index 1, the
+# shop at 2. (The old "anchor shops/forks to the previous round" scheme gave both
+# the same anchor and sorted the shop's +1 ahead of the fork's +2, reordering
+# them.) Guards the "runtime position == authoring/array index" invariant that
+# _locate_node_for_test relies on to seek into a fork's path.
+func test_fork_before_shop_keeps_authoring_order() -> void:
+	GameState.StartJourney({
+		"rounds": [_round(1, "A")],
+		"forks": [_fork(2, "F", [_path("P0", [_round(0, "X")])])],
+		"shops": [{"after_order": 3, "title": "S"}],
+		"storyboards": [],
+	})
+	assert_str(GameState.CurrentItemType()).is_equal("round")       # index 0
+	assert_str(GameState.CurrentRound()["name"]).is_equal("A")
+	GameState.Advance()
+	assert_int(GameState.RoundIndex).is_equal(1)                    # fork at index 1…
+	assert_str(GameState.CurrentItemType()).is_equal("fork")        # …NOT the shop
+	assert_str(GameState.CurrentFork()["title"]).is_equal("F")
+	GameState.Advance()
+	assert_str(GameState.CurrentItemType()).is_equal("shop")        # index 2
+	assert_str(GameState.CurrentShop()["title"]).is_equal("S")
+
+
 # Before resolution, only the top-level round counts toward TotalRounds.
 func test_fork_unresolved_round_counts() -> void:
 	GameState.StartJourney(_fork_journey())

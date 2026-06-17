@@ -15,6 +15,9 @@ addons/ffmpeg/**/~*.dll
 addons/ffmpeg/**/~*.dll~*
 addons/ffmpeg/**/~*.TMP
 addons/ffmpeg/**/~*.tmp
+# gdUnit4 test framework — not committed; CI installs v6.1.3, devs install it locally.
+addons/gdUnit4/
+addons/.gdunit_update/
 Thumbs.db
 ehthumbs.db
 Desktop.ini

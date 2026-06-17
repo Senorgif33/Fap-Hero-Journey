@@ -65,6 +65,9 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		"description":     data.get("Description", ""),
 		"difficulty":      data.get("Difficulty", "Unknown"),
 		"author":          data.get("Author", "Unknown"),
+		# Journey-level: author can disable the player map to enforce surprise.
+		# Absent → true so the whole pre-existing catalogue keeps the map.
+		"map_enabled":     bool(data.get("MapEnabled", true)),
 		"rounds":          [],
 		"forks":           [],
 		"shops":           [],

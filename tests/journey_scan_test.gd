@@ -104,6 +104,16 @@ func test_top_level_fields() -> void:
 	assert_str(j.difficulty).is_equal("Hard")
 	assert_str(j.description).is_equal("a description")
 	assert_int(j.total_rounds).is_equal(3)  # 2 top-level + 1 in the longest fork path
+	assert_bool(j.map_enabled).is_true()    # omitted MapEnabled → default true (back-compat)
+
+
+# The journey-level map switch round-trips. Authors set MapEnabled:false to hide
+# the in-play journey map (enforce surprise); test_top_level_fields covers the
+# omitted → true default that keeps the pre-existing catalogue's map.
+func test_map_enabled_round_trips() -> void:
+	var d := _full_journey()
+	d["MapEnabled"] = false
+	assert_bool(_parse(d).map_enabled).is_false()
 
 
 # The cursed round's full authored field set survives the round-trip.

@@ -55,6 +55,12 @@ public partial class FunscriptPlayer : Node
     private int _rangeMin = 0;
     private int _rangeMax = 100;
 
+    // Per-axis range window for the secondary positional axes (L1/L2/R0/R1/R2),
+    // independent of the stroke axis [_rangeMin,_rangeMax]. Seeded in ResolveOutput,
+    // updated live by SetAxisRangeClamp. A missing axis falls back to full 0–100.
+    private readonly System.Collections.Generic.Dictionary<string, (int Min, int Max)> _axisRanges =
+        new System.Collections.Generic.Dictionary<string, (int Min, int Max)>();
+
     // Storyboard filler — alternating stroke played while a storyboard screen is
     // open so the device doesn't sit idle. Independent of _playing / the funscript.
     private bool _fillerActive = false;
@@ -118,6 +124,14 @@ public partial class FunscriptPlayer : Node
         _rangeMin = min;
         _rangeMax = max;
     }
+
+    /// Live per-axis range update for one secondary positional axis (Options slider),
+    /// mirroring SetRangeClamp for the stroke axis. `axis` is a T-code name (L1/R0/…).
+    public void SetAxisRangeClamp(string axis, int min, int max) => _axisRanges[axis] = (min, max);
+
+    // Current range window for a secondary axis; full 0–100 (no limiting) until seeded.
+    private (int Min, int Max) GetAxisRange(string axis) =>
+        _axisRanges.TryGetValue(axis, out var r) ? r : (0, 100);
 
     public void LoadFunscript(string path)
     {
@@ -568,9 +582,17 @@ public partial class FunscriptPlayer : Node
                             if (idx + 1 < state.Actions.Count)
                             {
                                 int nextPos = state.Actions[idx + 1].Pos;
+                                // Each secondary axis has its OWN range window, independent of the
+                                // stroke axis. RESCALE 0–100 → [axisMin,axisMax] so a symmetric
+                                // range compresses the swing around centre. Before the ease, then a
+                                // safety clamp — mirrors SendCommand's order.
+                                (int axisMin, int axisMax) = GetAxisRange(axis);
+                                nextPos = RescaleToAxisRange(nextPos, axisMin, axisMax);
                                 // Secondary axes always home to centre (50), so blend from 50.
                                 if (_easing || easeSmooth < 1f)
                                     nextPos = (int)Math.Round(50f + (nextPos - 50f) * easeSmooth);
+                                // Safety net: never send out-of-window (mirrors SendCommand).
+                                nextPos = Math.Clamp(nextPos, axisMin, axisMax);
 
                                 double targetNorm = nextPos / 100.0;
                                 uint durMs = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
@@ -689,6 +711,13 @@ public partial class FunscriptPlayer : Node
         // Cache device range limits so SendCommand doesn't hit disk per-action.
         _rangeMin = _settings.Call("get_range_min").AsInt32();
         _rangeMax = _settings.Call("get_range_max").AsInt32();
+
+        // Seed each secondary positional axis's own range window (SetAxisRangeClamp
+        // overrides live from Options). KnownAxes = the T-code names we dispatch.
+        foreach (var axis in KnownAxes)
+            _axisRanges[axis] = (
+                _settings.Call("get_axis_range_min", axis).AsInt32(),
+                _settings.Call("get_axis_range_max", axis).AsInt32());
 
         // Cache home-position config. SetHomePosition() can override these live
         // (called by Options on every slider change), but we also read them here
@@ -884,6 +913,15 @@ public partial class FunscriptPlayer : Node
     {
         double n = Math.Clamp(pos, 0, 100) / 100.0;
         return (int)Math.Round(_rangeMin + (_rangeMax - _rangeMin) * n);
+    }
+
+    // Per-axis variant of RescaleToRange: maps a 0–100 script position into a
+    // secondary axis's own [min,max] window. Lets each positional axis have an
+    // independent travel range (see the multi-axis dispatch in _Process).
+    private static int RescaleToAxisRange(int pos, int min, int max)
+    {
+        double n = Math.Clamp(pos, 0, 100) / 100.0;
+        return (int)Math.Round(min + (max - min) * n);
     }
 
     private int TransformPos(int index, Godot.Collections.Array effects)

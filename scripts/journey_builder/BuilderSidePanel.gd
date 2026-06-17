@@ -257,6 +257,19 @@ func show_journey_info_panel() -> void:
 
 	side_vbox.add_child(_side_section_separator())
 
+	# Player map — author switch. Off enforces "surprise": the player can't open
+	# the in-play journey map (◇ MAP / M) for this journey.
+	side_vbox.add_child(_side_field_label("PLAYER MAP"))
+	var map_toggle: CheckButton = CheckButton.new()
+	map_toggle.text = "ALLOW JOURNEY MAP"
+	map_toggle.tooltip_text = "Let the player open the read-only journey map during play (◇ MAP button / M key). Turn off to keep the journey's layout a surprise."
+	map_toggle.add_theme_font_size_override("font_size", 12)
+	map_toggle.button_pressed = _owner._journey_map_enabled
+	map_toggle.toggled.connect(func(on: bool) -> void: _owner._journey_map_enabled = on)
+	side_vbox.add_child(map_toggle)
+
+	side_vbox.add_child(_side_section_separator())
+
 	# Bulk-import discoverability hint.
 	var bulk_hint: Label = Label.new()
 	bulk_hint.text = "TIP: DROP VIDEOS + FUNSCRIPTS — OR A WHOLE FOLDER — ON THE GRAPH TO AUTO-CREATE ROUNDS (MATCHED BY FILE NAME)."

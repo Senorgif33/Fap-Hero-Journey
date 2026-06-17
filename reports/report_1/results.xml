@@ -1,90 +1,94 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<testsuites id="2026-06-15" name="report_1" tests="57" failures="0" skipped="0" flaky="0" time="0.000">
-	<testsuite id="0" name="catalog_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="5" failures="0" errors="0" skipped="0" flaky="0" time="0.020">
-		<testcase name="test_sensory_intensity_fields" classname="catalog_test" time="0.004">
+<testsuites id="2026-06-16" name="report_1" tests="59" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="catalog_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="5" failures="0" errors="0" skipped="0" flaky="0" time="0.019">
+		<testcase name="test_sensory_intensity_fields" classname="catalog_test" time="0.003">
 		</testcase>
 		<testcase name="test_idef_normalized" classname="catalog_test" time="0.002">
 		</testcase>
 		<testcase name="test_audio_kinds_subset" classname="catalog_test" time="0.002">
 		</testcase>
-		<testcase name="test_names_unique_across_catalogs" classname="catalog_test" time="0.003">
+		<testcase name="test_names_unique_across_catalogs" classname="catalog_test" time="0.001">
 		</testcase>
-		<testcase name="test_entries_have_kind_and_name" classname="catalog_test" time="0.002">
+		<testcase name="test_entries_have_kind_and_name" classname="catalog_test" time="0.003">
 		</testcase>
 	</testsuite>
-	<testsuite id="1" name="fork_resolver_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="12" failures="0" errors="0" skipped="0" flaky="0" time="0.077">
+	<testsuite id="1" name="fork_resolver_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="12" failures="0" errors="0" skipped="0" flaky="0" time="0.078">
 		<testcase name="test_weighted_pick_brackets" classname="fork_resolver_test" time="0.002">
 		</testcase>
 		<testcase name="test_weighted_pick_single_and_empty" classname="fork_resolver_test" time="0.002">
 		</testcase>
-		<testcase name="test_weighted_pick_skips_zero_weights" classname="fork_resolver_test" time="0.004">
+		<testcase name="test_weighted_pick_skips_zero_weights" classname="fork_resolver_test" time="0.003">
 		</testcase>
 		<testcase name="test_conditional_highest_met_threshold_wins" classname="fork_resolver_test" time="0.006">
 		</testcase>
-		<testcase name="test_conditional_coins_metric_uses_thresholds" classname="fork_resolver_test" time="0.007">
+		<testcase name="test_conditional_coins_metric_uses_thresholds" classname="fork_resolver_test" time="0.006">
 		</testcase>
-		<testcase name="test_conditional_no_match_uses_default" classname="fork_resolver_test" time="0.007">
+		<testcase name="test_conditional_no_match_uses_default" classname="fork_resolver_test" time="0.006">
 		</testcase>
 		<testcase name="test_conditional_item_picks_first_owned" classname="fork_resolver_test" time="0.006">
 		</testcase>
 		<testcase name="test_conditional_empty_paths" classname="fork_resolver_test" time="0.007">
 		</testcase>
-		<testcase name="test_affordable_free_path" classname="fork_resolver_test" time="0.007">
+		<testcase name="test_affordable_free_path" classname="fork_resolver_test" time="0.006">
 		</testcase>
-		<testcase name="test_affordable_coin_cost" classname="fork_resolver_test" time="0.005">
+		<testcase name="test_affordable_coin_cost" classname="fork_resolver_test" time="0.006">
 		</testcase>
 		<testcase name="test_affordable_required_item" classname="fork_resolver_test" time="0.006">
 		</testcase>
 		<testcase name="test_affordable_coins_and_item" classname="fork_resolver_test" time="0.007">
 		</testcase>
 	</testsuite>
-	<testsuite id="2" name="gamestate_fork_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="7" failures="0" errors="0" skipped="0" flaky="0" time="0.051">
+	<testsuite id="2" name="gamestate_fork_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="8" failures="0" errors="0" skipped="0" flaky="0" time="0.056">
 		<testcase name="test_build_sequence_ordering" classname="gamestate_fork_test" time="0.009">
 		</testcase>
-		<testcase name="test_fork_unresolved_round_counts" classname="gamestate_fork_test" time="0.004">
+		<testcase name="test_fork_before_shop_keeps_authoring_order" classname="gamestate_fork_test" time="0.003">
 		</testcase>
-		<testcase name="test_resolve_fork_splices_chosen_path" classname="gamestate_fork_test" time="0.003">
+		<testcase name="test_fork_unresolved_round_counts" classname="gamestate_fork_test" time="0.002">
 		</testcase>
-		<testcase name="test_resolve_fork_path_selection_and_clamp" classname="gamestate_fork_test" time="0.005">
+		<testcase name="test_resolve_fork_splices_chosen_path" classname="gamestate_fork_test" time="0.006">
 		</testcase>
-		<testcase name="test_nested_fork_depth" classname="gamestate_fork_test" time="0.007">
+		<testcase name="test_resolve_fork_path_selection_and_clamp" classname="gamestate_fork_test" time="0.006">
+		</testcase>
+		<testcase name="test_nested_fork_depth" classname="gamestate_fork_test" time="0.006">
 		</testcase>
 		<testcase name="test_save_restores_spliced_sequence" classname="gamestate_fork_test" time="0.006">
 		</testcase>
 		<testcase name="test_current_accessors" classname="gamestate_fork_test" time="0.006">
 		</testcase>
 	</testsuite>
-	<testsuite id="3" name="journey_build_roundtrip_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="3" failures="0" errors="0" skipped="0" flaky="0" time="0.017">
+	<testsuite id="3" name="journey_build_roundtrip_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="3" failures="0" errors="0" skipped="0" flaky="0" time="0.020">
 		<testcase name="test_round_to_json_shape" classname="journey_build_roundtrip_test" time="0.002">
 		</testcase>
-		<testcase name="test_authored_roundtrip" classname="journey_build_roundtrip_test" time="0.004">
+		<testcase name="test_authored_roundtrip" classname="journey_build_roundtrip_test" time="0.007">
 		</testcase>
 		<testcase name="test_defaults_roundtrip" classname="journey_build_roundtrip_test" time="0.004">
 		</testcase>
 	</testsuite>
-	<testsuite id="4" name="journey_scan_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="10" failures="0" errors="0" skipped="0" flaky="0" time="0.066">
-		<testcase name="test_top_level_fields" classname="journey_scan_test" time="0.004">
+	<testsuite id="4" name="journey_scan_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="11" failures="0" errors="0" skipped="0" flaky="0" time="0.079">
+		<testcase name="test_top_level_fields" classname="journey_scan_test" time="0.009">
 		</testcase>
-		<testcase name="test_cursed_round_fields" classname="journey_scan_test" time="0.005">
+		<testcase name="test_map_enabled_round_trips" classname="journey_scan_test" time="0.005">
 		</testcase>
-		<testcase name="test_boss_round_fields_and_show_reveal_default" classname="journey_scan_test" time="0.003">
+		<testcase name="test_cursed_round_fields" classname="journey_scan_test" time="0.004">
 		</testcase>
-		<testcase name="test_fork_resolution_fields" classname="journey_scan_test" time="0.003">
+		<testcase name="test_boss_round_fields_and_show_reveal_default" classname="journey_scan_test" time="0.004">
+		</testcase>
+		<testcase name="test_fork_resolution_fields" classname="journey_scan_test" time="0.007">
 		</testcase>
 		<testcase name="test_fork_path_round_fields" classname="journey_scan_test" time="0.006">
 		</testcase>
-		<testcase name="test_nested_fork" classname="journey_scan_test" time="0.006">
+		<testcase name="test_nested_fork" classname="journey_scan_test" time="0.007">
 		</testcase>
 		<testcase name="test_shop_fields" classname="journey_scan_test" time="0.006">
 		</testcase>
-		<testcase name="test_storyboard_fields" classname="journey_scan_test" time="0.006">
+		<testcase name="test_storyboard_fields" classname="journey_scan_test" time="0.007">
 		</testcase>
 		<testcase name="test_missing_journey_returns_empty" classname="journey_scan_test" time="0.007">
 		</testcase>
 		<testcase name="test_round_video_explicit_and_folder_fallback" classname="journey_scan_test" time="0.006">
 		</testcase>
 	</testsuite>
-	<testsuite id="5" name="media_pool_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="5" failures="0" errors="0" skipped="0" flaky="0" time="0.028">
+	<testsuite id="5" name="media_pool_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="5" failures="0" errors="0" skipped="0" flaky="0" time="0.028">
 		<testcase name="test_pooled_media_rel_shape" classname="media_pool_test" time="0.002">
 		</testcase>
 		<testcase name="test_plan_media_pool_dedups_repeats" classname="media_pool_test" time="0.002">
@@ -93,39 +97,39 @@
 		</testcase>
 		<testcase name="test_media_fingerprint_stability" classname="media_pool_test" time="0.006">
 		</testcase>
-		<testcase name="test_media_fingerprint_distinct_paths" classname="media_pool_test" time="0.007">
+		<testcase name="test_media_fingerprint_distinct_paths" classname="media_pool_test" time="0.006">
 		</testcase>
 	</testsuite>
-	<testsuite id="6" name="score_service_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="9" failures="0" errors="0" skipped="0" flaky="0" time="0.058">
+	<testsuite id="6" name="score_service_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="9" failures="0" errors="0" skipped="0" flaky="0" time="0.058">
 		<testcase name="test_bucket_thresholds" classname="score_service_test" time="0.003">
 		</testcase>
 		<testcase name="test_total_accumulates_across_rounds" classname="score_service_test" time="0.002">
 		</testcase>
-		<testcase name="test_start_round_resets_current" classname="score_service_test" time="0.003">
+		<testcase name="test_start_round_resets_current" classname="score_service_test" time="0.005">
 		</testcase>
-		<testcase name="test_end_round_banks_and_last_round_score" classname="score_service_test" time="0.005">
+		<testcase name="test_end_round_banks_and_last_round_score" classname="score_service_test" time="0.006">
 		</testcase>
 		<testcase name="test_penalize_clamps_at_zero_current_only" classname="score_service_test" time="0.006">
 		</testcase>
-		<testcase name="test_penalize_ignores_nonpositive" classname="score_service_test" time="0.006">
+		<testcase name="test_penalize_ignores_nonpositive" classname="score_service_test" time="0.007">
 		</testcase>
-		<testcase name="test_penalize_emits_score_changed" classname="score_service_test" time="0.006">
+		<testcase name="test_penalize_emits_score_changed" classname="score_service_test" time="0.007">
 		</testcase>
-		<testcase name="test_multiplier_rounding" classname="score_service_test" time="0.006">
+		<testcase name="test_multiplier_rounding" classname="score_service_test" time="0.005">
 		</testcase>
-		<testcase name="test_save_roundtrip" classname="score_service_test" time="0.005">
+		<testcase name="test_save_roundtrip" classname="score_service_test" time="0.007">
 		</testcase>
 	</testsuite>
-	<testsuite id="7" name="sensory_fx_test" package="tests" timestamp="2026-06-15T16:47:38" hostname="localhost" tests="6" failures="0" errors="0" skipped="0" flaky="0" time="0.062">
+	<testsuite id="7" name="sensory_fx_test" package="tests" timestamp="2026-06-17T00:54:36" hostname="localhost" tests="6" failures="0" errors="0" skipped="0" flaky="0" time="0.063">
 		<testcase name="test_ival_normal_range" classname="sensory_fx_test" time="0.002">
 		</testcase>
 		<testcase name="test_ival_inverted_range" classname="sensory_fx_test" time="0.013">
 		</testcase>
-		<testcase name="test_ival_clamps_intensity" classname="sensory_fx_test" time="0.013">
+		<testcase name="test_ival_clamps_intensity" classname="sensory_fx_test" time="0.014">
 		</testcase>
 		<testcase name="test_ival_missing_fields" classname="sensory_fx_test" time="0.013">
 		</testcase>
-		<testcase name="test_intensity_for_override_and_default" classname="sensory_fx_test" time="0.005">
+		<testcase name="test_intensity_for_override_and_default" classname="sensory_fx_test" time="0.006">
 		</testcase>
 		<testcase name="test_intensity_for_clamps_override" classname="sensory_fx_test" time="0.006">
 		</testcase>

@@ -63,6 +63,11 @@ var validity_fn: Callable = Callable()
 # Rebuilt on every refresh() so the set is always current.
 var _terminal_items:  Array      = []
 
+# Read-only "map mode" (player-facing journey map): suppresses all editing
+# affordances — node selection, insert buttons, validity badges, marquee — while
+# keeping pan/zoom. Set before set_items(). Adds the "you are here" marker API.
+var map_mode: bool = false
+
 # Pan / zoom state
 var _pan_offset: Vector2 = Vector2(40, 40)
 var _zoom:       float   = 1.0
@@ -80,6 +85,15 @@ const MARQUEE_DRAG_THRESHOLD: float = 6.0
 # Auto-layout artefacts (rebuilt on refresh).
 # Edges: list of {from: Vector2, to: Vector2, color: Color}
 var _edges: Array = []
+
+# "You are here" marker (map mode). A glowing ring around the current node, child
+# of _canvas so it pans/zooms with the graph. _marker_y tracks the current node's
+# canvas-space Y so non-round keys (which can repeat across fork levels) resolve to
+# the next node DOWN the graph rather than an earlier collision.
+const MARKER_PAD: float = 9.0
+var _marker:       Panel = null
+var _marker_color: Color = UITheme.PURPLE_BRIGHT
+var _marker_y:     float = -INF
 
 # Background grid + edges live on _canvas. Nodes are added as children of _canvas
 # so they pan/zoom together with edges.
@@ -328,6 +342,8 @@ func _find_first_node_at_x(x_center: float, y: float) -> Control:
 # Places a small "+" button centered at (x_center, mid_y) that, when clicked,
 # requests an insert into `arr` at the given index.
 func _place_insert_btn(arr: Array, idx: int, x_center: float, mid_y: float) -> void:
+	if map_mode:
+		return  # no editing affordances in the player-facing map
 	var btn: Button = Button.new()
 	btn.text = "+"
 	btn.size = Vector2(INSERT_BTN_SIZE, INSERT_BTN_SIZE)
@@ -403,7 +419,8 @@ func _make_node(item: Dictionary, arr: Array, _idx: int, is_terminal: bool = fal
 	var panel: PanelContainer = PanelContainer.new()
 	panel.size = Vector2(NODE_WIDTH, NODE_HEIGHT)
 	panel.custom_minimum_size = Vector2(NODE_WIDTH, NODE_HEIGHT)
-	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	# Map mode: nodes ignore the mouse so clicks pass through to pan/zoom.
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE if map_mode else Control.MOUSE_FILTER_STOP
 
 	# Use is_same() (reference identity) — Dictionary's == does deep equality,
 	# so two newly-created nodes with identical default fields would compare
@@ -419,7 +436,7 @@ func _make_node(item: Dictionary, arr: Array, _idx: int, is_terminal: bool = fal
 	# Live validation: a non-empty summary means this node has a problem the
 	# author would otherwise only discover at save time.
 	var issue: String = ""
-	if validity_fn.is_valid():
+	if not map_mode and validity_fn.is_valid():
 		issue = validity_fn.call(item)
 	if issue != "":
 		panel.tooltip_text = issue
@@ -481,21 +498,22 @@ func _make_node(item: Dictionary, arr: Array, _idx: int, is_terminal: bool = fal
 		warn_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.add_child(warn_lbl)
 
-	# Click selection. Shift+click selects the range from the anchor; Ctrl+click
-	# toggles membership; a plain click selects just this node (and sets the
-	# anchor for a subsequent shift+click).
-	panel.gui_input.connect(func(event: InputEvent) -> void:
-		if event is InputEventMouseButton:
-			var mb := event as InputEventMouseButton
-			if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
-				if mb.shift_pressed:
-					_range_select(item, arr)
-				elif mb.ctrl_pressed:
-					_toggle_selection(item, arr)
-				else:
-					_select_single(item, arr)
-				accept_event()
-	)
+	# Click selection (editor only). Shift+click selects the range from the anchor;
+	# Ctrl+click toggles membership; a plain click selects just this node. Skipped
+	# entirely in map mode — the player view has no selection.
+	if not map_mode:
+		panel.gui_input.connect(func(event: InputEvent) -> void:
+			if event is InputEventMouseButton:
+				var mb := event as InputEventMouseButton
+				if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+					if mb.shift_pressed:
+						_range_select(item, arr)
+					elif mb.ctrl_pressed:
+						_toggle_selection(item, arr)
+					else:
+						_select_single(item, arr)
+					accept_event()
+		)
 
 	return panel
 
@@ -822,9 +840,14 @@ func _gui_input(event: InputEvent) -> void:
 			_zoom_at(mb.position, _zoom - ZOOM_STEP)
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			if map_mode:
+				# Map mode has no selection — left-drag pans (like middle button).
+				_panning = mb.pressed
+				_last_mouse = mb.position
+				accept_event()
 			# Left press reaching GraphView (not a node) starts a marquee drag.
 			# A press+release without movement collapses to "clear selection".
-			if mb.pressed:
+			elif mb.pressed:
 				_marquee_active   = true
 				_marquee_additive = mb.ctrl_pressed
 				_marquee_start    = mb.position
@@ -981,6 +1004,90 @@ func frame_for_capture(scale: float, margin: float) -> Vector2:
 	_pan_offset = Vector2(margin, margin) - (b["min"] as Vector2) * scale
 	_apply_transform()
 	return (b["size"] as Vector2) * scale + Vector2(margin, margin) * 2.0
+
+
+# ── Journey-map marker (map mode) ────────────────────────────────────────────
+
+# Finds the laid-out node for a stable map key (item["_map_key"]). When a key
+# repeats across fork levels, prefers the first match at or below `min_y` (canvas
+# Y) so the marker advances monotonically; falls back to any match.
+func _find_map_node(key: String, min_y: float = -INF) -> Control:
+	if key == "":
+		return null
+	var best: Control = null
+	var best_y: float = INF
+	var any: Control = null
+	for c: Node in _canvas.get_children():
+		if not (c is Control) or not c.has_meta("graph_item"):
+			continue
+		var it: Dictionary = c.get_meta("graph_item")
+		if str(it.get("_map_key", "")) != key:
+			continue
+		var node: Control = c as Control
+		any = node
+		if node.position.y >= min_y and node.position.y < best_y:
+			best = node
+			best_y = node.position.y
+	return best if best != null else any
+
+
+# Canvas-space centre of the node for `key`, or Vector2.INF when not found.
+func node_center(key: String) -> Vector2:
+	var n: Control = _find_map_node(key)
+	if n == null:
+		return Vector2.INF
+	return n.position + n.size * 0.5
+
+
+func set_marker_color(c: Color) -> void:
+	_marker_color = c
+	if is_instance_valid(_marker):
+		_apply_marker_style()
+
+
+# Snaps the marker onto the node for `key` (no animation).
+func set_marker_at(key: String) -> void:
+	var n: Control = _find_map_node(key, _marker_y)
+	if n == null:
+		return
+	_ensure_marker()
+	_marker.visible = true
+	_marker.position = n.position - Vector2(MARKER_PAD, MARKER_PAD)
+	_marker_y = n.position.y
+
+
+# Pans (no zoom change) so the node for `key` sits at the viewport centre.
+func center_on(key: String) -> void:
+	var ctr: Vector2 = node_center(key)
+	if ctr == Vector2.INF:
+		return
+	_has_initial_center = true
+	_pan_offset = size * 0.5 - ctr * _zoom
+	_apply_transform()
+
+
+func _ensure_marker() -> void:
+	if is_instance_valid(_marker):
+		return
+	_marker = Panel.new()
+	_marker.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_marker.size = Vector2(NODE_WIDTH + MARKER_PAD * 2.0, NODE_HEIGHT + MARKER_PAD * 2.0)
+	_marker.z_index = 5  # above the node panels
+	_apply_marker_style()
+	_canvas.add_child(_marker)
+
+
+func _apply_marker_style() -> void:
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color = Color(_marker_color.r, _marker_color.g, _marker_color.b, 0.10)
+	s.border_color = _marker_color
+	s.border_width_left = 3; s.border_width_right = 3
+	s.border_width_top = 3;  s.border_width_bottom = 3
+	s.corner_radius_top_left = 12; s.corner_radius_top_right = 12
+	s.corner_radius_bottom_left = 12; s.corner_radius_bottom_right = 12
+	s.shadow_color = Color(_marker_color.r, _marker_color.g, _marker_color.b, 0.6)
+	s.shadow_size = 16
+	_marker.add_theme_stylebox_override("panel", s)
 
 
 # Restores the default zoom + top-center framing.

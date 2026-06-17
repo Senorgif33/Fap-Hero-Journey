@@ -82,6 +82,14 @@ var _range_slider:  RangeSlider = null
 var _range_min_lbl: Label       = null
 var _range_max_lbl: Label       = null
 
+# Secondary positional axes (T-code id, human name) — each gets its own range row.
+const SECONDARY_AXES: Array = [
+	["L1", "Surge"], ["L2", "Sway"], ["R0", "Twist"], ["R1", "Roll"], ["R2", "Pitch"],
+]
+var _axis_range_sliders:  Dictionary = {}  # axis id → RangeSlider
+var _axis_range_min_lbls: Dictionary = {}  # axis id → MIN Label
+var _axis_range_max_lbls: Dictionary = {}  # axis id → MAX Label
+
 var _home_slider:    HSlider  = null
 var _home_value_lbl: Label    = null
 var _home_ease_input: LineEdit = null
@@ -525,10 +533,72 @@ func _apply_layout() -> void:
 
 	# Hint beneath the slider
 	var hint: Label = Label.new()
-	hint.text = "Hard-clamps all playback positions to this range. Affects both Buttplug and Serial outputs."
+	hint.text = "Hard-clamps the stroke (main) axis to this range. Affects both Buttplug and Serial outputs."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(hint, UITheme.SEPARATOR, 11, false)
 	range_section.add_child(hint)
+
+	# ── Secondary-axis ranges (one per positional T-code axis) ────────────────
+	# L1/L2/R0/R1/R2 → surge/sway/twist/roll/pitch. Each axis has its own travel
+	# window, independent of the stroke range. These are bipolar (home to centre
+	# 50), so a symmetric range narrows the swing around centre. Only axes with a
+	# loaded script on a multi-axis device actually move (OSR2 none; SR6 all).
+	var axis_hint: Label = Label.new()
+	axis_hint.text = "Per-axis range for multi-axis devices (e.g. SR6). The stroke axis uses Stroke Range above."
+	axis_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(axis_hint, UITheme.SEPARATOR, 11, false)
+	range_section.add_child(axis_hint)
+
+	for axis_def: Array in SECONDARY_AXES:
+		var axis_id: String = axis_def[0]
+		var axis_name: String = axis_def[1]
+
+		var ax_row: HBoxContainer = HBoxContainer.new()
+		ax_row.add_theme_constant_override("separation", 16)
+		range_section.add_child(ax_row)
+
+		var ax_lbl: Label = Label.new()
+		ax_lbl.text = "%s (%s)" % [axis_name, axis_id]
+		ax_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+		_style_label(ax_lbl, UITheme.WHITE_SOFT, 14, false)
+		ax_row.add_child(ax_lbl)
+
+		var ax_col: VBoxContainer = VBoxContainer.new()
+		ax_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ax_col.add_theme_constant_override("separation", 4)
+		ax_row.add_child(ax_col)
+
+		var ax_slider: RangeSlider = RangeSlider.new()
+		ax_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ax_col.add_child(ax_slider)
+		_axis_range_sliders[axis_id] = ax_slider
+
+		var ax_val_row: HBoxContainer = HBoxContainer.new()
+		ax_val_row.add_theme_constant_override("separation", 0)
+		ax_col.add_child(ax_val_row)
+
+		var ax_min_lbl: Label = Label.new()
+		ax_min_lbl.text = "MIN: 0"
+		_style_label(ax_min_lbl, UITheme.PURPLE_MID, 11, true)
+		ax_val_row.add_child(ax_min_lbl)
+		_axis_range_min_lbls[axis_id] = ax_min_lbl
+
+		var ax_val_spacer: Control = Control.new()
+		ax_val_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ax_val_row.add_child(ax_val_spacer)
+
+		var ax_max_lbl: Label = Label.new()
+		ax_max_lbl.text = "MAX: 100"
+		_style_label(ax_max_lbl, UITheme.PURPLE_MID, 11, true)
+		ax_val_row.add_child(ax_max_lbl)
+		_axis_range_max_lbls[axis_id] = ax_max_lbl
+
+		# Live-push this axis's window and autosave on drag (mirrors Stroke Range).
+		ax_slider.range_changed.connect(func(lo: float, hi: float) -> void:
+			ax_min_lbl.text = "MIN: %d" % roundi(lo)
+			ax_max_lbl.text = "MAX: %d" % roundi(hi)
+			FunscriptPlayer.SetAxisRangeClamp(axis_id, roundi(lo), roundi(hi))
+			_save_settings())
 
 	# ── Home Position row ────────────────────────────────────────────────────
 	var home_row: HBoxContainer = HBoxContainer.new()
@@ -1227,6 +1297,16 @@ func _load_settings() -> void:
 		_range_min_lbl.text = "MIN: %d" % roundi(range_lo)
 		_range_max_lbl.text = "MAX: %d" % roundi(range_hi)
 
+	for axis_def: Array in SECONDARY_AXES:
+		var axis_id: String = axis_def[0]
+		var ax_slider: RangeSlider = _axis_range_sliders.get(axis_id) as RangeSlider
+		if ax_slider != null:
+			var ax_lo: float = float(SettingsService.get_axis_range_min(axis_id))
+			var ax_hi: float = float(SettingsService.get_axis_range_max(axis_id))
+			ax_slider.set_range_values(ax_lo, ax_hi)
+			(_axis_range_min_lbls[axis_id] as Label).text = "MIN: %d" % roundi(ax_lo)
+			(_axis_range_max_lbls[axis_id] as Label).text = "MAX: %d" % roundi(ax_hi)
+
 	var home_pos: int = SettingsService.get_home_position()
 	var home_ease: int = SettingsService.get_home_ease_ms()
 	if _home_slider != null:
@@ -1333,6 +1413,13 @@ func _save_settings() -> void:
 	if _range_slider != null:
 		SettingsService.set_range_min(roundi(_range_slider.lo))
 		SettingsService.set_range_max(roundi(_range_slider.hi))
+
+	for axis_def: Array in SECONDARY_AXES:
+		var axis_id: String = axis_def[0]
+		var ax_slider: RangeSlider = _axis_range_sliders.get(axis_id) as RangeSlider
+		if ax_slider != null:
+			SettingsService.set_axis_range_min(axis_id, roundi(ax_slider.lo))
+			SettingsService.set_axis_range_max(axis_id, roundi(ax_slider.hi))
 
 	if _home_slider != null:
 		var home_position: int = roundi(_home_slider.value)

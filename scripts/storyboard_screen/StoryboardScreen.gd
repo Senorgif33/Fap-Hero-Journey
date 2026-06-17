@@ -1,6 +1,7 @@
 extends Control
 
 signal completed(coins: int)
+signal map_requested  # player tapped the "◇ MAP" button (GameLoop owns the map)
 
 const VN_BAR_HEIGHT: int = 210
 
@@ -18,11 +19,15 @@ var _def_image:   String = ""
 var _can_advance: bool   = false
 
 var _skip_btn: Button = null
+var _map_btn:  Button = null
+
+var show_map_button: bool = true  # GameLoop clears this when the journey hides the map
 
 
 func _ready() -> void:
 	_apply_layout()
 	_apply_theme()
+	_add_map_button()
 	_fade.color      = Color.BLACK
 	_fade.modulate.a = 1.0
 	await get_tree().process_frame
@@ -31,6 +36,8 @@ func _ready() -> void:
 	tween.tween_callback(func() -> void:
 		_can_advance = true
 		_skip_btn.visible = true
+		if _map_btn != null:
+			_map_btn.visible = true
 	)
 
 
@@ -97,8 +104,11 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
-			# Let the skip button handle clicks that land on it.
+			# Let the corner buttons handle clicks that land on them (skip / map),
+			# rather than treating the click as an advance.
 			if _skip_btn.visible and _skip_btn.get_global_rect().has_point(mb.global_position):
+				return
+			if _map_btn != null and _map_btn.visible and _map_btn.get_global_rect().has_point(mb.global_position):
 				return
 			_advance()
 			get_viewport().set_input_as_handled()
@@ -119,6 +129,8 @@ func _advance() -> void:
 func _finish() -> void:
 	_can_advance = false
 	_skip_btn.visible = false
+	if _map_btn != null:
+		_map_btn.visible = false
 	var tween: Tween = create_tween()
 	tween.tween_property(_fade, "modulate:a", 1.0, 0.4).set_ease(Tween.EASE_IN)
 	tween.tween_callback(func() -> void:
@@ -127,6 +139,48 @@ func _finish() -> void:
 		# behind would flash before the fade completes.
 		emit_signal("completed", _coins)
 	)
+
+
+# A "◇ MAP" button in the top-right, just left of SKIP, so the player can open the
+# read-only journey map mid-storyboard. GameLoop owns the map — we emit a request and
+# it opens the viewer over this screen. Revealed alongside SKIP once the open fade ends.
+func _add_map_button() -> void:
+	if not show_map_button:
+		return
+	var accent: Color = UITheme.PURPLE_BRIGHT
+	_map_btn = Button.new()
+	_map_btn.text         = "◇ MAP"
+	_map_btn.focus_mode   = Control.FOCUS_NONE
+	_map_btn.tooltip_text = "View the journey map (M)"
+	_map_btn.visible      = false
+	_map_btn.anchor_left   = 1.0
+	_map_btn.anchor_right  = 1.0
+	_map_btn.anchor_top    = 0.0
+	_map_btn.anchor_bottom = 0.0
+	_map_btn.offset_left   = -236   # sits left of SKIP (which spans -110..-16)
+	_map_btn.offset_right  = -126
+	_map_btn.offset_top    = 16
+	_map_btn.offset_bottom = 46
+	_map_btn.pressed.connect(func() -> void: emit_signal("map_requested"))
+	add_child(_map_btn)
+
+	_map_btn.add_theme_color_override("font_color",       accent)
+	_map_btn.add_theme_color_override("font_hover_color", UITheme.WHITE_SOFT)
+	_map_btn.add_theme_font_size_override("font_size", 11)
+	var n: StyleBoxFlat = StyleBoxFlat.new()
+	n.bg_color     = Color(accent.r, accent.g, accent.b, 0.10)
+	n.border_color = accent
+	n.border_width_left = 1; n.border_width_right = 1
+	n.border_width_top  = 1; n.border_width_bottom = 1
+	n.corner_radius_top_left = 4; n.corner_radius_top_right = 4
+	n.corner_radius_bottom_left = 4; n.corner_radius_bottom_right = 4
+	n.content_margin_left = 10; n.content_margin_right = 10
+	n.content_margin_top  = 4;  n.content_margin_bottom = 4
+	_map_btn.add_theme_stylebox_override("normal", n)
+	var h: StyleBoxFlat = n.duplicate()
+	h.bg_color = Color(accent.r, accent.g, accent.b, 0.28)
+	_map_btn.add_theme_stylebox_override("hover", h)
+	_map_btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 
 
 # ---------------------------------------------------------------------------

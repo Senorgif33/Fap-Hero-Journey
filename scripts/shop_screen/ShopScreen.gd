@@ -1,6 +1,7 @@
 extends Control
 
 signal closed
+signal map_requested  # player tapped the header "◇ MAP" button (GameLoop owns the map)
 
 const DEFAULT_COUNT: int = 3
 
@@ -23,14 +24,34 @@ var _price_mult:  float = 1.0      # per-shop price multiplier from journey conf
 # shop can offer any number of items (built in _apply_layout).
 var _cards_flow:  HFlowContainer = null
 
+var show_map_button: bool = true  # GameLoop clears this when the journey hides the map
+
 
 func _ready() -> void:
 	_apply_layout()
 	_apply_theme()
+	_add_map_button()
 	_continue.pressed.connect(_on_continue_pressed)
 	CoinService.BalanceChanged.connect(_on_balance_changed)
 	_refresh_coins()
 	_animate_in()
+
+
+# A "◇ MAP" button in the header (left of the coin badge) so the player can open
+# the read-only journey map while shopping. GameLoop owns the map; we just emit a
+# request and it opens the viewer over this screen.
+func _add_map_button() -> void:
+	if not show_map_button:
+		return
+	var btn: Button = Button.new()
+	btn.text = "◇ MAP"
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.tooltip_text = "View the journey map (M)"
+	btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_style_button(btn, UITheme.PURPLE_BRIGHT)
+	btn.pressed.connect(func() -> void: emit_signal("map_requested"))
+	_header.add_child(btn)
+	_header.move_child(btn, _coin_badge.get_index())  # Title | MAP | CoinBadge
 
 
 func _animate_in() -> void:
