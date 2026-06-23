@@ -19,6 +19,9 @@ var _default_path:   int    = 0          # conditional fallback path index
 var show_map_button: bool   = true       # GameLoop clears this when the journey hides the map
 
 
+var _cond_decider: String = "game"  # conditional: "game" (auto-spin) or "player" (gated pick)
+
+
 func _ready() -> void:
 	_apply_layout()
 	_apply_base_theme()
@@ -35,6 +38,7 @@ func setup(fork_data: Dictionary) -> void:
 
 	_resolution = fork_data.get("resolution", "choice")
 	_cond_metric = fork_data.get("cond_metric", "score")
+	_cond_decider = fork_data.get("cond_decider", "game")
 	_default_path = int(fork_data.get("default_path", 0))
 	_paths = fork_data.get("paths", [])
 	for i in _paths.size():
@@ -43,10 +47,10 @@ func setup(fork_data: Dictionary) -> void:
 		_cards.append(card)
 		_cards_row.add_child(card)
 
-	# Interactive forks (player choice / sacrifice) let the player consult the
-	# journey map before committing. Auto-resolving forks play a reveal on timers
-	# instead, so the button is omitted there (GameLoop also blocks the M key).
-	if _resolution != "random" and _resolution != "conditional":
+	# Interactive forks (player choice / sacrifice / conditional-player) let the player consult the
+	# journey map before committing. Auto-resolving forks play a reveal on timers instead, so the
+	# button is omitted there (GameLoop also blocks the M key).
+	if not _is_auto_resolved():
 		_add_map_button()
 
 
@@ -179,8 +183,12 @@ func _make_card(index: int, path_data: Dictionary) -> Control:
 		col.add_child(cost_lbl)
 
 	var btn: Button = Button.new()
+	var cond_locked: bool = _resolution == "conditional" and _cond_decider == "player" and not _qualifies(index, path_data)
 	if _resolution == "sacrifice" and not sac_affordable:
 		btn.text = "✕ CAN'T AFFORD"
+		btn.disabled = true
+	elif cond_locked:
+		btn.text = "✕ LOCKED"
 		btn.disabled = true
 	else:
 		btn.text = "> CHOOSE"
@@ -256,6 +264,30 @@ func _can_afford(cost: int, required_item: String) -> bool:
 	return ForkResolver.path_affordable(cost, required_item, CoinService.Balance, Callable(InventoryService, "OwnsItem"))
 
 
+# Whether a conditional fork auto-resolves (the game spins) vs. waits for the player to pick.
+func _is_auto_resolved() -> bool:
+	return _resolution == "random" or (_resolution == "conditional" and _cond_decider != "player")
+
+
+# Conditional-player gating: a path is unlocked if its metric requirement is met, OR it's the default
+# path (always available, so the player is never left with no selectable option).
+func _qualifies(index: int, path_data: Dictionary) -> bool:
+	if index == _default_path:
+		return true
+	match _cond_metric:
+		"score":
+			return ScoreService.LastRoundScore >= int(path_data.get("threshold", 0))
+		"coins":
+			return CoinService.Balance >= int(path_data.get("threshold", 0))
+		"item":
+			var req: String = str(path_data.get("required_item", ""))
+			return req != "" and InventoryService.OwnsItem(req)
+		"flag":
+			var rf: String = str(path_data.get("required_flag", ""))
+			return rf != "" and GameState.HasFlag(rf)
+	return true
+
+
 # Requirement text for a conditional path's card, e.g. "SCORE ≥ 100" or
 # "REQUIRES KEY", with a "DEFAULT" tag on the fallback path.
 func _conditional_req_text(index: int, path_data: Dictionary) -> String:
@@ -270,6 +302,10 @@ func _conditional_req_text(index: int, path_data: Dictionary) -> String:
 			var req: String = str(path_data.get("required_item", ""))
 			if req != "":
 				parts.append("REQUIRES %s" % str(InventoryService.GetItemData(req).get("name", req)).to_upper())
+		"flag":
+			var rf: String = str(path_data.get("required_flag", ""))
+			if rf != "":
+				parts.append("REQUIRES: %s" % rf.to_upper().replace("_", " "))
 	if index == _default_path:
 		parts.append("DEFAULT")
 	return "   ·   ".join(parts)

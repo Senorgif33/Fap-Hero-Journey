@@ -43,6 +43,14 @@ static func conditional_path(paths: Array, metric: String, default_path: int, va
 				return i
 		return default_idx
 
+	# Flag: first path whose required_flag is currently set wins (is_owned is the flag-checker here).
+	if metric == "flag":
+		for i in paths.size():
+			var rf: String = str(paths[i].get("required_flag", ""))
+			if rf != "" and is_owned.call(rf):
+				return i
+		return default_idx
+
 	var best_idx: int = -1
 	var best_threshold: int = -1
 	for i in paths.size():

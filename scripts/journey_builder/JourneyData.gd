@@ -170,6 +170,7 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			out["description"]  = str(data.get("description", ""))
 			out["resolution"]   = str(data.get("resolution", "choice"))
 			out["cond_metric"]  = str(data.get("cond_metric", "score"))
+			out["cond_decider"] = str(data.get("cond_decider", "game"))
 			out["default_path"] = int(data.get("default_path", 0))
 			out["after_order"]  = int(data.get("after_order", 0))
 	return out
@@ -191,6 +192,18 @@ static func _fill_default(out: Dictionary, key: String, default: Variant) -> voi
 # journeys) can't collide; build_graph also guards against a stray duplicate.
 static func new_node_id() -> String:
 	return "n_%08x%08x" % [randi(), randi()]
+
+
+# Normalizes a flag list (from a comma-separated field or a saved array) to a deduped, trimmed,
+# non-empty string array. Shared by a node's "sets flags" and a fork choice's "sets flags".
+static func clean_flag_list(v: Variant) -> Array:
+	var out: Array = []
+	var src: Array = v if v is Array else []
+	for f: Variant in src:
+		var s: String = str(f).strip_edges()
+		if s != "" and not (s in out):
+			out.append(s)
+	return out
 
 
 # Returns a fresh default item dict for a builder node of the given type. Single

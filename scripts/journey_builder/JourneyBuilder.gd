@@ -96,9 +96,12 @@ var _undo_stack: Array = []
 var _redo_stack: Array = []
 const UNDO_LIMIT: int = 50
 
-# Node clipboard (copy / cut / paste / duplicate). Holds deep copies of nodes as [{id, node}] so
-# paste can remap the edges between copied nodes. _paste_count cascades the offset on repeated paste.
+# Clipboard (copy / cut / paste / duplicate). One clipboard, type-tagged by `_clip_kind`, since the
+# selection is exclusive (nodes XOR a note). Nodes are deep [{id, node}] copies so paste can remap the
+# edges between them; a note is a plain comment dict. _paste_count cascades the offset on repeat paste.
 var _node_clipboard: Array = []
+var _clip_comment: Dictionary = {}
+var _clip_kind: String = ""   # "" | "nodes" | "comment"
 var _paste_count: int = 0
 const PASTE_OFFSET: Vector2 = Vector2(48, 48)
 
@@ -162,6 +165,8 @@ var _pending_test_location: Dictionary = {}
 # in the node editor side panel.
 var _test_seed_score: int = 0
 var _test_seed_coins: int = 0
+var _test_seed_flags: Array = []   # flag names to pre-set for a Test-From-Here run (exercise flag forks)
+var _test_panel_expanded: bool = false   # side-panel "Test From Here" group open/closed, persisted across node selections (panel rebuilds)
 
 # Streaming-copy tuning. Chunks are read/written 1 MB at a time; the main thread
 # yields one frame only after COPY_FRAME_BUDGET_MS of accumulated work — frequent
@@ -205,6 +210,10 @@ func _setup_graph_view() -> void:
 	_graph.connect_target_picked.connect(_on_connect_target_picked)
 	_graph.nodes_drag_started.connect(_push_undo)
 	_graph.edge_drawn.connect(_on_edge_drawn)
+	_graph.comment_clicked.connect(_on_comment_clicked)
+	_graph.frame_clicked.connect(_on_frame_clicked)
+	_graph.frame_toggle_collapse.connect(_on_frame_toggle_collapse)
+	_graph.canvas_context_menu_requested.connect(_on_canvas_context_menu_requested)
 	_graph.warning_provider = _compute_node_warnings   # GraphView pulls soft-validation badges each layout
 	_graph.call_deferred("set_graph", _graph_model)
 
@@ -224,13 +233,16 @@ func _refresh_graph() -> void:
 func _compute_node_warnings() -> Dictionary:
 	var warnings: Dictionary = {}
 	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var known_flags: Dictionary = _all_set_flags()   # every flag any node/choice sets (for dead-flag detection)
 	for id: String in nodes:
 		var n: Dictionary = nodes[id]
 		var issues: Array = []
 		match str(n.get("type", "")):
 			"round":      _save_check_round(n.get("data", {}), "Round", issues)
 			"storyboard": _save_check_storyboard(n.get("data", {}), "Storyboard", issues)
-			"fork":       _save_check_fork_graph(n, "Fork", issues)
+			"fork":
+				_save_check_fork_graph(n, "Fork", issues)
+				_check_dead_flag_paths(n, known_flags, issues)
 		if not issues.is_empty():
 			var details: Array = []
 			for it: Dictionary in issues:
@@ -245,6 +257,31 @@ func _compute_node_warnings() -> Dictionary:
 		if msg != "":
 			warnings[sid] = (str(warnings[sid]) + "\n" + msg) if warnings.has(sid) else msg
 	return warnings
+
+
+# Every flag name any node's data or fork choice sets in this journey (for dead-flag detection).
+func _all_set_flags() -> Dictionary:
+	var flags: Dictionary = {}
+	for id: String in _graph_model.get("nodes", {}):
+		var n: Dictionary = _graph_model["nodes"][id]
+		for f: Variant in (n.get("data", {}) as Dictionary).get("set_flags", []):
+			flags[str(f)] = true
+		for e: Dictionary in n.get("out", []):
+			for f2: Variant in e.get("set_flags", []):
+				flags[str(f2)] = true
+	return flags
+
+
+# Soft badge: a conditional-flag choice requiring a flag nothing in the journey sets (a dead branch,
+# usually a typo). Detail-only — doesn't block save.
+func _check_dead_flag_paths(node: Dictionary, known_flags: Dictionary, issues: Array) -> void:
+	var data: Dictionary = node.get("data", {})
+	if str(data.get("resolution", "")) != "conditional" or str(data.get("cond_metric", "")) != "flag":
+		return
+	for ei in (node.get("out", []) as Array).size():
+		var rf: String = str(((node["out"][ei]) as Dictionary).get("required_flag", "")).strip_edges()
+		if rf != "" and not known_flags.has(rf):
+			issues.append({"detail": "Choice %d requires flag \"%s\", which nothing in this journey sets (typo?)." % [ei + 1, rf]})
 
 
 # Short per-node text for a structural validation issue (JourneyGraph.validate_graph kind).
@@ -372,14 +409,9 @@ func _setup_toolbar_buttons() -> void:
 	_top_bar.add_child(img_btn)
 	_top_bar.move_child(img_btn, _save_btn.get_index())
 
-	var keys_btn: Button = Button.new()
-	keys_btn.text = "⌨ SHORTCUTS"
-	keys_btn.focus_mode = Control.FOCUS_NONE
-	keys_btn.tooltip_text = "Show keyboard & mouse shortcuts"
-	UITheme.style_button(keys_btn, UITheme.PURPLE_MID)
-	keys_btn.pressed.connect(_show_shortcuts_overlay)
-	_top_bar.add_child(keys_btn)
-	_top_bar.move_child(keys_btn, _save_btn.get_index())
+	# 🗒 NOTE, ▭ GROUP and ⌨ SHORTCUTS moved off the toolbar into the canvas right-click context menu
+	# (_show_canvas_context_menu) to cut top-bar clutter — they drop at the cursor instead of the view
+	# centre. ⊡ FIT, ⊞ ARRANGE and 📷 IMAGE stay here as the frequent / global actions.
 
 
 # Auto-arranges the whole graph into tidy Sugiyama layers (rows by depth, crossings reduced, x
@@ -389,10 +421,465 @@ func _on_arrange_pressed() -> void:
 	if not _graph or (_graph_model.get("nodes", {}) as Dictionary).is_empty():
 		return
 	_push_undo()
+	# Capture each frame's current members BEFORE the relayout, so the frame can re-wrap them after.
+	var groups: Array = _graph_model.get("groups", [])
+	var members: Array = []
+	for g: Dictionary in groups:
+		# A collapsed frame's members are frozen; an expanded one wraps whatever's currently inside.
+		if g.get("collapsed", false):
+			members.append((g.get("members", []) as Array).duplicate())
+		else:
+			members.append(_nodes_in_rect(g.get("rect", Rect2())))
 	GraphLayout.auto_layout(_graph_model)
+	# Re-fit each (non-empty) frame around its members' new positions so nodes never end up outside it.
+	for gi: int in groups.size():
+		var ids: Array = members[gi]
+		if not ids.is_empty():
+			(groups[gi] as Dictionary)["rect"] = _frame_rect_for(_nodes_bounds(ids))
+	# Collapsed frames: re-apply their space-reclaim reflow against the fresh layout (nodes AND the other
+	# frames below), so a later expand reverses against the arranged positions, not stale ones.
+	for gi: int in groups.size():
+		var g2: Dictionary = groups[gi]
+		if g2.get("collapsed", false):
+			g2["members"] = members[gi]
+			_apply_frame_reflow(g2)
+			_apply_frame_shift(g2, gi)
 	_refresh_graph()
 	_graph.call_deferred("fit_to_view")
 	_show_status("Arranged the graph into layers. Ctrl+Z to undo.", false)
+
+
+# ── Canvas right-click context menu ──────────────────────────────────────────
+
+# GraphView reports a right-click on empty canvas with the world position under the cursor; open the
+# menu there. Houses the old 🗒 NOTE / ▭ GROUP / ⌨ SHORTCUTS toolbar actions plus node creation, all
+# dropping at the click position.
+func _on_canvas_context_menu_requested(world_pos: Vector2) -> void:
+	_show_canvas_context_menu(world_pos)
+
+
+# A small styled popup at the mouse: add a round / shop / storyboard / fork, a note or a group at the
+# cursor, or open the shortcuts overlay. The PopupPanel closes itself on an outside click.
+func _show_canvas_context_menu(world_pos: Vector2) -> void:
+	if not _graph:
+		return
+	var popup: PopupPanel = PopupPanel.new()
+	popup.wrap_controls = true
+	add_child(popup)
+
+	var panel_style: StyleBoxFlat = StyleBoxFlat.new()
+	panel_style.bg_color = UITheme.PANEL_BG
+	panel_style.border_color = UITheme.PURPLE_BRIGHT
+	panel_style.border_width_left = 2; panel_style.border_width_right = 2
+	panel_style.border_width_top = 2; panel_style.border_width_bottom = 2
+	panel_style.content_margin_left = 8; panel_style.content_margin_right = 8
+	panel_style.content_margin_top = 8; panel_style.content_margin_bottom = 8
+	popup.add_theme_stylebox_override("panel", panel_style)
+
+	var vbox: VBoxContainer = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	vbox.custom_minimum_size = Vector2(190, 0)
+	popup.add_child(vbox)
+
+	# Add-node actions — each drops a fresh node centred on the click.
+	for spec: Array in [["＋ ROUND", "round"], ["＋ SHOP", "shop"], ["＋ STORYBOARD", "storyboard"], ["＋ FORK", "fork"]]:
+		var t: String = spec[1]
+		var node_b: Button = _ctx_menu_button(spec[0], UITheme.PURPLE_BRIGHT, func() -> void:
+			popup.queue_free()
+			_create_graph_node(t, world_pos)
+		)
+		vbox.add_child(node_b)
+
+	vbox.add_child(_ctx_menu_separator())
+	var note_b: Button = _ctx_menu_button("🗒 NOTE", UITheme.AMBER, func() -> void:
+		popup.queue_free()
+		_add_comment(world_pos)
+	)
+	vbox.add_child(note_b)
+	var group_b: Button = _ctx_menu_button("▭ GROUP", UITheme.PURPLE_MID, func() -> void:
+		popup.queue_free()
+		_add_frame(world_pos)
+	)
+	vbox.add_child(group_b)
+
+	vbox.add_child(_ctx_menu_separator())
+	var keys_b: Button = _ctx_menu_button("⌨ SHORTCUTS", UITheme.PURPLE_MID, func() -> void:
+		popup.queue_free()
+		_show_shortcuts_overlay()
+	)
+	vbox.add_child(keys_b)
+
+	popup.reset_size()
+	popup.position = Vector2i(get_global_mouse_position())
+	popup.popup()
+
+
+# One left-aligned, full-width button for the canvas context menu.
+func _ctx_menu_button(text: String, accent: Color, on_press: Callable) -> Button:
+	var b: Button = Button.new()
+	b.text = text
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.focus_mode = Control.FOCUS_NONE
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(b, accent)
+	b.pressed.connect(on_press)
+	return b
+
+
+# A thin divider between context-menu groups.
+func _ctx_menu_separator() -> HSeparator:
+	var line: HSeparator = HSeparator.new()
+	var sb: StyleBoxLine = StyleBoxLine.new()
+	sb.color = UITheme.SEPARATOR
+	sb.thickness = 1
+	line.add_theme_stylebox_override("separator", sb)
+	return line
+
+
+# ── Canvas comments (sticky notes) ───────────────────────────────────────────
+
+var _selected_comment_idx: int = -1   # the note whose editor is open; Delete/Backspace targets it
+var _selected_frame_idx: int = -1     # the group frame whose editor is open; Delete/Backspace targets it
+
+# Canvas-menu 🗒 NOTE — drops a new empty sticky note (at the right-click cursor, else the view centre)
+# and opens it.
+func _add_comment(at_world: Variant = null) -> void:
+	if not _graph:
+		return
+	_push_undo()
+	if not _graph_model.has("comments"):
+		_graph_model["comments"] = []
+	var comments: Array = _graph_model["comments"]
+	var pos: Vector2 = at_world if at_world is Vector2 else _graph.view_center_world()
+	comments.append({"pos": GraphLayout.snap(pos), "text": ""})
+	_selected_comment_idx = comments.size() - 1
+	_refresh_graph()
+	_side_renderer.show_comment_editor(_selected_comment_idx)
+
+
+# A sticky note was clicked (or dragged) — show its editor and make it the active selection (so node
+# selection is dropped and Delete/Backspace removes the note).
+func _on_comment_clicked(idx: int) -> void:
+	_selected_graph_node_ids = []
+	_selected_graph_node_id = ""
+	_selected_comment_idx = idx
+	_selected_frame_idx = -1
+	_side_renderer.show_comment_editor(idx)
+
+
+# Side-panel 🗑 DELETE NOTE, or Delete/Backspace while a note is selected.
+func _delete_comment(idx: int) -> void:
+	var comments: Array = _graph_model.get("comments", [])
+	if idx < 0 or idx >= comments.size():
+		return
+	_push_undo()
+	comments.remove_at(idx)
+	_selected_comment_idx = -1
+	_refresh_graph()
+	_side_renderer.show_journey_info_panel()
+
+
+# ── Group frames ─────────────────────────────────────────────────────────────
+
+# Canvas-menu ▭ GROUP — wraps the current selection, else drops a labelled group frame (at the
+# right-click cursor, else the view centre) and opens it.
+func _add_frame(at_world: Variant = null) -> void:
+	if not _graph:
+		return
+	_push_undo()
+	if not _graph_model.has("groups"):
+		_graph_model["groups"] = []
+	var groups: Array = _graph_model["groups"]
+	var rect: Rect2
+	if not _selected_graph_node_ids.is_empty():
+		# Wrap the selected nodes: their bounding box + padding (extra at the top for the header bar).
+		rect = _frame_rect_for(_selected_nodes_bounds())
+		_graph.deselect_nodes_silent()
+		_selected_graph_node_ids = []
+		_selected_graph_node_id = ""
+	else:
+		var fsize: Vector2 = Vector2(360, 240)
+		var centre: Vector2 = at_world if at_world is Vector2 else _graph.view_center_world()
+		rect = Rect2(GraphLayout.snap(centre - fsize * 0.5), fsize)
+	groups.append({"rect": rect, "label": ""})
+	_selected_comment_idx = -1
+	_selected_frame_idx = groups.size() - 1
+	_refresh_graph()
+	_side_renderer.show_frame_editor(_selected_frame_idx)
+
+
+# A group frame was clicked or dragged — show its editor and make it the active selection.
+func _on_frame_clicked(idx: int) -> void:
+	_selected_graph_node_ids = []
+	_selected_graph_node_id = ""
+	_selected_comment_idx = -1
+	_selected_frame_idx = idx
+	_side_renderer.show_frame_editor(idx)
+
+
+# Side-panel 🗑 DELETE GROUP, or Delete/Backspace while a frame is selected. Removes the frame only —
+# the nodes inside it are untouched.
+func _delete_frame(idx: int) -> void:
+	var groups: Array = _graph_model.get("groups", [])
+	if idx < 0 or idx >= groups.size():
+		return
+	_push_undo()
+	groups.remove_at(idx)
+	_selected_frame_idx = -1
+	_refresh_graph()
+	_side_renderer.show_journey_info_panel()
+
+
+# Bounding box of the currently-selected nodes (to auto-size a frame around them).
+func _selected_nodes_bounds() -> Rect2:
+	return _nodes_bounds(_selected_graph_node_ids)
+
+
+# Bounding box of a set of node ids.
+func _nodes_bounds(ids: Array) -> Rect2:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var rect: Rect2 = Rect2()
+	var first: bool = true
+	for id: String in ids:
+		if nodes.has(id):
+			var nr: Rect2 = Rect2((nodes[id] as Dictionary).get("pos", Vector2.ZERO), Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT))
+			rect = nr if first else rect.merge(nr)
+			first = false
+	return rect
+
+
+# Node ids whose centre is inside `rect` — frame membership (mirrors GraphView._nodes_in_frame_rect).
+func _nodes_in_rect(rect: Rect2) -> Array:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var ids: Array = []
+	var half: Vector2 = Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT) * 0.5
+	for id: String in nodes:
+		if rect.has_point(((nodes[id] as Dictionary).get("pos", Vector2.ZERO) as Vector2) + half):
+			ids.append(id)
+	return ids
+
+
+# A frame rect wrapping a node bounding box: padding all round + extra room at the top for the header.
+func _frame_rect_for(bb: Rect2) -> Rect2:
+	var pad: float = 30.0
+	var r: Rect2 = Rect2(bb.position - Vector2(pad, pad + GraphView.FRAME_HEADER_H),
+		bb.size + Vector2(pad * 2.0, pad * 2.0 + GraphView.FRAME_HEADER_H))
+	r.position = GraphLayout.snap(r.position)
+	r.size = GraphLayout.snap(r.size)
+	return r
+
+
+# Header chevron / side-panel button — collapse or expand a group (hides or shows its nodes).
+func _on_frame_toggle_collapse(idx: int) -> void:
+	var groups: Array = _graph_model.get("groups", [])
+	if idx < 0 or idx >= groups.size():
+		return
+	_push_undo()
+	var g: Dictionary = groups[idx]
+	var now_collapsed: bool = not bool(g.get("collapsed", false))
+	g["collapsed"] = now_collapsed
+	# Freeze the membership when collapsing so the hidden set can't change as the bar is moved; drop it
+	# on expand.
+	if now_collapsed:
+		# Freeze membership FIRST: a node parked in the freed space was shoved clear of the frame by the
+		# last expand's make-room, so it sits below the frame here and is excluded — never re-absorbed.
+		g["members"] = _nodes_in_rect(g.get("rect", Rect2()))
+		_undo_expand_pushout(g)  # parked node(s) back to the freed space; nudged-aside nodes back up
+		_apply_frame_reflow(g)   # pull the nodes below up to the collapsed bar…
+		_apply_frame_shift(g, idx)  # …and the OTHER group frames below, so they ride along with their nodes
+	else:
+		_undo_frame_reflow(g)      # push the nodes back down to make room for the revealed body…
+		_undo_frame_shift(g)       # …and the group frames below back down (reverses the collapse shift)
+		_push_parked_nodes_out(g)  # shove any node parked in the footprint clear of the frame (make room)
+		g.erase("members")
+	_selected_frame_idx = idx
+	_refresh_graph()
+	_side_renderer.show_frame_editor(idx)
+
+
+# Shifts every non-excluded node at or below `threshold_y` by `dy` on the y axis.
+func _shift_nodes_below(threshold_y: float, dy: float, exclude_ids: Array) -> Array:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var excl: Dictionary = {}
+	for id: String in exclude_ids:
+		excl[id] = true
+	var moved: Array = []
+	for id: String in nodes:
+		if excl.has(id):
+			continue
+		var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+		if p.y >= threshold_y:
+			(nodes[id] as Dictionary)["pos"] = Vector2(p.x, p.y + dy)
+			moved.append(id)
+	return moved
+
+
+# Collapse reflow: slide everything below the frame up so it sits just under the collapsed bar. The
+# frozen members stay put (they're hidden under the bar). Reversed by _undo_frame_reflow on expand.
+func _apply_frame_reflow(g: Dictionary) -> void:
+	var rect: Rect2 = g.get("rect", Rect2())
+	var delta: float = rect.size.y - GraphView.FRAME_HEADER_H
+	if delta <= 0.0:
+		g["shift_ids"] = []
+		g["shift_amt"] = 0.0
+		return
+	# Record exactly which nodes moved and by how much, so expand reverses it even if the bar gets
+	# dragged elsewhere in the meantime.
+	g["shift_ids"] = _shift_nodes_below(rect.position.y + rect.size.y, -delta, g.get("members", []))
+	g["shift_amt"] = delta
+
+
+# Expand reflow: push the nodes that were pulled up under the bar back down to clear the body again.
+func _undo_frame_reflow(g: Dictionary) -> void:
+	var amt: float = float(g.get("shift_amt", 0.0))
+	if amt > 0.0:
+		var nodes: Dictionary = _graph_model.get("nodes", {})
+		for id: String in g.get("shift_ids", []):
+			if nodes.has(id):
+				var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+				(nodes[id] as Dictionary)["pos"] = Vector2(p.x, p.y + amt)
+	g.erase("shift_ids")
+	g.erase("shift_amt")
+
+
+# Collapse companion to _apply_frame_reflow, for the OTHER group frames: slide every frame below the bar
+# up by the same delta the nodes moved, so each frame keeps wrapping its (also-shifted) members instead
+# of being left behind to overlap the revealed content. Records the moved frame indices + amount so
+# _undo_frame_shift reverses it on expand. (Frame indices, not ids — frames have none; adding/removing a
+# frame while another is collapsed is the only thing that can desync this, and only cosmetically.)
+func _apply_frame_shift(g: Dictionary, idx: int) -> void:
+	var rect: Rect2 = g.get("rect", Rect2())
+	var delta: float = rect.size.y - GraphView.FRAME_HEADER_H
+	if delta <= 0.0:
+		g["frame_shift_idxs"] = []
+		g["frame_shift_amt"] = 0.0
+		return
+	g["frame_shift_idxs"] = _shift_frames_below(rect.position.y + rect.size.y, -delta, idx)
+	g["frame_shift_amt"] = delta
+
+
+# Expand companion: push the frames that slid up under the bar back down. Mirrors _undo_frame_reflow.
+func _undo_frame_shift(g: Dictionary) -> void:
+	var amt: float = float(g.get("frame_shift_amt", 0.0))
+	if amt > 0.0:
+		var groups: Array = _graph_model.get("groups", [])
+		for raw in g.get("frame_shift_idxs", []):
+			var i: int = int(raw)   # JSON round-trips the indices as floats; coerce back
+			if i >= 0 and i < groups.size():
+				var fr: Dictionary = groups[i]
+				var r: Rect2 = fr.get("rect", Rect2())
+				fr["rect"] = Rect2(Vector2(r.position.x, r.position.y + amt), r.size)
+	g.erase("frame_shift_idxs")
+	g.erase("frame_shift_amt")
+
+
+# Shifts every group frame except `exclude_idx` whose top is at/below `threshold_y` by `dy` on the y
+# axis. Returns the indices moved so the collapse↔expand pair can reverse it.
+func _shift_frames_below(threshold_y: float, dy: float, exclude_idx: int) -> Array:
+	var groups: Array = _graph_model.get("groups", [])
+	var moved: Array = []
+	for i: int in groups.size():
+		if i == exclude_idx:
+			continue
+		var fr: Dictionary = groups[i]
+		var r: Rect2 = fr.get("rect", Rect2())
+		if r.position.y >= threshold_y:
+			fr["rect"] = Rect2(Vector2(r.position.x, r.position.y + dy), r.size)
+			moved.append(i)
+	return moved
+
+
+# Expand make-room: a node "parked" in the freed space under a collapsed bar (centre inside the frame
+# rect, but not a frozen member) would be overlapped — then absorbed — by the body that reappears on
+# expand. Drop it just below the frame, then shove down ONLY the contiguous run of nodes it actually
+# lands on, stopping at the first vertical gap big enough to swallow the shift — a node with clearance
+# (however far below) is never touched. Members and the parked node(s) never move. The run shifts by a
+# single amount so side-by-side layouts survive. Exact moves are recorded for _undo_expand_pushout.
+func _push_parked_nodes_out(g: Dictionary) -> void:
+	var rect: Rect2 = g.get("rect", Rect2())
+	var skip: Dictionary = {}   # nodes that must never be shoved: frozen members + the parked node(s)
+	for id: String in g.get("members", []):
+		skip[id] = true
+	var parked: Array = []
+	for id: String in _nodes_in_rect(rect):
+		if not skip.has(id):
+			parked.append(id)
+	if parked.is_empty():
+		return
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var frame_bottom: float = rect.position.y + rect.size.y
+	var gap: float = GraphLayout.GRID
+	# Drop the parked node(s) to just below the frame, preserving their relative layout.
+	var parked_top: float = INF
+	var parked_bottom: float = -INF
+	for id: String in parked:
+		var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+		parked_top = minf(parked_top, p.y)
+		parked_bottom = maxf(parked_bottom, p.y + GraphView.NODE_HEIGHT)
+		skip[id] = true
+	var park_amt: float = (frame_bottom + gap) - parked_top
+	for id: String in parked:
+		var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+		(nodes[id] as Dictionary)["pos"] = Vector2(p.x, p.y + park_amt)
+	var parked_new_bottom: float = parked_bottom + park_amt
+
+	# Candidates that could be in the way: non-skip nodes whose body reaches past the frame bottom, top-down.
+	var below: Array = []
+	for id: String in nodes:
+		if skip.has(id):
+			continue
+		if ((nodes[id] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y + GraphView.NODE_HEIGHT > frame_bottom:
+			below.append(id)
+	below.sort_custom(func(a: String, b: String) -> bool:
+		return ((nodes[a] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y < ((nodes[b] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
+	)
+
+	var block_ids: Array = []
+	var shift: float = 0.0
+	if not below.is_empty():
+		var first_y: float = ((nodes[below[0]] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
+		if first_y < parked_new_bottom + gap:   # the parked node lands on the first node → make room
+			shift = (parked_new_bottom + gap) - first_y
+			var block_bottom: float = -INF
+			for id: String in below:
+				var y: float = ((nodes[id] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
+				if not block_ids.is_empty() and (y - block_bottom) >= shift:
+					break   # a gap wide enough to absorb the shift — everything from here down is clear
+				block_ids.append(id)
+				block_bottom = maxf(block_bottom, y + GraphView.NODE_HEIGHT)
+			for id: String in block_ids:
+				var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+				(nodes[id] as Dictionary)["pos"] = Vector2(p.x, p.y + shift)
+
+	g["park_ids"] = parked
+	g["park_amt"] = park_amt
+	g["park_below_ids"] = block_ids
+	g["park_below_amt"] = shift
+
+
+# Collapse counterpart to _push_parked_nodes_out: reverse the exact moves recorded on expand, so a parked
+# node returns to the freed space and the nudged-aside nodes come back up. Runs after membership is frozen
+# (the parked node is still below the frame then, so it isn't captured as a member). A parked node the
+# author dragged back into the frame while expanded is now a member — left in place, not un-shifted.
+func _undo_expand_pushout(g: Dictionary) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var member_set: Dictionary = {}
+	for id: String in g.get("members", []):
+		member_set[id] = true
+	var park_amt: float = float(g.get("park_amt", 0.0))
+	for id: String in g.get("park_ids", []):
+		if nodes.has(id) and not member_set.has(id):
+			var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+			(nodes[id] as Dictionary)["pos"] = Vector2(p.x, p.y - park_amt)
+	var below_amt: float = float(g.get("park_below_amt", 0.0))
+	for id: String in g.get("park_below_ids", []):
+		if nodes.has(id):
+			var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+			(nodes[id] as Dictionary)["pos"] = Vector2(p.x, p.y - below_amt)
+	g.erase("park_ids")
+	g.erase("park_amt")
+	g.erase("park_below_ids")
+	g.erase("park_below_amt")
 
 
 # ---------------------------------------------------------------------------
@@ -564,16 +1051,19 @@ func _show_shortcuts_overlay() -> void:
 			["Delete  /  Backspace", "Delete the selected node(s)"],
 		]],
 		["CLIPBOARD", [
-			["Ctrl + C", "Copy the selected node(s)"],
+			["Ctrl + C", "Copy the selection — node(s) or a note"],
 			["Ctrl + X", "Cut (copy + delete)"],
-			["Ctrl + V", "Paste (fresh ids, offset)"],
-			["Ctrl + D", "Duplicate the selection"],
+			["Ctrl + V", "Paste (fresh ids, offset on repeat)"],
+			["Ctrl + D", "Duplicate the selection in place"],
 		]],
 		["ADD NODE  (near the selection)", [
 			["Ctrl + 1", "Add a round"],
 			["Ctrl + 2", "Add a shop"],
 			["Ctrl + 3", "Add a storyboard"],
 			["Ctrl + 4", "Add a fork"],
+		]],
+		["RIGHT-CLICK THE CANVAS", [
+			["Right-click empty space", "Menu: add a node / note / group at the cursor"],
 		]],
 		["SELECT & MOVE", [
 			["Click a node", "Select it (edit it in the side panel)"],
@@ -720,12 +1210,19 @@ func _input(event: InputEvent) -> void:
 
 	match k.keycode:
 		KEY_BACKSPACE, KEY_DELETE:
-			# Delete the selected node. Must yield to text editing — Backspace/Delete still edit
-			# characters inside a focused LineEdit/TextEdit.
-			if _focus_is_text_field() or _selected_graph_node_ids.is_empty():
+			# Delete the selected note, else the selected node(s). Must yield to text editing —
+			# Backspace/Delete still edit characters inside a focused LineEdit/TextEdit.
+			if _focus_is_text_field():
 				return
-			_delete_selected_nodes()
-			get_viewport().set_input_as_handled()
+			if _selected_comment_idx >= 0:
+				_delete_comment(_selected_comment_idx)
+				get_viewport().set_input_as_handled()
+			elif _selected_frame_idx >= 0:
+				_delete_frame(_selected_frame_idx)
+				get_viewport().set_input_as_handled()
+			elif not _selected_graph_node_ids.is_empty():
+				_delete_selected_nodes()
+				get_viewport().set_input_as_handled()
 		KEY_ESCAPE:
 			# Cancel an in-progress edge wire, else drop the node selection. Only consume the event
 			# when there was actually something to cancel/clear.
@@ -1237,6 +1734,8 @@ func _load_graph(journey: Dictionary) -> void:
 # Mirror it and show the matching side panel — journey info (0), the node editor (1), or the
 # multi-select panel (2+).
 func _on_graph_selection_changed(ids: Array) -> void:
+	_selected_comment_idx = -1   # selecting a node (or clearing) takes over from any open note/frame
+	_selected_frame_idx = -1
 	_selected_graph_node_ids = ids.duplicate()
 	_selected_graph_node_id = str(ids[0]) if ids.size() == 1 else ""
 	match ids.size():
@@ -1264,7 +1763,7 @@ func _on_edge_drawn(source_id: String, edge_idx: int, target_id: String) -> void
 
 # Graph editor: create a fresh node of `type`, placed near the selection (grid-snapped) and
 # unconnected — the author wires it with edges (slice 3c). Becomes the start if it's the first node.
-func _create_graph_node(type: String) -> void:
+func _create_graph_node(type: String, at_world: Variant = null) -> void:
 	_push_undo()
 	if not _graph_model.has("nodes"):
 		_graph_model["nodes"] = {}
@@ -1279,8 +1778,12 @@ func _create_graph_node(type: String) -> void:
 			out.append({"to": "", "name": p.get("name", ""), "description": p.get("description", ""),
 				"image_path": "", "weight": int(p.get("weight", 1)), "threshold": int(p.get("threshold", 0)),
 				"required_item": str(p.get("required_item", "")), "cost": int(p.get("cost", 0))})
+	# Cursor placement (right-click menu) centres the node on the click; otherwise drop it just right of
+	# the selected node, else at the origin.
 	var pos: Vector2 = Vector2.ZERO
-	if _selected_graph_node_id != "" and nodes.has(_selected_graph_node_id):
+	if at_world is Vector2:
+		pos = (at_world as Vector2) - Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT) * 0.5
+	elif _selected_graph_node_id != "" and nodes.has(_selected_graph_node_id):
 		pos = (nodes[_selected_graph_node_id] as Dictionary).get("pos", Vector2.ZERO) + Vector2(240.0, 0.0)
 	nodes[node_id] = {"type": type, "data": data, "pos": GraphLayout.snap(pos), "out": out}
 	if str(_graph_model.get("start", "")) == "":
@@ -1346,35 +1849,59 @@ func _snapshot_selection() -> Array:
 	return entries
 
 
-# Ctrl+C — copy the selected node(s) to the clipboard.
+# Ctrl+C — copy the active selection (a note or the node[s]). Mirrors the Delete priority:
+# note → nodes (the selection is exclusive, so at most one applies).
 func _copy_selection() -> void:
-	if _selected_graph_node_ids.is_empty():
-		return
-	_node_clipboard = _snapshot_selection()
-	_paste_count = 0
-	_show_status("Copied %d node%s — Ctrl+V to paste." % [_node_clipboard.size(), "" if _node_clipboard.size() == 1 else "s"], false)
+	if _selected_comment_idx >= 0:
+		var comments: Array = _graph_model.get("comments", [])
+		if _selected_comment_idx >= comments.size():
+			return
+		_clip_comment = (comments[_selected_comment_idx] as Dictionary).duplicate(true)
+		_clip_kind = "comment"
+		_paste_count = 0
+		_show_status("Copied note — Ctrl+V to paste.", false)
+	elif not _selected_graph_node_ids.is_empty():
+		_node_clipboard = _snapshot_selection()
+		_clip_kind = "nodes"
+		_paste_count = 0
+		_show_status("Copied %d node%s — Ctrl+V to paste." % [_node_clipboard.size(), "" if _node_clipboard.size() == 1 else "s"], false)
 
 
-# Ctrl+X — copy the selection, then delete it (one undoable action via _delete_selected_nodes).
+# Ctrl+X — copy the active selection, then delete it (one undo step).
 func _cut_selection() -> void:
-	if _selected_graph_node_ids.is_empty():
-		return
-	_node_clipboard = _snapshot_selection()
-	_paste_count = 0
-	_delete_selected_nodes()
+	if _selected_comment_idx >= 0:
+		var comments: Array = _graph_model.get("comments", [])
+		if _selected_comment_idx >= comments.size():
+			return
+		_clip_comment = (comments[_selected_comment_idx] as Dictionary).duplicate(true)
+		_clip_kind = "comment"
+		_paste_count = 0
+		_delete_comment(_selected_comment_idx)
+	elif not _selected_graph_node_ids.is_empty():
+		_node_clipboard = _snapshot_selection()
+		_clip_kind = "nodes"
+		_paste_count = 0
+		_delete_selected_nodes()
 
 
 # Ctrl+V — paste the clipboard, cascading the offset on repeated pastes.
 func _paste_clipboard() -> void:
-	if _node_clipboard.is_empty():
+	if _clip_kind == "":
 		return
 	_paste_count += 1
-	_paste_nodes(_node_clipboard, _paste_count)
+	match _clip_kind:
+		"nodes":   _paste_nodes(_node_clipboard, _paste_count)
+		"comment": _paste_comment(_clip_comment, _paste_count)
 
 
-# Ctrl+D — duplicate the selection in place (without disturbing the clipboard).
+# Ctrl+D — duplicate the active selection in place (without disturbing the clipboard).
 func _duplicate_selection() -> void:
-	_paste_nodes(_snapshot_selection(), 1)
+	if _selected_comment_idx >= 0:
+		var comments: Array = _graph_model.get("comments", [])
+		if _selected_comment_idx < comments.size():
+			_paste_comment((comments[_selected_comment_idx] as Dictionary).duplicate(true), 1)
+	elif not _selected_graph_node_ids.is_empty():
+		_paste_nodes(_snapshot_selection(), 1)
 
 
 # Creates fresh nodes from a clipboard-shaped list, offset by `offset_mult` grid steps. Edges between
@@ -1424,6 +1951,27 @@ func _paste_nodes(entries: Array, offset_mult: int) -> void:
 		pasted_ids.append(new_id)
 	_graph.set_selection(pasted_ids)
 	_show_status("Pasted %d node%s." % [pasted_ids.size(), "" if pasted_ids.size() == 1 else "s"], false)
+
+
+# Paste a sticky note from the clipboard, offset by `offset_mult` grid steps; selects it. One undo step.
+func _paste_comment(comment: Dictionary, offset_mult: int) -> void:
+	if comment.is_empty():
+		return
+	_push_undo()
+	if not _graph_model.has("comments"):
+		_graph_model["comments"] = []
+	var comments: Array = _graph_model["comments"]
+	var nc: Dictionary = comment.duplicate(true)
+	nc["pos"] = GraphLayout.snap((comment.get("pos", Vector2.ZERO) as Vector2) + PASTE_OFFSET * float(offset_mult))
+	comments.append(nc)
+	_graph.deselect_nodes_silent()
+	_selected_graph_node_ids = []
+	_selected_graph_node_id = ""
+	_selected_frame_idx = -1
+	_selected_comment_idx = comments.size() - 1
+	_refresh_graph()
+	_side_renderer.show_comment_editor(_selected_comment_idx)
+	_show_status("Pasted note.", false)
 
 
 # Graph editor click-to-connect: arm/cancel connect mode from `source_id` (a regular node's
@@ -1578,6 +2126,8 @@ func _graph_snapshot() -> Dictionary:
 	return {
 		"start": str(_graph_model.get("start", "")),
 		"nodes": (_graph_model.get("nodes", {}) as Dictionary).duplicate(true),
+		"comments": (_graph_model.get("comments", []) as Array).duplicate(true),
+		"groups": (_graph_model.get("groups", []) as Array).duplicate(true),
 	}
 
 
@@ -1619,6 +2169,8 @@ func _restore_graph_snapshot(snap: Dictionary) -> void:
 	_graph_model.clear()
 	_graph_model["start"] = str(snap.get("start", ""))
 	_graph_model["nodes"] = (snap.get("nodes", {}) as Dictionary).duplicate(true)
+	_graph_model["comments"] = (snap.get("comments", []) as Array).duplicate(true)
+	_graph_model["groups"] = (snap.get("groups", []) as Array).duplicate(true)
 	# Re-apply the selection, dropping any node the restore removed.
 	var survivors: Array = []
 	for id: String in _selected_graph_node_ids:
@@ -1704,6 +2256,7 @@ func _launch_test_play(paths: Dictionary) -> void:
 	GameState.set_meta("_test_return_journey", journey)
 	GameState.set_meta("_test_seed_score", _test_seed_score)
 	GameState.set_meta("_test_seed_coins", _test_seed_coins)
+	GameState.set_meta("_test_seed_flags", _test_seed_flags)
 	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
 
 
@@ -1978,7 +2531,40 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		"MapEnabled":  _journey_map_enabled,
 	}
 	result.merge(node_block)   # adds Format, Start, Nodes
+	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))
+	result["Groups"] = _serialize_groups(_graph_model.get("groups", []))
 	return result
+
+
+# Serializes the editor's sticky-note comments to the journey.json `Comments` overlay (runtime ignores it).
+func _serialize_comments(comments: Array) -> Array:
+	var out: Array = []
+	for c: Dictionary in comments:
+		var p: Vector2 = c.get("pos", Vector2.ZERO)
+		var entry: Dictionary = {"Pos": [p.x, p.y], "Text": str(c.get("text", ""))}
+		if c.has("color"):
+			entry["Color"] = (c["color"] as Color).to_html()
+		out.append(entry)
+	return out
+
+
+# Serializes the editor's group frames to the journey.json `Groups` overlay (runtime ignores it).
+func _serialize_groups(groups: Array) -> Array:
+	var out: Array = []
+	for g: Dictionary in groups:
+		var r: Rect2 = g.get("rect", Rect2())
+		var entry: Dictionary = {"Pos": [r.position.x, r.position.y], "Size": [r.size.x, r.size.y], "Label": str(g.get("label", ""))}
+		if g.has("color"):
+			entry["Color"] = (g["color"] as Color).to_html()
+		if g.get("collapsed", false):
+			entry["Collapsed"] = true
+			entry["Members"] = (g.get("members", []) as Array).duplicate()
+			entry["ShiftIds"] = (g.get("shift_ids", []) as Array).duplicate()
+			entry["Shift"] = float(g.get("shift_amt", 0.0))
+			entry["FrameShiftIdxs"] = (g.get("frame_shift_idxs", []) as Array).duplicate()
+			entry["FrameShift"] = float(g.get("frame_shift_amt", 0.0))
+		out.append(entry)
+	return out
 
 
 # Pools a round node's playback media (funscript / axis / vib / boss image / video) into
@@ -2130,6 +2716,8 @@ func _save_fork_node_edges(edges: Array, abs_media_dir: String, node_id: String,
 			"threshold":     int(e.get("threshold", 0)),
 			"required_item": str(e.get("required_item", "")),
 			"cost":          int(e.get("cost", 0)),
+			"required_flag": str(e.get("required_flag", "")),
+			"set_flags":     JourneyData.clean_flag_list(e.get("set_flags", [])),
 		})
 	return out
 

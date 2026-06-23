@@ -67,6 +67,22 @@ var _connect_mode: bool = false             # builder is wiring an edge — a no
 var _dragging_node: String = ""             # the pressed node, or "" when no drag is armed
 var _drag_moved: bool = false               # did the drag actually move (vs a plain click)?
 var _drag_started: bool = false             # has the drag emitted nodes_drag_started yet (one undo per drag)?
+
+# Comment (sticky-note) drag state — mirrors the node-drag model above.
+var _comment_ctrls: Array = []              # index -> Control, rebuilt each layout
+var _dragging_comment: int = -1             # the pressed comment index, or -1 when none
+var _comment_drag_moved: bool = false
+var _comment_drag_started: bool = false
+
+# Group-frame drag/resize state — a labelled rectangle that moves the nodes inside it.
+var _frame_ctrls: Array = []                # index -> Control, rebuilt each layout
+var _collapsed_frame_of: Dictionary = {}    # node_id -> its collapsed group's bar Control (edges reroute to it)
+var _dragging_frame: int = -1               # the frame being moved (by its header), or -1
+var _frame_drag_moved: bool = false
+var _frame_drag_started: bool = false
+var _frame_drag_node_ids: Array = []        # nodes captured inside the frame at drag start
+var _resizing_frame: int = -1               # the frame being resized (by its corner grip), or -1
+var _frame_resize_started: bool = false
 var _drag_collapse_to: String = ""          # plain-press on a multi-selected node → collapse to it on release-no-move
 
 # Drag-to-connect state (dragging from a node's out-handle to a target node). _input tracks the
@@ -98,6 +114,19 @@ signal nodes_drag_started()
 # An out-handle was dragged onto a target node — the builder wires source→target (edge_idx = fork
 # choice, or -1 for a regular node's single out-edge), reusing its connect validation + undo.
 signal edge_drawn(source_id: String, edge_idx: int, target_id: String)
+
+# A sticky-note comment was clicked (a press with no drag) — the builder shows its editor.
+signal comment_clicked(index: int)
+
+# A group frame was clicked or dragged — the builder shows its editor.
+signal frame_clicked(index: int)
+
+# A group frame's collapse chevron was pressed — the builder toggles it (undoable).
+signal frame_toggle_collapse(index: int)
+
+# Right-click on empty canvas — the builder opens a context menu (add node/note/group at the cursor).
+# Carries the world-space position under the cursor so created items land where the author clicked.
+signal canvas_context_menu_requested(world_position: Vector2)
 
 # "You are here" marker (map mode). A glowing ring around the current node, child
 # of _canvas so it pans/zooms with the graph.
@@ -189,7 +218,33 @@ func _layout_graph() -> void:
 	# Pull fresh soft-validation badges from the builder once per layout, so EVERY render path (edit,
 	# selection, create / paste / import) shows them. No provider on the player map / export → no badges.
 	_node_warnings = warning_provider.call() if (not map_mode and warning_provider.is_valid()) else {}
+	# Group frames render at the very back, then sticky-note comments, then the nodes on top. Both are
+	# editor furniture the player map never has; image export shows them static (map_mode → no gui_input).
+	_frame_ctrls = []
+	_collapsed_frame_of = {}
+	var groups: Array = _graph_model.get("groups", [])
+	for gi: int in groups.size():
+		var g: Dictionary = groups[gi]
+		var fc: Control = _make_frame(gi, g)
+		fc.position = (g.get("rect", Rect2()) as Rect2).position
+		_canvas.add_child(fc)
+		_frame_ctrls.append(fc)
+		if g.get("collapsed", false):
+			# Hide the members FROZEN at collapse time, not whatever's under the rect now — otherwise
+			# dragging a collapsed bar over an unrelated node would swallow it.
+			for hid: String in g.get("members", []):
+				if nodes.has(hid):
+					_collapsed_frame_of[hid] = fc   # hidden node → its bar; crossing edges reroute to it
+	_comment_ctrls = []
+	var comments: Array = _graph_model.get("comments", [])
+	for ci: int in comments.size():
+		var cc: Control = _make_comment(ci, comments[ci])
+		cc.position = (comments[ci] as Dictionary).get("pos", Vector2.ZERO)
+		_canvas.add_child(cc)
+		_comment_ctrls.append(cc)
 	for id: String in nodes:
+		if _collapsed_frame_of.has(id):   # inside a collapsed group — drawn as the collapsed bar instead
+			continue
 		var n: Dictionary = nodes[id]
 		_current_layout_node_id = id   # read by _make_node to mark the selected node
 		var disp: Dictionary = _graph_display_item(n)
@@ -205,15 +260,27 @@ func _layout_graph() -> void:
 	# Out-handles in a second pass so they're the topmost (always-clickable) children.
 	if not map_mode:
 		for id: String in nodes:
-			_add_out_handles(id, nodes[id], (_node_ctrls[id] as Control).position)
+			if _node_ctrls.has(id):
+				_add_out_handles(id, nodes[id], (_node_ctrls[id] as Control).position)
+	var drawn: Dictionary = {}   # dedup edges that resolve to the same control pair (collapsed bars)
 	for id: String in nodes:
+		var src_ctrl: Control = _edge_endpoint_ctrl(id)
+		if src_ctrl == null:
+			continue
 		var n: Dictionary = nodes[id]
 		var is_fork: bool = n.get("type", "") == "fork"
 		for e: Dictionary in n.get("out", []):
 			var to: String = str(e.get("to", ""))
-			if to != "" and _node_ctrls.has(to):
-				_add_edge_between(_node_ctrls[id], _node_ctrls[to],
-					UITheme.FORK_EDGE if is_fork else UITheme.EDGE)
+			if to == "":
+				continue
+			var tgt_ctrl: Control = _edge_endpoint_ctrl(to)
+			if tgt_ctrl == null or tgt_ctrl == src_ctrl:
+				continue   # missing target, or both ends collapse into the same bar (an internal edge)
+			var key: String = "%d>%d" % [src_ctrl.get_instance_id(), tgt_ctrl.get_instance_id()]
+			if drawn.has(key):
+				continue
+			drawn[key] = true
+			_add_edge_between(src_ctrl, tgt_ctrl, UITheme.FORK_EDGE if is_fork else UITheme.EDGE)
 	_canvas.set_edges(_edges)
 	_resize_canvas_to_content(_graph_content_size(_node_ctrls))
 	if not _has_initial_center:
@@ -284,6 +351,15 @@ func _on_graph_node_gui_input(event: InputEvent, node_id: String) -> void:
 func _input(event: InputEvent) -> void:
 	if _connect_drag_active:
 		_handle_connect_drag_input(event)
+		return
+	if _dragging_frame >= 0:
+		_handle_frame_drag(event)
+		return
+	if _resizing_frame >= 0:
+		_handle_frame_resize(event)
+		return
+	if _dragging_comment >= 0:
+		_handle_comment_drag(event)
 		return
 	if _dragging_node == "":
 		return
@@ -780,6 +856,17 @@ func _fork_type_label(resolution: String) -> String:
 # Edges
 # ---------------------------------------------------------------------------
 
+# The control an edge endpoint attaches to: the node itself, or — when it's inside a collapsed group —
+# that group's bar (so a boundary-crossing edge reroutes to the bar instead of vanishing). null when
+# it resolves to nothing (a deleted target).
+func _edge_endpoint_ctrl(id: String) -> Control:
+	if _node_ctrls.has(id):
+		return _node_ctrls[id]
+	if _collapsed_frame_of.has(id):
+		return _collapsed_frame_of[id]
+	return null
+
+
 # Appends an orthogonal edge that leaves the source and enters the target on whichever faces point
 # toward each other (top / bottom / left / right) — so a sideways or upward connection lands on the
 # side or bottom of the node instead of always routing into its top.
@@ -822,6 +909,309 @@ func _edge_route(src: Control, tgt: Control) -> Dictionary:
 	return {"points": pts, "arrow_dir": arrow_dir}
 
 
+# ── Canvas comments (sticky notes) ───────────────────────────────────────────
+# Author-only annotations stored on the journey (_graph_model.comments). Rendered behind the nodes,
+# editable in the side panel, draggable like a node. The player map never has them (comment-less
+# model); image export shows them static (map_mode → no gui_input).
+
+const COMMENT_WIDTH: float = 220.0
+
+func _make_comment(_idx: int, comment: Dictionary) -> Control:
+	var color: Color = comment.get("color", UITheme.AMBER)
+	var panel: PanelContainer = PanelContainer.new()
+	panel.custom_minimum_size = Vector2(COMMENT_WIDTH, 0)
+	panel.add_theme_stylebox_override("panel", _comment_stylebox(color))
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE if map_mode else Control.MOUSE_FILTER_STOP
+	var margin: MarginContainer = MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 10)
+	margin.add_theme_constant_override("margin_right", 10)
+	margin.add_theme_constant_override("margin_top", 8)
+	margin.add_theme_constant_override("margin_bottom", 8)
+	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(margin)
+	var lbl: Label = Label.new()
+	var text: String = str(comment.get("text", ""))
+	var has_text: bool = text.strip_edges() != ""
+	lbl.text = text if has_text else "(empty note)"
+	lbl.add_theme_color_override("font_color", color if has_text else UITheme.DARK_TEXT)
+	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.custom_minimum_size = Vector2(COMMENT_WIDTH - 20.0, 0)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	margin.add_child(lbl)
+	if not map_mode:
+		panel.gui_input.connect(_on_comment_gui_input.bind(_idx))
+	return panel
+
+
+func _comment_stylebox(color: Color) -> StyleBoxFlat:
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color     = Color(color.r * 0.18, color.g * 0.18, color.b * 0.18, 0.92)
+	s.border_color = Color(color.r, color.g, color.b, 0.7)
+	s.border_width_left = 3   # a sticky-note "tab" down the left edge
+	s.border_width_right = 1; s.border_width_top = 1; s.border_width_bottom = 1
+	s.corner_radius_top_left = 3; s.corner_radius_top_right = 3
+	s.corner_radius_bottom_left = 3; s.corner_radius_bottom_right = 3
+	return s
+
+
+# A press on a comment arms a drag; _input tracks motion/release globally (mirrors the node drag).
+func _on_comment_gui_input(event: InputEvent, idx: int) -> void:
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			_dragging_comment = idx
+			_comment_drag_moved = false
+			_comment_drag_started = false
+			get_viewport().set_input_as_handled()
+
+
+func _handle_comment_drag(event: InputEvent) -> void:
+	var comments: Array = _graph_model.get("comments", [])
+	if _dragging_comment >= comments.size():
+		_dragging_comment = -1
+		return
+	if event is InputEventMouseMotion:
+		if not _comment_drag_started:
+			_comment_drag_started = true
+			nodes_drag_started.emit()   # one undo entry per drag (the builder snapshots comments too)
+		var delta: Vector2 = (event as InputEventMouseMotion).relative / _zoom
+		var c: Dictionary = comments[_dragging_comment]
+		c["pos"] = (c.get("pos", Vector2.ZERO) as Vector2) + delta
+		if _dragging_comment < _comment_ctrls.size():
+			(_comment_ctrls[_dragging_comment] as Control).position = c["pos"]
+		_comment_drag_moved = true
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed:
+			var idx: int = _dragging_comment
+			_dragging_comment = -1
+			if _comment_drag_moved:
+				var cd: Dictionary = comments[idx]
+				cd["pos"] = GraphLayout.snap(cd.get("pos", Vector2.ZERO))
+			_selected_ids = []   # drop node highlights; the note becomes the active selection
+			refresh()
+			comment_clicked.emit(idx)   # select it (click or drag) so the side panel + Delete target it
+			get_viewport().set_input_as_handled()
+
+
+# Canvas-space point at the centre of the current view (for placing a new comment).
+func view_center_world() -> Vector2:
+	return (size * 0.5 - _canvas.position) / _zoom
+
+
+# Clears the node selection WITHOUT emitting graph_selection_changed — used when a frame becomes the
+# active selection (so it doesn't bounce the side panel back to the journey-info panel).
+func deselect_nodes_silent() -> void:
+	_selected_ids = []
+
+
+# ── Group frames ─────────────────────────────────────────────────────────────
+# Free-form labelled rectangles drawn behind everything. Dragging the header moves the frame AND the
+# nodes inside it; the bottom-right grip resizes. Editor furniture only (the player map has no groups).
+
+const FRAME_HEADER_H: float = 24.0
+const FRAME_GRIP:     float = 16.0
+const FRAME_MIN:      Vector2 = Vector2(140, 100)
+
+func _make_frame(idx: int, group: Dictionary) -> Control:
+	var rect: Rect2 = group.get("rect", Rect2(0, 0, 360, 240))
+	var color: Color = group.get("color", UITheme.PURPLE_BRIGHT)
+	var collapsed: bool = group.get("collapsed", false)
+	var frame: Control = Control.new()
+	# Collapsed: just the header bar (the body and the nodes inside it are hidden). No custom_minimum_size
+	# so a live resize is free to shrink (FRAME_MIN clamps it).
+	frame.size = Vector2(rect.size.x, FRAME_HEADER_H) if collapsed else rect.size
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE   # body passes clicks through to the nodes in front
+
+	if not collapsed:
+		var fill: Panel = Panel.new()
+		fill.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		fill.add_theme_stylebox_override("panel", _frame_stylebox(color))
+		frame.add_child(fill)
+
+	var header: PanelContainer = PanelContainer.new()
+	header.anchor_right = 1.0
+	header.offset_bottom = FRAME_HEADER_H
+	header.add_theme_stylebox_override("panel", _frame_header_stylebox(color))
+	header.mouse_filter = Control.MOUSE_FILTER_IGNORE if map_mode else Control.MOUSE_FILTER_STOP
+	var hmargin: MarginContainer = MarginContainer.new()
+	hmargin.add_theme_constant_override("margin_left", 6)
+	hmargin.add_theme_constant_override("margin_right", 8)
+	hmargin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var hrow: HBoxContainer = HBoxContainer.new()
+	hrow.add_theme_constant_override("separation", 4)
+	hrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hmargin.add_child(hrow)
+	header.add_child(hmargin)
+	if not map_mode:
+		var tbtn: Button = Button.new()   # collapse / expand chevron (the rest of the header drags)
+		tbtn.text = "▸" if collapsed else "▾"
+		tbtn.focus_mode = Control.FOCUS_NONE
+		tbtn.flat = true
+		tbtn.add_theme_color_override("font_color", UITheme.BG)
+		tbtn.add_theme_color_override("font_hover_color", UITheme.WHITE_SOFT)
+		tbtn.add_theme_font_size_override("font_size", 12)
+		tbtn.tooltip_text = "Collapse / expand this group"
+		tbtn.pressed.connect(func() -> void: frame_toggle_collapse.emit(idx))
+		hrow.add_child(tbtn)
+	var hlbl: Label = Label.new()
+	var ltext: String = str(group.get("label", ""))
+	hlbl.text = (ltext if ltext.strip_edges() != "" else "GROUP").to_upper()
+	hlbl.add_theme_color_override("font_color", UITheme.BG)
+	hlbl.add_theme_font_size_override("font_size", 11)
+	hlbl.clip_text = true
+	hlbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hlbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hrow.add_child(hlbl)
+	frame.add_child(header)
+
+	if not map_mode:
+		header.gui_input.connect(_on_frame_header_gui_input.bind(idx))
+		if not collapsed:
+			var grip: Panel = Panel.new()
+			grip.anchor_left = 1.0; grip.anchor_top = 1.0; grip.anchor_right = 1.0; grip.anchor_bottom = 1.0
+			grip.offset_left = -FRAME_GRIP; grip.offset_top = -FRAME_GRIP
+			grip.mouse_filter = Control.MOUSE_FILTER_STOP
+			grip.tooltip_text = "Drag to resize the frame"
+			var gs: StyleBoxFlat = StyleBoxFlat.new()
+			gs.bg_color = Color(color.r, color.g, color.b, 0.8)
+			gs.corner_radius_top_left = 4
+			grip.add_theme_stylebox_override("panel", gs)
+			grip.gui_input.connect(_on_frame_resize_gui_input.bind(idx))
+			frame.add_child(grip)
+	return frame
+
+
+func _frame_stylebox(color: Color) -> StyleBoxFlat:
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color     = Color(color.r, color.g, color.b, 0.05)
+	s.border_color = Color(color.r, color.g, color.b, 0.5)
+	s.border_width_left = 2; s.border_width_right = 2; s.border_width_top = 2; s.border_width_bottom = 2
+	s.corner_radius_top_left = 6; s.corner_radius_top_right = 6
+	s.corner_radius_bottom_left = 6; s.corner_radius_bottom_right = 6
+	return s
+
+
+func _frame_header_stylebox(color: Color) -> StyleBoxFlat:
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color = Color(color.r, color.g, color.b, 0.85)
+	s.corner_radius_top_left = 6; s.corner_radius_top_right = 6
+	return s
+
+
+func _on_frame_header_gui_input(event: InputEvent, idx: int) -> void:
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			var groups: Array = _graph_model.get("groups", [])
+			if idx < groups.size():
+				_dragging_frame = idx
+				_frame_drag_moved = false
+				_frame_drag_started = false
+				var g: Dictionary = groups[idx]
+				# A collapsed frame drags exactly its frozen members; an expanded one takes whatever's inside.
+				_frame_drag_node_ids = (g.get("members", []) as Array).duplicate() if g.get("collapsed", false) else _nodes_in_frame_rect(g.get("rect", Rect2()))
+				get_viewport().set_input_as_handled()
+
+
+func _on_frame_resize_gui_input(event: InputEvent, idx: int) -> void:
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			_resizing_frame = idx
+			_frame_resize_started = false
+			get_viewport().set_input_as_handled()
+
+
+# Node ids whose centre falls inside `rect` — captured when a frame drag begins, to move with it.
+func _nodes_in_frame_rect(rect: Rect2) -> Array:
+	var ids: Array = []
+	var half: Vector2 = Vector2(NODE_WIDTH, NODE_HEIGHT) * 0.5
+	for id: String in _graph_model.get("nodes", {}):
+		var pos: Vector2 = (_graph_model["nodes"][id] as Dictionary).get("pos", Vector2.ZERO)
+		if rect.has_point(pos + half):
+			ids.append(id)
+	return ids
+
+
+func _handle_frame_drag(event: InputEvent) -> void:
+	var groups: Array = _graph_model.get("groups", [])
+	if _dragging_frame >= groups.size():
+		_dragging_frame = -1
+		return
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	if event is InputEventMouseMotion:
+		if not _frame_drag_started:
+			_frame_drag_started = true
+			nodes_drag_started.emit()
+		var delta: Vector2 = (event as InputEventMouseMotion).relative / _zoom
+		var g: Dictionary = groups[_dragging_frame]
+		var r: Rect2 = g.get("rect", Rect2())
+		r.position += delta
+		g["rect"] = r
+		if _dragging_frame < _frame_ctrls.size():
+			(_frame_ctrls[_dragging_frame] as Control).position = r.position
+		for id: String in _frame_drag_node_ids:
+			if nodes.has(id):
+				var n: Dictionary = nodes[id]
+				n["pos"] = (n.get("pos", Vector2.ZERO) as Vector2) + delta
+				if _node_ctrls.has(id):
+					(_node_ctrls[id] as Control).position = n["pos"]
+		_frame_drag_moved = true
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed:
+			var idx: int = _dragging_frame
+			_dragging_frame = -1
+			if _frame_drag_moved:
+				var g: Dictionary = groups[idx]
+				var r: Rect2 = g.get("rect", Rect2())
+				r.position = GraphLayout.snap(r.position)
+				g["rect"] = r
+				for id: String in _frame_drag_node_ids:
+					if nodes.has(id):
+						(nodes[id] as Dictionary)["pos"] = GraphLayout.snap((nodes[id] as Dictionary).get("pos", Vector2.ZERO))
+			_frame_drag_node_ids = []
+			_selected_ids = []
+			refresh()
+			frame_clicked.emit(idx)
+			get_viewport().set_input_as_handled()
+
+
+func _handle_frame_resize(event: InputEvent) -> void:
+	var groups: Array = _graph_model.get("groups", [])
+	if _resizing_frame >= groups.size():
+		_resizing_frame = -1
+		return
+	if event is InputEventMouseMotion:
+		if not _frame_resize_started:
+			_frame_resize_started = true
+			nodes_drag_started.emit()
+		var delta: Vector2 = (event as InputEventMouseMotion).relative / _zoom
+		var g: Dictionary = groups[_resizing_frame]
+		var r: Rect2 = g.get("rect", Rect2())
+		r.size = Vector2(maxf(FRAME_MIN.x, r.size.x + delta.x), maxf(FRAME_MIN.y, r.size.y + delta.y))
+		g["rect"] = r
+		if _resizing_frame < _frame_ctrls.size():
+			(_frame_ctrls[_resizing_frame] as Control).size = r.size
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed:
+			var idx: int = _resizing_frame
+			_resizing_frame = -1
+			var g: Dictionary = groups[idx]
+			var r: Rect2 = g.get("rect", Rect2())
+			r.size = GraphLayout.snap(r.size)
+			g["rect"] = r
+			refresh()
+			get_viewport().set_input_as_handled()
+
+
 # ---------------------------------------------------------------------------
 # Pan + zoom
 # ---------------------------------------------------------------------------
@@ -838,6 +1228,11 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			_zoom_at(mb.position, _zoom - ZOOM_STEP)
+			accept_event()
+		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed and not map_mode:
+			# Right-click on empty canvas (a node consumes its own input) → context menu. Hand the
+			# builder the world position so it can drop the chosen item under the cursor.
+			canvas_context_menu_requested.emit((mb.position - _canvas.position) / _zoom)
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			if map_mode:

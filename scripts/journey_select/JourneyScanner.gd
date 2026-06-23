@@ -267,6 +267,8 @@ static func parse_graph(path: String, folder: String) -> Dictionary:
 		var totals: Dictionary = _graph_node_totals(graph)
 		result["total_actions"]   = totals["actions"]
 		result["total_length_ms"] = totals["length_ms"]
+		result["comments"] = _parse_comments(data)   # editor-only sticky notes; runtime ignores them
+		result["groups"]   = _parse_groups(data)     # editor-only group frames; runtime ignores them
 		return result
 
 	# Legacy tree format → parse the old way (full nested model + meta + totals), then
@@ -331,6 +333,46 @@ static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dicti
 		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
 		"rounds": [], "forks": [], "shops": [], "storyboards": [],
 	}
+
+
+# Editor-only canvas annotations (sticky notes) — a journey-level overlay the runtime never reads.
+static func _parse_comments(data: Dictionary) -> Array:
+	var out: Array = []
+	for c: Dictionary in data.get("Comments", []):
+		var p: Array = c.get("Pos", [0, 0])
+		var px: float = float(p[0]) if p.size() > 0 else 0.0
+		var py: float = float(p[1]) if p.size() > 1 else 0.0
+		var entry: Dictionary = {"pos": Vector2(px, py), "text": str(c.get("Text", ""))}
+		var hex: String = str(c.get("Color", ""))
+		if hex != "" and Color.html_is_valid(hex):
+			entry["color"] = Color.html(hex)
+		out.append(entry)
+	return out
+
+
+# Editor-only group frames (labelled backdrop rectangles); the runtime never reads them.
+static func _parse_groups(data: Dictionary) -> Array:
+	var out: Array = []
+	for g: Dictionary in data.get("Groups", []):
+		var p: Array = g.get("Pos", [0, 0])
+		var s: Array = g.get("Size", [360, 240])
+		var px: float = float(p[0]) if p.size() > 0 else 0.0
+		var py: float = float(p[1]) if p.size() > 1 else 0.0
+		var sw: float = float(s[0]) if s.size() > 0 else 360.0
+		var sh: float = float(s[1]) if s.size() > 1 else 240.0
+		var entry: Dictionary = {"rect": Rect2(px, py, sw, sh), "label": str(g.get("Label", ""))}
+		var hex: String = str(g.get("Color", ""))
+		if hex != "" and Color.html_is_valid(hex):
+			entry["color"] = Color.html(hex)
+		if bool(g.get("Collapsed", false)):
+			entry["collapsed"] = true
+			entry["members"] = (g.get("Members", []) as Array).duplicate()
+			entry["shift_ids"] = (g.get("ShiftIds", []) as Array).duplicate()
+			entry["shift_amt"] = float(g.get("Shift", 0.0))
+			entry["frame_shift_idxs"] = (g.get("FrameShiftIdxs", []) as Array).duplicate()
+			entry["frame_shift_amt"] = float(g.get("FrameShift", 0.0))
+		out.append(entry)
+	return out
 
 
 # Catalogue action/length totals for a graph journey. Phase-2 placeholder: sums EVERY

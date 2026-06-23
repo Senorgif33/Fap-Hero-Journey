@@ -17,6 +17,10 @@ public partial class GameState : Node
 	private Dictionary _nodes = new Dictionary();   // id -> { type, data, out:[{to,...}] }
 	private string _currentId = "";
 
+	// Boolean run flags: set by playing a node (data.set_flags) or taking a fork choice (edge.set_flags),
+	// read by flag-conditional forks (HasFlag), and carried in the save record. Cleared on a fresh start.
+	private HashSet<string> _flags = new();
+
 	// Round nodes entered so far this run = the 1-based "current round number". A DAG is
 	// acyclic, so each node is entered at most once — no double counting.
 	private int _roundsEntered = 0;
@@ -37,7 +41,8 @@ public partial class GameState : Node
 		_currentId = data.ContainsKey("start") ? data["start"].AsString() : "";
 		_roundsEntered = 0;
 		_playLog.Clear();
-		CountIfRound();
+		_flags.Clear();
+		EnterCurrent();
 	}
 
 	// Test-play "from here": teleport the walker to a node id (the DAG lets us jump
@@ -51,7 +56,8 @@ public partial class GameState : Node
 		_currentId = nodeId;
 		_roundsEntered = 0;
 		_playLog.Clear();
-		CountIfRound();
+		_flags.Clear();
+		EnterCurrent();
 		return true;
 	}
 
@@ -79,6 +85,40 @@ public partial class GameState : Node
 	{
 		if (TypeOf(_currentId) == "round")
 			_roundsEntered++;
+	}
+
+	// Landing on the current node: bump the round count and apply any flags its data sets.
+	private void EnterCurrent()
+	{
+		CountIfRound();
+		var n = NodeOf(_currentId);
+		if (n.ContainsKey("data"))
+			ApplyFlags(n["data"].AsGodotDictionary());
+	}
+
+	// Adds every name in src["set_flags"] (a node's data, or a fork edge) to the run's flag set.
+	private void ApplyFlags(Dictionary src)
+	{
+		if (!src.ContainsKey("set_flags")) return;
+		foreach (var f in src["set_flags"].AsGodotArray())
+		{
+			var name = f.AsString();
+			if (name != "") _flags.Add(name);
+		}
+	}
+
+	// Whether a run flag is currently set (used by flag-conditional fork resolution).
+	public bool HasFlag(string name) => _flags.Contains(name);
+
+	// Test-play: pre-set flags so a Test-From-Here run can exercise flag-gated forks. Adds on top of
+	// whatever the start/seek node already set.
+	public void SeedFlags(Array flags)
+	{
+		foreach (var f in flags)
+		{
+			var name = f.AsString();
+			if (name != "") _flags.Add(name);
+		}
 	}
 
 	public Dictionary CurrentItem() => NodeOf(_currentId);
@@ -125,6 +165,7 @@ public partial class GameState : Node
 				["threshold"]     = e.ContainsKey("threshold")     ? e["threshold"].AsInt32()      : 0,
 				["required_item"] = e.ContainsKey("required_item") ? e["required_item"].AsString() : "",
 				["cost"]          = e.ContainsKey("cost")          ? e["cost"].AsInt32()           : 0,
+				["required_flag"] = e.ContainsKey("required_flag") ? e["required_flag"].AsString() : "",
 			});
 		}
 		return new Dictionary {
@@ -132,6 +173,7 @@ public partial class GameState : Node
 			["description"]  = data.ContainsKey("description")  ? data["description"].AsString()  : "",
 			["resolution"]   = data.ContainsKey("resolution")  ? data["resolution"].AsString()   : "choice",
 			["cond_metric"]  = data.ContainsKey("cond_metric") ? data["cond_metric"].AsString()  : "score",
+			["cond_decider"] = data.ContainsKey("cond_decider")? data["cond_decider"].AsString() : "game",
 			["default_path"] = data.ContainsKey("default_path")? data["default_path"].AsInt32()  : 0,
 			// Carried through so GameLoop._current_map_key can key the fork's map marker.
 			["after_order"]  = data.ContainsKey("after_order") ? data["after_order"].AsInt32()   : 0,
@@ -145,7 +187,7 @@ public partial class GameState : Node
 	{
 		var edges = OutEdges(_currentId);
 		_currentId = edges.Count > 0 ? edges[0].AsGodotDictionary()["to"].AsString() : "";
-		CountIfRound();
+		EnterCurrent();
 	}
 
 	// Picks the fork's pathIndex-th out-edge and moves to its target. Out-of-range /
@@ -171,8 +213,9 @@ public partial class GameState : Node
 			["depth"]      = n.ContainsKey("depth") ? n["depth"].AsInt32() : 0,
 		});
 
+		ApplyFlags(edge);   // the chosen choice's set_flags ("you chose X")
 		_currentId = edge.ContainsKey("to") ? edge["to"].AsString() : "";
-		CountIfRound();
+		EnterCurrent();
 	}
 
 	// The journey is done once the current id is the "" sentinel (or points nowhere).
@@ -238,7 +281,16 @@ public partial class GameState : Node
 	public Dictionary CaptureSaveData() => new Dictionary {
 		["current_node"]   = _currentId,
 		["rounds_entered"] = _roundsEntered,
+		["flags"]          = FlagsArray(),
 	};
+
+	// The run's flags as a Godot Array (for the save record).
+	private Array FlagsArray()
+	{
+		var a = new Array();
+		foreach (var f in _flags) a.Add(f);
+		return a;
+	}
 
 	// Restores position from a save record. New saves carry current_node; a pre-graph
 	// save (sequence_index, no current_node) or a node that no longer exists (journey
@@ -249,17 +301,25 @@ public partial class GameState : Node
 		Journey = journeyData;
 		_nodes = journeyData.ContainsKey("nodes") ? journeyData["nodes"].AsGodotDictionary() : new Dictionary();
 		_playLog.Clear();
+		_flags.Clear();
 
 		if (saveData.ContainsKey("current_node") && _nodes.ContainsKey(saveData["current_node"].AsString()))
 		{
 			_currentId = saveData["current_node"].AsString();
 			_roundsEntered = saveData.ContainsKey("rounds_entered") ? saveData["rounds_entered"].AsInt32() : 0;
+			// Restore the flags accumulated up to the save point (don't re-walk the journey).
+			if (saveData.ContainsKey("flags"))
+				foreach (var f in saveData["flags"].AsGodotArray())
+				{
+					var name = f.AsString();
+					if (name != "") _flags.Add(name);
+				}
 		}
 		else
 		{
 			_currentId = journeyData.ContainsKey("start") ? journeyData["start"].AsString() : "";
 			_roundsEntered = 0;
-			CountIfRound();
+			EnterCurrent();
 		}
 	}
 

@@ -167,6 +167,7 @@ var _test_return_journey: Dictionary = {}
 # Sacrifice forks can be exercised from a chosen starting point.
 var _test_seed_score: int = 0
 var _test_seed_coins: int = 0
+var _test_seed_flags: Array = []
 # Set once this run's outcome has been logged to the scoreboard (on completion)
 # or when leaving via Save & Quit (a resume, not an abandon) — so the menu exit
 # doesn't also record an abandoned run.
@@ -199,10 +200,12 @@ func _ready() -> void:
 		_test_return_journey = GameState.get_meta("_test_return_journey", {})
 		_test_seed_score = int(GameState.get_meta("_test_seed_score", 0))
 		_test_seed_coins = int(GameState.get_meta("_test_seed_coins", 0))
+		_test_seed_flags = GameState.get_meta("_test_seed_flags", [])
 		GameState.remove_meta("_test_mode")
 		GameState.remove_meta("_test_return_journey")
 		GameState.remove_meta("_test_seed_score")
 		GameState.remove_meta("_test_seed_coins")
+		GameState.remove_meta("_test_seed_flags")
 
 	var is_resuming: bool = bool(GameState.get_meta("_resuming", false))
 	if is_resuming:
@@ -222,6 +225,8 @@ func _ready() -> void:
 			CoinService.SetBalance(_test_seed_coins)
 		if _test_seed_score > 0:
 			ScoreService.SeedLastRoundScore(_test_seed_score)
+		if not _test_seed_flags.is_empty():
+			GameState.SeedFlags(_test_seed_flags)
 	_refresh_coin_label(true)
 	_load_current_item()
 	_show_hud()
@@ -375,14 +380,18 @@ func _show_fork_screen(fork_data: Dictionary) -> void:
 	# Auto-resolved fork types pick a path and play a reveal instead of waiting
 	# for the player. (Sacrifice stays interactive — the player picks & pays.)
 	var resolution: String = fork_data.get("resolution", "choice")
-	# Interactive forks let the player consult the journey map mid-decision; the
-	# auto-resolving reveals run on timers, so the map stays suppressed there.
-	_overlay_map_allowed = resolution != "random" and resolution != "conditional"
+	# Conditional forks either auto-resolve (the game "spins" to the best match) or let the player pick
+	# among the paths they've unlocked (cond_decider == "player") — the latter stays interactive.
+	var auto_resolved: bool = resolution == "random" or (resolution == "conditional" and fork_data.get("cond_decider", "game") != "player")
+	# Interactive forks let the player consult the journey map mid-decision; the auto-resolving reveals
+	# run on timers, so the map stays suppressed there.
+	_overlay_map_allowed = not auto_resolved
 	match resolution:
 		"random":
 			fork_screen.reveal(_weighted_random_path(fork_data.get("paths", [])))
 		"conditional":
-			fork_screen.reveal(_conditional_path(fork_data), _conditional_caption(fork_data))
+			if auto_resolved:
+				fork_screen.reveal(_conditional_path(fork_data), _conditional_caption(fork_data))
 
 
 # Picks a path index by weight (per-path "weight", default 1). The weighting math
@@ -408,6 +417,14 @@ func _weighted_random_path(paths: Array) -> int:
 # the current score / coins / ownership.
 func _conditional_path(fork_data: Dictionary) -> int:
 	var metric: String = fork_data.get("cond_metric", "score")
+	# Flag metric: the "ownership" check is a flag-set check against GameState's run flags.
+	if metric == "flag":
+		return ForkResolver.conditional_path(
+			fork_data.get("paths", []),
+			metric,
+			int(fork_data.get("default_path", 0)),
+			0,
+			Callable(GameState, "HasFlag"))
 	var value: int = ScoreService.LastRoundScore if metric == "score" else CoinService.Balance
 	return ForkResolver.conditional_path(
 		fork_data.get("paths", []),
@@ -426,6 +443,8 @@ func _conditional_caption(fork_data: Dictionary) -> String:
 			return "BY YOUR COINS…"
 		"item":
 			return "BY WHAT YOU CARRY…"
+		"flag":
+			return "BY WHERE YOU'VE BEEN…"
 	return "FATE DECIDES…"
 
 

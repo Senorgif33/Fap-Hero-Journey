@@ -284,7 +284,7 @@ func show_graph_node_editor(node_id: String) -> void:
 	# Test From Here at the top — save + play the journey starting at this node (a synthetic
 	# {node_id} item is all _save_and_test_from needs; the graph is node-id native).
 	side_vbox.add_child(_make_test_controls({"node_id": node_id}, []))
-	side_vbox.add_child(_side_section_separator())
+	side_vbox.add_child(_side_divider_line())
 	var node_type: String = node.get("type", "round")
 	if node_type == "fork":
 		# Fork editing = out-edges as choices (3c-ii). reselect rebuilds the side panel after a
@@ -302,6 +302,10 @@ func show_graph_node_editor(node_id: String) -> void:
 			_owner._refresh_graph()                    # structural change → re-render the canvas
 			show_graph_node_editor(node_id)
 		_build_side_panel_editor(side_vbox, display, arr, 0, reselect)
+		# Round nodes group SETS FLAGS with Coins inside their editor (Rewards group); shop / storyboard
+		# nodes, whose editors aren't grouped, get it appended here. Read by flag-conditional forks.
+		if node_type != "round":
+			side_vbox.add_child(_make_set_flags_field(data))
 		# Divider between the content editor (round types / fields) and the node-operations block
 		# (connect / duplicate / delete / add) below.
 		side_vbox.add_child(_side_divider_line())
@@ -330,6 +334,129 @@ func show_graph_node_editor(node_id: String) -> void:
 
 	side_vbox.add_child(_side_section_separator())
 	side_vbox.add_child(_make_graph_add_buttons())
+
+
+# Graph editor: the side panel for a selected sticky-note comment — edit its text or delete it.
+func show_comment_editor(idx: int) -> void:
+	var side_vbox: VBoxContainer = _owner._side_vbox
+	for c in side_vbox.get_children():
+		c.queue_free()
+	var comments: Array = _owner._graph_model.get("comments", [])
+	if idx < 0 or idx >= comments.size():
+		show_journey_info_panel()
+		return
+	var hdr: Label = Label.new()
+	hdr.text = "// NOTE //"
+	hdr.add_theme_color_override("font_color", UITheme.AMBER)
+	hdr.add_theme_font_size_override("font_size", 14)
+	hdr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	side_vbox.add_child(hdr)
+	side_vbox.add_child(_side_field_label("TEXT"))
+	var edit: TextEdit = TextEdit.new()
+	edit.text = str((comments[idx] as Dictionary).get("text", ""))
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	edit.custom_minimum_size = Vector2(0, 140)
+	edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	UITheme.style_text_edit(edit)
+	edit.text_changed.connect(func() -> void:
+		var cs: Array = _owner._graph_model.get("comments", [])
+		if idx < cs.size():
+			(cs[idx] as Dictionary)["text"] = edit.text
+	)
+	edit.focus_exited.connect(func() -> void: _owner._refresh_graph())
+	side_vbox.add_child(edit)
+	side_vbox.add_child(_side_field_label("COLOUR"))
+	var swatch_row: HBoxContainer = HBoxContainer.new()
+	swatch_row.add_theme_constant_override("separation", 6)
+	for col: Color in [UITheme.AMBER, UITheme.CYAN, Color(0.45, 0.95, 0.30), UITheme.MAGENTA, UITheme.PURPLE_BRIGHT]:
+		var sw: Button = Button.new()
+		sw.custom_minimum_size = Vector2(30, 26)
+		sw.focus_mode = Control.FOCUS_NONE
+		sw.tooltip_text = "Set note colour"
+		var sb: StyleBoxFlat = StyleBoxFlat.new()
+		sb.bg_color = col
+		sb.corner_radius_top_left = 4; sb.corner_radius_top_right = 4
+		sb.corner_radius_bottom_left = 4; sb.corner_radius_bottom_right = 4
+		sw.add_theme_stylebox_override("normal", sb)
+		sw.add_theme_stylebox_override("hover", sb)
+		sw.add_theme_stylebox_override("pressed", sb)
+		sw.pressed.connect(func() -> void:
+			var cs: Array = _owner._graph_model.get("comments", [])
+			if idx < cs.size():
+				_owner._push_undo()
+				(cs[idx] as Dictionary)["color"] = col
+				_owner._refresh_graph()
+		)
+		swatch_row.add_child(sw)
+	side_vbox.add_child(swatch_row)
+	side_vbox.add_child(_side_section_separator())
+	var del_btn: Button = UITheme.make_icon_btn("🗑 DELETE NOTE", false, UITheme.ERROR_SOFT)
+	del_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	del_btn.pressed.connect(func() -> void: _owner._delete_comment(idx))
+	side_vbox.add_child(del_btn)
+
+
+# Graph editor: the side panel for a selected group frame — rename it, recolour it, or delete it.
+func show_frame_editor(idx: int) -> void:
+	var side_vbox: VBoxContainer = _owner._side_vbox
+	for c in side_vbox.get_children():
+		c.queue_free()
+	var groups: Array = _owner._graph_model.get("groups", [])
+	if idx < 0 or idx >= groups.size():
+		show_journey_info_panel()
+		return
+	var hdr: Label = Label.new()
+	hdr.text = "// GROUP //"
+	hdr.add_theme_color_override("font_color", UITheme.PURPLE_BRIGHT)
+	hdr.add_theme_font_size_override("font_size", 14)
+	hdr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	side_vbox.add_child(hdr)
+	side_vbox.add_child(_side_field_label("LABEL"))
+	var name_edit: LineEdit = LineEdit.new()
+	name_edit.text = str((groups[idx] as Dictionary).get("label", ""))
+	name_edit.placeholder_text = "Group label..."
+	UITheme.style_line_edit(name_edit)
+	name_edit.text_changed.connect(func(val: String) -> void:
+		var gs: Array = _owner._graph_model.get("groups", [])
+		if idx < gs.size():
+			(gs[idx] as Dictionary)["label"] = val
+	)
+	name_edit.focus_exited.connect(func() -> void: _owner._refresh_graph())
+	side_vbox.add_child(name_edit)
+	side_vbox.add_child(_side_field_label("COLOUR"))
+	var swatch_row: HBoxContainer = HBoxContainer.new()
+	swatch_row.add_theme_constant_override("separation", 6)
+	for col: Color in [UITheme.PURPLE_BRIGHT, UITheme.AMBER, UITheme.CYAN, Color(0.45, 0.95, 0.30), UITheme.MAGENTA]:
+		var sw: Button = Button.new()
+		sw.custom_minimum_size = Vector2(30, 26)
+		sw.focus_mode = Control.FOCUS_NONE
+		sw.tooltip_text = "Set frame colour"
+		var sb: StyleBoxFlat = StyleBoxFlat.new()
+		sb.bg_color = col
+		sb.corner_radius_top_left = 4; sb.corner_radius_top_right = 4
+		sb.corner_radius_bottom_left = 4; sb.corner_radius_bottom_right = 4
+		sw.add_theme_stylebox_override("normal", sb)
+		sw.add_theme_stylebox_override("hover", sb)
+		sw.add_theme_stylebox_override("pressed", sb)
+		sw.pressed.connect(func() -> void:
+			var gs: Array = _owner._graph_model.get("groups", [])
+			if idx < gs.size():
+				_owner._push_undo()
+				(gs[idx] as Dictionary)["color"] = col
+				_owner._refresh_graph()
+		)
+		swatch_row.add_child(sw)
+	side_vbox.add_child(swatch_row)
+	side_vbox.add_child(_side_section_separator())
+	var collapsed: bool = bool((groups[idx] as Dictionary).get("collapsed", false))
+	var collapse_btn: Button = UITheme.make_icon_btn("▸ EXPAND" if collapsed else "▾ COLLAPSE", false, UITheme.PURPLE_MID)
+	collapse_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	collapse_btn.pressed.connect(func() -> void: _owner._on_frame_toggle_collapse(idx))
+	side_vbox.add_child(collapse_btn)
+	var del_btn: Button = UITheme.make_icon_btn("🗑 DELETE GROUP", false, UITheme.ERROR_SOFT)
+	del_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	del_btn.pressed.connect(func() -> void: _owner._delete_frame(idx))
+	side_vbox.add_child(del_btn)
 
 
 # Graph editor: the side panel shown when 2+ nodes are selected. Group actions only (per-node field
@@ -377,6 +504,38 @@ func show_graph_multi_select_panel(ids: Array) -> void:
 # conditional sub-config) and its CHOICES — one per out-edge. Unlike the tree fork editor, a
 # choice holds no nested items; it just carries its config and a `to` target wired by connect
 # mode. Mutates node.data + node.out in place; structural changes go through `reselect`.
+# A "SETS FLAGS" comma-separated field writing a cleaned string array to target["set_flags"] — shared
+# by a playable node's data and a fork choice's edge. Flags are set when the node plays or the choice
+# is taken, and read by flag-conditional forks downstream.
+# A small label listing the flags already used in the journey, so authors reuse consistent names (a
+# lightweight stand-in for autocomplete). "No flags used yet." when there are none.
+func _known_flags_hint() -> Label:
+	var known: Array = (_owner._all_set_flags() as Dictionary).keys()
+	known.sort()
+	var lbl: Label = Label.new()
+	lbl.text = ("Known: " + ", ".join(PackedStringArray(known))) if not known.is_empty() else "No flags used yet."
+	lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	lbl.add_theme_font_size_override("font_size", 9)
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	return lbl
+
+
+func _make_set_flags_field(target: Dictionary) -> Control:
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	col.add_child(_side_field_label("SETS FLAGS (COMMA-SEPARATED)"))
+	var edit: LineEdit = LineEdit.new()
+	edit.placeholder_text = "e.g. spared_boss, found_key"
+	edit.text = ", ".join(PackedStringArray(JourneyData.clean_flag_list(target.get("set_flags", []))))
+	UITheme.style_line_edit(edit)
+	edit.text_changed.connect(func(v: String) -> void:
+		target["set_flags"] = JourneyData.clean_flag_list(Array(v.split(",")))
+	)
+	col.add_child(edit)
+	col.add_child(_known_flags_hint())
+	return col
+
+
 func _make_graph_fork_editor(node_id: String, node: Dictionary, reselect: Callable) -> Control:
 	var data: Dictionary = node.get("data", {})
 	var out: Array = node.get("out", [])
@@ -423,11 +582,12 @@ func _make_graph_fork_editor(node_id: String, node: Dictionary, reselect: Callab
 	# Conditional sub-config: which metric + the fallback choice.
 	if resolution == "conditional":
 		col.add_child(_side_field_label("CONDITION"))
-		var metric_values: Array = ["score", "coins", "item"]
+		var metric_values: Array = ["score", "coins", "item", "flag"]
 		var metric_dd: OptionButton = OptionButton.new()
 		metric_dd.add_item("Last Round Score")
 		metric_dd.add_item("Coin Balance")
 		metric_dd.add_item("Item Owned")
+		metric_dd.add_item("Flag Set")
 		metric_dd.selected = max(0, metric_values.find(metric))
 		metric_dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		UITheme.style_option_button(metric_dd)
@@ -437,7 +597,23 @@ func _make_graph_fork_editor(node_id: String, node: Dictionary, reselect: Callab
 		)
 		col.add_child(metric_dd)
 
-		col.add_child(_side_field_label("DEFAULT CHOICE (NO MATCH)"))
+		# Who resolves it: the game auto-spins to the best match, or the player picks among the paths
+		# they've unlocked (the condition gates which choices are selectable).
+		col.add_child(_side_field_label("RESOLVED BY"))
+		var decider_values: Array = ["game", "player"]
+		var decider_dd: OptionButton = OptionButton.new()
+		decider_dd.add_item("Game (auto-spin)")
+		decider_dd.add_item("Player (picks unlocked)")
+		decider_dd.selected = max(0, decider_values.find(data.get("cond_decider", "game")))
+		decider_dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		UITheme.style_option_button(decider_dd)
+		decider_dd.item_selected.connect(func(i: int) -> void:
+			data["cond_decider"] = decider_values[i]
+			reselect.call(0)
+		)
+		col.add_child(decider_dd)
+
+		col.add_child(_side_field_label("DEFAULT CHOICE (FALLBACK / ALWAYS AVAILABLE)"))
 		var def_dd: OptionButton = OptionButton.new()
 		for ej in out.size():
 			var en: String = str((out[ej] as Dictionary).get("name", "")).strip_edges()
@@ -449,7 +625,7 @@ func _make_graph_fork_editor(node_id: String, node: Dictionary, reselect: Callab
 		col.add_child(def_dd)
 
 	var res_hint: Label = Label.new()
-	res_hint.text = _fork_resolution_hint(resolution, metric)
+	res_hint.text = _fork_resolution_hint(resolution, metric, data.get("cond_decider", "game"))
 	res_hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	res_hint.add_theme_font_size_override("font_size", 10)
 	res_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -561,10 +737,21 @@ func _make_graph_choice_block(node_id: String, out: Array, ei: int, resolution: 
 		_add_required_item_field(sub, out, ei, edge, "REQUIRED ITEM (CONSUMED)")
 	elif resolution == "conditional" and metric == "item":
 		_add_required_item_field(sub, out, ei, edge, "REQUIRED ITEM")
+	elif resolution == "conditional" and metric == "flag":
+		sub.add_child(_side_field_label("REQUIRED FLAG"))
+		var rf_edit: LineEdit = LineEdit.new()
+		rf_edit.placeholder_text = "Flag name (e.g. spared_boss)..."
+		rf_edit.text = str(edge.get("required_flag", ""))
+		UITheme.style_line_edit(rf_edit)
+		rf_edit.text_changed.connect(func(v: String) -> void: out[ei]["required_flag"] = v.strip_edges())
+		sub.add_child(rf_edit)
+		sub.add_child(_known_flags_hint())
 	elif resolution == "conditional":
 		var thr_label: String = "ACTIVATES AT ≥  (%s)" % ("SCORE" if metric == "score" else "COINS")
 		_add_path_int_field(sub, out, ei, "threshold", thr_label, 999999)
 
+	# A choice can set flags when it's taken ("you chose mercy").
+	sub.add_child(_make_set_flags_field(edge))
 	# LEADS TO — the choice's target node, wired via connect mode.
 	sub.add_child(_side_section_separator())
 	sub.add_child(_side_field_label("LEADS TO"))
@@ -616,27 +803,63 @@ func _graph_node_label(node_id: String) -> String:
 # `item` carries the node_id to launch from; `arr` is vestigial (graph mode passes []),
 # kept only for the shared _save_and_test_from signature.
 func _make_test_controls(item: Dictionary, arr: Array) -> Control:
-	var box: VBoxContainer = VBoxContainer.new()
-	box.add_theme_constant_override("separation", 4)
+	# Collapsible "Test From Here" group: the play action plus its score / coin / flag seeds. Collapsed
+	# by default to cut side-panel clutter; the open/closed state is persisted on the owner so it
+	# survives the panel rebuild that fires on every node selection.
+	var wrapper: VBoxContainer = VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 4)
 
-	var btn: Button = UITheme.make_icon_btn("▶  TEST FROM HERE", false, UITheme.SUCCESS)
+	var expanded: bool = bool(_owner._test_panel_expanded)
+	var toggle_btn: Button = Button.new()
+	toggle_btn.text = ("▾  TEST FROM HERE" if expanded else "▸  TEST FROM HERE")
+	toggle_btn.toggle_mode = true
+	toggle_btn.button_pressed = expanded
+	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	toggle_btn.tooltip_text = "Save the journey and play it from this node, with optional starting score / coins / flags."
+	UITheme.style_button(toggle_btn, UITheme.PURPLE_MID)
+	wrapper.add_child(toggle_btn)
+
+	var panel: VBoxContainer = VBoxContainer.new()
+	panel.add_theme_constant_override("separation", 4)
+	panel.visible = expanded
+	wrapper.add_child(panel)
+
+	# Primary action: save the journey and play the real runtime starting at this node.
+	var btn: Button = UITheme.make_icon_btn("▶  PLAY FROM HERE", false, UITheme.SUCCESS)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn.tooltip_text = "Save the journey and play it in the real runtime starting at this node."
 	btn.pressed.connect(func() -> void: _owner._save_and_test_from(item, arr))
-	box.add_child(btn)
+	panel.add_child(btn)
 
 	# Starting score / coins for the preview. Mainly for Conditional / Sacrifice
 	# forks, which read last-round score and coin balance to resolve. Persist on
 	# the owner so they survive selection changes.
-	box.add_child(_side_field_label("TEST SEEDS  (SCORE / COINS)"))
+	panel.add_child(_side_field_label("TEST SEEDS  (SCORE / COINS)"))
 	var seed_row: HBoxContainer = HBoxContainer.new()
 	seed_row.add_theme_constant_override("separation", 6)
 	seed_row.add_child(_make_seed_spin(
 		_owner._test_seed_score, func(v: int) -> void: _owner._test_seed_score = v))
 	seed_row.add_child(_make_seed_spin(
 		_owner._test_seed_coins, func(v: int) -> void: _owner._test_seed_coins = v))
-	box.add_child(seed_row)
-	return box
+	panel.add_child(seed_row)
+
+	# Pre-set flags for the test run, so flag-gated forks can be exercised from a mid-journey node.
+	panel.add_child(_side_field_label("SEED FLAGS  (COMMA-SEPARATED)"))
+	var flag_edit: LineEdit = LineEdit.new()
+	flag_edit.placeholder_text = "e.g. spared_boss"
+	flag_edit.text = ", ".join(PackedStringArray(JourneyData.clean_flag_list(_owner._test_seed_flags)))
+	UITheme.style_line_edit(flag_edit)
+	flag_edit.text_changed.connect(func(v: String) -> void:
+		_owner._test_seed_flags = JourneyData.clean_flag_list(Array(v.split(",")))
+	)
+	panel.add_child(flag_edit)
+
+	toggle_btn.toggled.connect(func(pressed: bool) -> void:
+		toggle_btn.text = ("▾  TEST FROM HERE" if pressed else "▸  TEST FROM HERE")
+		panel.visible = pressed
+		_owner._test_panel_expanded = pressed
+	)
+	return wrapper
 
 
 # One expanding integer SpinBox for the test-seed row, writing through `setter`.
@@ -774,7 +997,8 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	)
 	col.add_child(name_edit)
 
-	col.add_child(_side_section_separator())
+	# ── Media & scripts ─────────────────────────────────────────────────────────
+	col.add_child(_side_divider_line())
 	col.add_child(_side_field_label("VIDEO FILE"))
 	var video_zone: PanelContainer = DropZoneScript.new()
 	video_zone.accepted_extensions   = JourneyData.VIDEO_EXTENSIONS.duplicate()
@@ -859,7 +1083,15 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 			_round_preview_label(arr[idx])))
 	col.add_child(preview_btn)
 
+	# Secondary device scripts (optional, collapsed) — they round out the media group.
 	col.add_child(_side_section_separator())
+	col.add_child(_make_axis_expander(arr, idx))
+
+	col.add_child(_side_section_separator())
+	col.add_child(_make_vib_expander(arr, idx))
+
+	# ── Rewards & state ─────────────────────────────────────────────────────────
+	col.add_child(_side_divider_line())
 	col.add_child(_side_field_label("COINS AWARDED"))
 	var coins_spin: SpinBox = SpinBox.new()
 	coins_spin.min_value = 0
@@ -873,13 +1105,12 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	)
 	col.add_child(coins_spin)
 
+	# Flags this round sets when it plays (read by flag-conditional forks downstream).
 	col.add_child(_side_section_separator())
-	col.add_child(_make_axis_expander(arr, idx))
+	col.add_child(_make_set_flags_field(arr[idx]))
 
-	col.add_child(_side_section_separator())
-	col.add_child(_make_vib_expander(arr, idx))
-
-	col.add_child(_side_section_separator())
+	# ── Round behavior (checkpoint + the mutually-exclusive round types) ─────────
+	col.add_child(_side_divider_line())
 	col.add_child(_make_checkpoint_toggle(arr, idx))
 
 	col.add_child(_side_section_separator())
@@ -1401,20 +1632,33 @@ func _add_required_item_field(container: VBoxContainer, paths_arr: Array, pi: in
 
 
 # Short human description of a fork resolution type for the editor.
-func _fork_resolution_hint(resolution: String, metric: String) -> String:
+func _fork_resolution_hint(resolution: String, metric: String, decider: String) -> String:
 	match resolution:
 		"choice":
 			return "The player picks a path."
 		"random":
 			return "The game picks a path at random, weighted by each path's weight (reveal shown)."
 		"conditional":
+			if decider == "player":
+				match metric:
+					"score":
+						return "The player picks — but only paths whose score threshold the last round met are selectable (plus the default, always available)."
+					"coins":
+						return "The player picks — but only paths whose coin threshold the balance meets are selectable (plus the default). Coins are NOT spent."
+					"item":
+						return "The player picks — but only paths whose required item the player owns are selectable (plus the default). The item is NOT consumed."
+					"flag":
+						return "The player picks — but only paths whose required flag is set are selectable (plus the default)."
+				return "The player picks among the paths they qualify for (plus the default)."
 			match metric:
 				"score":
-					return "Auto-picks the highest path whose score threshold the last round met, else the default path."
+					return "The game auto-picks the highest path whose score threshold the last round met, else the default path."
 				"coins":
-					return "Auto-picks the highest path whose coin threshold the player's balance meets, else the default path. Coins are NOT spent."
+					return "The game auto-picks the highest path whose coin threshold the player's balance meets, else the default path. Coins are NOT spent."
 				"item":
-					return "Auto-picks the first path whose required item the player owns (a pure check — the item is NOT consumed), else the default path."
+					return "The game auto-picks the first path whose required item the player owns (a pure check — the item is NOT consumed), else the default path."
+				"flag":
+					return "The game auto-picks the first path whose required flag is set (by a node played or a choice taken earlier), else the default path."
 		"sacrifice":
 			return "The player picks a path and spends its cost — coins and/or an item (e.g. a Key), both consumed. Paths they can't afford are disabled, so include at least one free (0 coins, item None) path."
 	return ""
