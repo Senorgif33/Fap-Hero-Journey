@@ -21,6 +21,11 @@ public partial class GameState : Node
 	// read by flag-conditional forks (HasFlag), and carried in the save record. Cleared on a fresh start.
 	private HashSet<string> _flags = new();
 
+	// Node ids the player has landed on this run (added in EnterCurrent). Drives the map's fog-of-war
+	// reveal and rides the save record so a resumed run keeps what was found. Cleared on a fresh start —
+	// discovery is per-run.
+	private HashSet<string> _discovered = new();
+
 	// Round nodes entered so far this run = the 1-based "current round number". A DAG is
 	// acyclic, so each node is entered at most once — no double counting.
 	private int _roundsEntered = 0;
@@ -42,6 +47,7 @@ public partial class GameState : Node
 		_roundsEntered = 0;
 		_playLog.Clear();
 		_flags.Clear();
+		_discovered.Clear();
 		EnterCurrent();
 	}
 
@@ -57,6 +63,7 @@ public partial class GameState : Node
 		_roundsEntered = 0;
 		_playLog.Clear();
 		_flags.Clear();
+		_discovered.Clear();
 		EnterCurrent();
 		return true;
 	}
@@ -90,6 +97,7 @@ public partial class GameState : Node
 	// Landing on the current node: bump the round count and apply any flags its data sets.
 	private void EnterCurrent()
 	{
+		if (_currentId != "") _discovered.Add(_currentId);   // map fog-of-war: this node is now discovered
 		CountIfRound();
 		var n = NodeOf(_currentId);
 		if (n.ContainsKey("data"))
@@ -282,7 +290,17 @@ public partial class GameState : Node
 		["current_node"]   = _currentId,
 		["rounds_entered"] = _roundsEntered,
 		["flags"]          = FlagsArray(),
+		["discovered"]     = DiscoveredNodes(),
 	};
+
+	// The run's discovered node ids as a Godot Array — the save record above and GameLoop's map fog both
+	// read it. Empty until the player has landed on at least the start node.
+	public Array DiscoveredNodes()
+	{
+		var a = new Array();
+		foreach (var d in _discovered) a.Add(d);
+		return a;
+	}
 
 	// The run's flags as a Godot Array (for the save record).
 	private Array FlagsArray()
@@ -302,6 +320,7 @@ public partial class GameState : Node
 		_nodes = journeyData.ContainsKey("nodes") ? journeyData["nodes"].AsGodotDictionary() : new Dictionary();
 		_playLog.Clear();
 		_flags.Clear();
+		_discovered.Clear();
 
 		if (saveData.ContainsKey("current_node") && _nodes.ContainsKey(saveData["current_node"].AsString()))
 		{
@@ -313,6 +332,13 @@ public partial class GameState : Node
 				{
 					var name = f.AsString();
 					if (name != "") _flags.Add(name);
+				}
+			// Restore the fog-of-war discovery set the same way (per-run, but persists across resume).
+			if (saveData.ContainsKey("discovered"))
+				foreach (var d in saveData["discovered"].AsGodotArray())
+				{
+					var did = d.AsString();
+					if (did != "") _discovered.Add(did);
 				}
 		}
 		else

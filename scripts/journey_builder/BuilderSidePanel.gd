@@ -192,8 +192,68 @@ func show_journey_info_panel() -> void:
 	map_toggle.tooltip_text = "Let the player open the read-only journey map during play (◇ MAP button / M key). Turn off to keep the journey's layout a surprise."
 	map_toggle.add_theme_font_size_override("font_size", 12)
 	map_toggle.button_pressed = _owner._journey_map_enabled
-	map_toggle.toggled.connect(func(on: bool) -> void: _owner._journey_map_enabled = on)
 	side_vbox.add_child(map_toggle)
+
+	# Sub-options: fog of war + how far ahead it reveals. All grey out when the map is off; the step
+	# count additionally greys out under "whole structure". Declared before the wiring so the shared
+	# refresh closure can reach them all.
+	var fog_toggle: CheckButton = CheckButton.new()
+	fog_toggle.text = "FOG OF WAR  (REVEAL ON DISCOVERY)"
+	fog_toggle.tooltip_text = "Reveal the map as the player plays: visited nodes shown in full, the steps ahead ghosted as '?', everything beyond hidden. Discovery resets each run."
+	fog_toggle.add_theme_font_size_override("font_size", 12)
+	fog_toggle.button_pressed = _owner._journey_map_fog
+	side_vbox.add_child(fog_toggle)
+
+	var reveal_row: HBoxContainer = HBoxContainer.new()
+	reveal_row.add_theme_constant_override("separation", 8)
+	var reveal_lbl: Label = Label.new()
+	reveal_lbl.text = "STEPS REVEALED AHEAD"
+	reveal_lbl.add_theme_font_size_override("font_size", 11)
+	reveal_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	reveal_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	reveal_row.add_child(reveal_lbl)
+	var reveal_spin: SpinBox = SpinBox.new()
+	reveal_spin.min_value = 0
+	reveal_spin.max_value = 20
+	reveal_spin.step = 1
+	reveal_spin.value = maxi(0, _owner._journey_map_fog_reveal)
+	reveal_spin.tooltip_text = "How many steps of '?' ghosts to show beyond the visited trail. 0 = trail only."
+	UITheme.style_spin_box(reveal_spin)
+	reveal_row.add_child(reveal_spin)
+	side_vbox.add_child(reveal_row)
+
+	var whole_toggle: CheckButton = CheckButton.new()
+	whole_toggle.text = "REVEAL WHOLE STRUCTURE"
+	whole_toggle.tooltip_text = "Show EVERY node as a '?' ghost so the player sees the journey's shape without learning what each node is. Overrides the step count."
+	whole_toggle.add_theme_font_size_override("font_size", 12)
+	whole_toggle.button_pressed = _owner._journey_map_fog_reveal < 0
+	side_vbox.add_child(whole_toggle)
+
+	# Shared enable-state refresh: reveal controls need the map AND fog on; the step spin also greys out
+	# under "whole structure".
+	var refresh_fog: Callable = func() -> void:
+		var fog_on: bool = _owner._journey_map_enabled and _owner._journey_map_fog
+		fog_toggle.disabled = not _owner._journey_map_enabled
+		whole_toggle.disabled = not fog_on
+		reveal_spin.editable = fog_on and not whole_toggle.button_pressed
+	refresh_fog.call()
+
+	reveal_spin.value_changed.connect(func(v: float) -> void:
+		if not whole_toggle.button_pressed:
+			_owner._journey_map_fog_reveal = int(v)
+	)
+	whole_toggle.toggled.connect(func(on: bool) -> void:
+		_owner._journey_map_fog_reveal = -1 if on else int(reveal_spin.value)
+		refresh_fog.call()
+	)
+	fog_toggle.toggled.connect(func(on: bool) -> void:
+		_owner._journey_map_fog = on
+		refresh_fog.call()
+	)
+	map_toggle.toggled.connect(func(on: bool) -> void:
+		_owner._journey_map_enabled = on
+		refresh_fog.call()
+	)
 
 	side_vbox.add_child(_side_section_separator())
 	side_vbox.add_child(_make_graph_add_buttons())

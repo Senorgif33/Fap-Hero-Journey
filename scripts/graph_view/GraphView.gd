@@ -55,6 +55,12 @@ var _edges: Array = []
 # The free-form graph model (GRAPH_EDITOR_OVERHAUL.md): {start, nodes:{id:{type,data,pos,out}}}.
 # Rendered by _layout_graph — nodes at their saved pos, edges from each node's out-list.
 var _graph_model: Dictionary = {}
+# Fog of war (player map only): when on, visited nodes render in full, nodes within _fog_depth out-edge
+# hops of the visited trail render as "?" ghosts, and everything else is hidden. Recomputed each layout.
+var _fog_enabled: bool = false
+var _fog_depth: int = 1               # ghost levels revealed beyond the visited trail (< 0 = whole structure)
+var _fog_revealed: Dictionary = {}   # node_id -> true (discovered this run; full render)
+var _fog_ghost: Dictionary = {}      # node_id -> true (within _fog_depth of the trail; "?" ghost render)
 var _selected_ids: Array = []               # selected node ids (graph mode) — drives the highlight + group ops
 var _current_layout_node_id: String = ""    # transient: the node _make_node is building (graph mode)
 var _node_ctrls: Dictionary = {}            # node_id -> Control (graph mode), for live drag moves
@@ -175,6 +181,18 @@ func set_graph(graph: Dictionary) -> void:
 	refresh()
 
 
+# Player-map fog of war: reveal `discovered` nodes (full) plus every node within `depth` out-edge hops of
+# them ("?" ghosts), hiding the rest. depth < 0 ghosts the whole structure. Re-renders; call again with a
+# grown `discovered` set as the player progresses. The ghost set is derived at layout time by BFS.
+func set_fog(enabled: bool, discovered: Array, depth: int = 1) -> void:
+	_fog_enabled = enabled
+	_fog_depth = depth
+	_fog_revealed = {}
+	for id in discovered:
+		_fog_revealed[str(id)] = true
+	refresh()
+
+
 func refresh() -> void:
 	# Tear down old nodes.
 	for c in _canvas.get_children():
@@ -215,6 +233,27 @@ func _resize_canvas_to_content(content_size: Vector2) -> void:
 func _layout_graph() -> void:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
 	_node_ctrls = {}   # node_id -> Control (rebuilt each layout)
+	# Fog of war (player map): BFS out from the visited trail along out-edges, marking ghosts up to
+	# _fog_depth hops away (unlimited when _fog_depth < 0 → the whole structure, since every node is
+	# reachable from the always-visited start). Nodes neither revealed nor ghost are hidden below.
+	_fog_ghost = {}
+	if _fog_enabled:
+		var ring: Array = _fog_revealed.keys()
+		var seen: Dictionary = _fog_revealed.duplicate()
+		var hops: int = 0
+		while not ring.is_empty() and (_fog_depth < 0 or hops < _fog_depth):
+			hops += 1
+			var next_ring: Array = []
+			for nid: String in ring:
+				if not nodes.has(nid):
+					continue
+				for fe: Dictionary in (nodes[nid] as Dictionary).get("out", []):
+					var fto: String = str(fe.get("to", ""))
+					if fto != "" and not seen.has(fto):
+						seen[fto] = true
+						_fog_ghost[fto] = true
+						next_ring.append(fto)
+			ring = next_ring
 	# Pull fresh soft-validation badges from the builder once per layout, so EVERY render path (edit,
 	# selection, create / paste / import) shows them. No provider on the player map / export → no badges.
 	_node_warnings = warning_provider.call() if (not map_mode and warning_provider.is_valid()) else {}
@@ -245,6 +284,16 @@ func _layout_graph() -> void:
 	for id: String in nodes:
 		if _collapsed_frame_of.has(id):   # inside a collapsed group — drawn as the collapsed bar instead
 			continue
+		if _fog_enabled and not _fog_revealed.has(id):
+			# Not yet reached: render a "?" ghost if it's within the reveal depth, else nothing at all
+			# (no control → its edges drop out too, keeping the unknown unknown).
+			if _fog_ghost.has(id):
+				var ghost: Control = _make_fog_node()
+				ghost.position = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+				ghost.set_meta("graph_node_id", id)
+				_canvas.add_child(ghost)
+				_node_ctrls[id] = ghost
+			continue
 		var n: Dictionary = nodes[id]
 		_current_layout_node_id = id   # read by _make_node to mark the selected node
 		var disp: Dictionary = _graph_display_item(n)
@@ -264,6 +313,9 @@ func _layout_graph() -> void:
 				_add_out_handles(id, nodes[id], (_node_ctrls[id] as Control).position)
 	var drawn: Dictionary = {}   # dedup edges that resolve to the same control pair (collapsed bars)
 	for id: String in nodes:
+		# In fog mode, hidden nodes have no control so _edge_endpoint_ctrl returns null and their edges
+		# drop out below; edges among shown nodes (visited + ghosts) draw, so the revealed structure
+		# (up to the reveal depth) is visible — including ghost→ghost links at depth ≥ 2.
 		var src_ctrl: Control = _edge_endpoint_ctrl(id)
 		if src_ctrl == null:
 			continue
@@ -296,6 +348,32 @@ func _graph_display_item(n: Dictionary) -> Dictionary:
 	if d["type"] == "fork":
 		d["paths"] = n.get("out", [])
 	return d
+
+
+# Fog-of-war placeholder for a not-yet-reached node one step ahead: a dim "?" box the same size as a real
+# node (so the layout + the edge into it line up). Carries no type / name, so it never spoils what's next.
+func _make_fog_node() -> Control:
+	var panel: PanelContainer = PanelContainer.new()
+	panel.custom_minimum_size = Vector2(NODE_WIDTH, NODE_HEIGHT)
+	panel.size = Vector2(NODE_WIDTH, NODE_HEIGHT)
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb: StyleBoxFlat = StyleBoxFlat.new()
+	sb.bg_color = Color(UITheme.PANEL_BG.r, UITheme.PANEL_BG.g, UITheme.PANEL_BG.b, 0.45)
+	sb.border_color = Color(UITheme.SEPARATOR.r, UITheme.SEPARATOR.g, UITheme.SEPARATOR.b, 0.55)
+	sb.border_width_left = 1; sb.border_width_right = 1
+	sb.border_width_top = 1;  sb.border_width_bottom = 1
+	sb.corner_radius_top_left = 6; sb.corner_radius_top_right = 6
+	sb.corner_radius_bottom_left = 6; sb.corner_radius_bottom_right = 6
+	panel.add_theme_stylebox_override("panel", sb)
+	var lbl: Label = Label.new()
+	lbl.text = "?"
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.add_theme_color_override("font_color", Color(UITheme.SEPARATOR.r, UITheme.SEPARATOR.g, UITheme.SEPARATOR.b, 0.8))
+	lbl.add_theme_font_size_override("font_size", 28)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(lbl)
+	return panel
 
 
 # Bounding size of the placed graph nodes (for canvas sizing). Uses the fixed node size rather

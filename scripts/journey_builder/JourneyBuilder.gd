@@ -73,6 +73,8 @@ var _journey_desc:           String = ""
 var _journey_difficulty_idx: int    = 0
 var _journey_tags:           Array  = []  # Array[String] of tag ids (see TagRegistry)
 var _journey_map_enabled:    bool   = true  # author allows the in-play journey map (off = enforce surprise)
+var _journey_map_fog:        bool   = false # fog of war: reveal the map as the player discovers it (map must be enabled)
+var _journey_map_fog_reveal: int    = 1     # fog reveal depth: ghost levels ahead of the trail (< 0 = whole structure)
 
 # Folder the journey was loaded from when editing. If the journey is renamed,
 # the save writes a new folder; this lets us delete the stale original.
@@ -1713,6 +1715,8 @@ func _load_graph(journey: Dictionary) -> void:
 	_journey_difficulty_idx = parsed["difficulty_idx"]
 	_journey_tags           = (parsed.get("tags", []) as Array).duplicate()
 	_journey_map_enabled    = bool(parsed.get("map_enabled", true))
+	_journey_map_fog        = bool(parsed.get("map_fog", false))
+	_journey_map_fog_reveal = int(parsed.get("map_fog_reveal", 1))
 	if (parsed["cover_path"] as String) != "":
 		_cover_path = parsed["cover_path"]
 		_update_cover_preview()
@@ -2529,6 +2533,8 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		"Difficulty":  JourneyData.DIFFICULTIES[_journey_difficulty_idx],
 		"Tags":        TagRegistry.sanitize(_journey_tags),
 		"MapEnabled":  _journey_map_enabled,
+		"MapFog":      _journey_map_fog,
+		"MapFogReveal": _journey_map_fog_reveal,
 	}
 	result.merge(node_block)   # adds Format, Start, Nodes
 	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))

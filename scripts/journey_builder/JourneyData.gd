@@ -347,6 +347,8 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 		"cover_path":     cover_path,
 		"tags":           journey.get("tags", []),
 		"map_enabled":    bool(journey.get("map_enabled", true)),
+		"map_fog":        bool(journey.get("map_fog", false)),
+		"map_fog_reveal": int(journey.get("map_fog_reveal", 1)),
 		"redirects":      journey.get("redirects", {}),
 		"items":          items,
 	}

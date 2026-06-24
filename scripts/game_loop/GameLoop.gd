@@ -89,6 +89,8 @@ var _current_overlay: Control = null
 # journey (_map_enabled): an author can disable it to enforce surprise, in which
 # case the map is never built and the buttons never appear.
 var _map_enabled: bool      = true   # journey-level: author allows the player map
+var _map_fog: bool          = false  # journey-level: fog of war — reveal the map as it's discovered
+var _map_fog_reveal: int    = 1      # ghost levels revealed ahead of the trail (< 0 = whole structure)
 var _map_view:    GraphView = null
 var _map_overlay: Control   = null   # full-screen host (backdrop + map + chrome)
 var _map_close_btn: Button  = null
@@ -183,6 +185,8 @@ func _ready() -> void:
 	_build_beat_bar()
 	# Journey-level: the author can disable the player map to enforce surprise.
 	_map_enabled = bool(GameState.Journey.get("map_enabled", true))
+	_map_fog = bool(GameState.Journey.get("map_fog", false))
+	_map_fog_reveal = int(GameState.Journey.get("map_fog_reveal", 1))
 	_build_map()
 	_connect_signals()
 	# Resume vs fresh start: when the player picked Resume from the catalogue,
@@ -1625,6 +1629,20 @@ func _open_map_viewer() -> void:
 	# mouse_filter does NOT block). The map's own modal handling stays in GameLoop.
 	_set_overlay_input_enabled(false)
 	_map_close_btn.visible = true
+	if _map_fog:
+		# Fog of war (author opt-in): re-render the map for the current discovery (refreshed each open so
+		# newly-played nodes appear). set_fog defers its relayout — and that relayout frees the marker —
+		# so place the marker / centre AFTER it settles. Overlay stays hidden until then, so no flash.
+		_map_view.set_fog(true, GameState.DiscoveredNodes(), _map_fog_reveal)
+		call_deferred("_finish_open_map_viewer")
+	else:
+		_finish_open_map_viewer()
+
+
+# Marker + centre + fade-in for the open map. Split out so the fog path can run it after its relayout.
+func _finish_open_map_viewer() -> void:
+	if not _map_open or _map_view == null:
+		return
 	# The graph map highlights the current node by its stable id (GameState walks the DAG by id).
 	var node_id: String = GameState.CurrentNodeId()
 	_map_view.set_marker_at(node_id)
