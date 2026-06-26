@@ -769,6 +769,11 @@ public partial class FunscriptPlayer : Node
         int currentPos = TransformPos(index, effects);
         int nextPos = index + 1 < _actions.Count ? TransformPos(index + 1, effects) : currentPos;
 
+        // Score from the post-effects amplitude BEFORE the comfort range-clamp, so narrowing the stroke
+        // range to taste never costs points (range is comfort, not difficulty). Shop/curse effects are
+        // already applied above and still count toward the score.
+        int scoreAmplitude = Math.Abs(nextPos - currentPos);
+
         // Apply the user-configured device range as a RESCALE (lerp 0–100 → [min,max]),
         // not a hard clamp: strokes keep their shape/rhythm at reduced amplitude rather
         // than flat-topping and dwelling at the limit. Runs after inventory effects so
@@ -806,10 +811,7 @@ public partial class FunscriptPlayer : Node
         // even when vib scripts are loaded and actually driving the device. This
         // keeps the scoring basis consistent regardless of the connected device.
         if (index + 1 < _actions.Count)
-        {
-            int amplitude = Math.Abs(nextPos - currentPos);
-            _score?.AddStroke(amplitude);
-        }
+            _score?.AddStroke(scoreAmplitude);
 
         if (_outputMode == OutputMode.Serial)
         {

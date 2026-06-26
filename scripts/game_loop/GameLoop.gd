@@ -55,6 +55,11 @@ const BOSS_EFFECT_NAMES: Dictionary = {
 @onready var _chips_row:   HBoxContainer     = $HUD/EffectChipsRow
 @onready var _hide_timer:  Timer             = $HUD/HideTimer
 
+# In-play "Quick Settings" drawer (stroke range + delay), toggled by the S key and mutually exclusive
+# with the inventory drawer. Arrow keys nudge the range while it's open. STROKE_RANGE_STEP = per press.
+var _session_panel: Control = null
+const STROKE_RANGE_STEP: int = 5
+
 # Persistent banner shown at top of screen whenever the *currently selected*
 # output device drops its connection during play. Built dynamically in
 # _apply_layout so the scene file doesn't need a new node. Lives outside the
@@ -1886,6 +1891,9 @@ func _on_options_closed() -> void:
 	# Beat-bar visibility setting may have toggled — create or destroy the bar
 	# to match the new state without requiring the user to exit the journey.
 	_refresh_beat_bar_visibility()
+	# Stroke range / delay may have changed in Options — re-sync the Quick Settings drawer if open.
+	if is_instance_valid(_session_panel):
+		_session_panel.resync()
 
 
 # ---------------------------------------------------------------------------
@@ -1931,6 +1939,24 @@ func _on_hide_timer_timeout() -> void:
 	_hud.visible = false
 
 
+# Toggles the in-play Quick Settings drawer (stroke range + delay). Mutually exclusive with the
+# inventory drawer — opening one closes the other.
+func _on_session_settings_pressed() -> void:
+	if is_instance_valid(_session_panel):
+		_session_panel.close()
+		return
+	if is_instance_valid(_inventory_panel):
+		_inventory_panel.close()
+	_session_panel = SessionSettingsPanel.new()
+	_session_panel.closed.connect(_on_session_settings_closed)
+	add_child(_session_panel)
+	_show_hud()
+
+
+func _on_session_settings_closed() -> void:
+	_session_panel = null
+
+
 # ---------------------------------------------------------------------------
 # Input
 # ---------------------------------------------------------------------------
@@ -1971,14 +1997,38 @@ func _input(event: InputEvent) -> void:
 						_on_inventory_pressed()
 						get_viewport().set_input_as_handled()
 				KEY_ESCAPE:
-					# Esc: close inventory if open, otherwise leave to menu.
+					# Esc: close the Quick Settings drawer or inventory if open, otherwise leave to menu.
 					# Overlay screens (shop/storyboard) capture Esc themselves before
 					# it reaches here; the fork screen intentionally does not (no escape).
 					if not _is_overlay_open:
-						if is_instance_valid(_inventory_panel):
+						if is_instance_valid(_session_panel):
+							_session_panel.close()
+						elif is_instance_valid(_inventory_panel):
 							_inventory_panel.close()
 						else:
 							_go_to_menu()
+						get_viewport().set_input_as_handled()
+				KEY_S:
+					# S: toggle the in-play Quick Settings drawer (stroke range + delay).
+					if not _is_overlay_open:
+						_on_session_settings_pressed()
+						get_viewport().set_input_as_handled()
+				# Arrow keys nudge the stroke range, but only while the drawer is open: ↑/↓ max, →/← min.
+				KEY_UP:
+					if is_instance_valid(_session_panel):
+						_session_panel.nudge_range(0, STROKE_RANGE_STEP)
+						get_viewport().set_input_as_handled()
+				KEY_DOWN:
+					if is_instance_valid(_session_panel):
+						_session_panel.nudge_range(0, -STROKE_RANGE_STEP)
+						get_viewport().set_input_as_handled()
+				KEY_RIGHT:
+					if is_instance_valid(_session_panel):
+						_session_panel.nudge_range(STROKE_RANGE_STEP, 0)
+						get_viewport().set_input_as_handled()
+				KEY_LEFT:
+					if is_instance_valid(_session_panel):
+						_session_panel.nudge_range(-STROKE_RANGE_STEP, 0)
 						get_viewport().set_input_as_handled()
 
 
@@ -2143,6 +2193,9 @@ func _on_inventory_pressed() -> void:
 	if is_instance_valid(_inventory_panel):
 		_inventory_panel.close()
 		return
+	# Mutually exclusive with the Quick Settings drawer.
+	if is_instance_valid(_session_panel):
+		_session_panel.close()
 	_inventory_panel = InventoryPanelScene.instantiate()
 	_inventory_panel.closed.connect(_on_inventory_closed)
 	add_child(_inventory_panel)
