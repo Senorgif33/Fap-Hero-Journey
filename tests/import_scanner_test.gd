@@ -44,22 +44,27 @@ func _touch(name: String) -> String:
 
 # ── Pure: filename → axis / vib / stem ───────────────────────────────────────
 
+
 func test_axis_main_stroke_is_l0() -> void:
 	assert_str(ImportScanner.detect_funscript_axis("/x/scene.funscript")).is_equal("L0")
+
 
 func test_axis_tcode_code_suffixes() -> void:
 	assert_str(ImportScanner.detect_funscript_axis("/x/scene.L1.funscript")).is_equal("L1")
 	assert_str(ImportScanner.detect_funscript_axis("/x/scene_r2.funscript")).is_equal("R2")
+
 
 func test_axis_human_name_suffixes() -> void:
 	assert_str(ImportScanner.detect_funscript_axis("/x/scene.surge.funscript")).is_equal("L1")
 	assert_str(ImportScanner.detect_funscript_axis("/x/scene_twist.funscript")).is_equal("R0")
 	assert_str(ImportScanner.detect_funscript_axis("/x/scene.pitch.funscript")).is_equal("R2")
 
+
 func test_vib_channels() -> void:
 	assert_str(ImportScanner.detect_vib_channel("/x/scene.vib1.funscript")).is_equal("vib1")
 	assert_str(ImportScanner.detect_vib_channel("/x/scene_vibe2.funscript")).is_equal("vib2")
 	assert_str(ImportScanner.detect_vib_channel("/x/scene.funscript")).is_equal("")
+
 
 func test_strip_script_suffix() -> void:
 	assert_str(ImportScanner.strip_script_suffix("/x/scene.L1.funscript")).is_equal("scene")
@@ -71,14 +76,18 @@ func test_strip_script_suffix() -> void:
 
 # ── Pure: grouping helpers ───────────────────────────────────────────────────
 
+
 func test_group_key_pairs_within_a_folder() -> void:
 	var k: String = ImportScanner.round_group_key("/media/scene.mp4")
 	assert_str(ImportScanner.round_group_key("/media/scene.L1.funscript")).is_equal(k)
 	assert_str(ImportScanner.round_group_key("/media/scene.vib1.funscript")).is_equal(k)
 
+
 func test_group_key_separates_folders() -> void:
-	assert_str(ImportScanner.round_group_key("/a/scene.mp4")) \
-		.is_not_equal(ImportScanner.round_group_key("/b/scene.mp4"))
+	assert_str(ImportScanner.round_group_key("/a/scene.mp4")).is_not_equal(
+		ImportScanner.round_group_key("/b/scene.mp4")
+	)
+
 
 func test_ensure_import_group_is_idempotent() -> void:
 	var groups: Dictionary = {}
@@ -88,20 +97,52 @@ func test_ensure_import_group_is_idempotent() -> void:
 	assert_int(order.size()).is_equal(1)
 	assert_bool(groups.has("k")).is_true()
 
+
 func test_group_anchor_priority() -> void:
-	assert_str(ImportScanner.group_anchor_path({"video": "v.mp4", "funscript": "f.funscript", "axis": {}, "vib": {}})).is_equal("v.mp4")
-	assert_str(ImportScanner.group_anchor_path({"video": "", "funscript": "f.funscript", "axis": {}, "vib": {}})).is_equal("f.funscript")
-	assert_str(ImportScanner.group_anchor_path({"video": "", "funscript": "", "axis": {"L1": "a.funscript"}, "vib": {}})).is_equal("a.funscript")
-	assert_str(ImportScanner.group_anchor_path({"video": "", "funscript": "", "axis": {}, "vib": {}})).is_equal("")
+	(
+		assert_str(
+			ImportScanner.group_anchor_path(
+				{"video": "v.mp4", "funscript": "f.funscript", "axis": {}, "vib": {}}
+			)
+		)
+		. is_equal("v.mp4")
+	)
+	(
+		assert_str(
+			ImportScanner.group_anchor_path(
+				{"video": "", "funscript": "f.funscript", "axis": {}, "vib": {}}
+			)
+		)
+		. is_equal("f.funscript")
+	)
+	(
+		assert_str(
+			ImportScanner.group_anchor_path(
+				{"video": "", "funscript": "", "axis": {"L1": "a.funscript"}, "vib": {}}
+			)
+		)
+		. is_equal("a.funscript")
+	)
+	(
+		assert_str(
+			ImportScanner.group_anchor_path({"video": "", "funscript": "", "axis": {}, "vib": {}})
+		)
+		. is_equal("")
+	)
 
 
 # ── Pure: build_rounds (synthetic paths → disk autofill no-ops) ───────────────
 
+
 func test_build_rounds_groups_one_round() -> void:
-	var files := PackedStringArray([
-		"/no_such_dir/scene.mp4", "/no_such_dir/scene.funscript",
-		"/no_such_dir/scene.L1.funscript", "/no_such_dir/scene.vib1.funscript",
-	])
+	var files := PackedStringArray(
+		[
+			"/no_such_dir/scene.mp4",
+			"/no_such_dir/scene.funscript",
+			"/no_such_dir/scene.L1.funscript",
+			"/no_such_dir/scene.vib1.funscript",
+		]
+	)
 	var result: Dictionary = ImportScanner.build_rounds(files)
 	assert_int(result["skipped_no_video"]).is_equal(0)
 	var rounds: Array = result["rounds"]
@@ -112,10 +153,14 @@ func test_build_rounds_groups_one_round() -> void:
 	assert_bool((r["axis_scripts"] as Dictionary).has("L1")).is_true()
 	assert_bool((r["vib_scripts"] as Dictionary).has("vib1")).is_true()
 
+
 func test_build_rounds_skips_funscript_without_video() -> void:
-	var result: Dictionary = ImportScanner.build_rounds(PackedStringArray(["/no_such_dir/lonely.funscript"]))
+	var result: Dictionary = ImportScanner.build_rounds(
+		PackedStringArray(["/no_such_dir/lonely.funscript"])
+	)
 	assert_int(result["rounds"].size()).is_equal(0)
 	assert_int(result["skipped_no_video"]).is_equal(1)
+
 
 func test_build_rounds_keeps_first_seen_order() -> void:
 	var result: Dictionary = ImportScanner.build_rounds(PackedStringArray(["/d/a.mp4", "/d/b.mp4"]))
@@ -127,45 +172,56 @@ func test_build_rounds_keeps_first_seen_order() -> void:
 
 # ── Disk: sibling detection against fixture files ────────────────────────────
 
+
 func test_find_sibling_scripts_classifies() -> void:
 	_touch("scene.funscript")
 	_touch("scene.L1.funscript")
 	_touch("scene.vib1.funscript")
-	_touch("other.funscript")   # different base — must be ignored
+	_touch("other.funscript")  # different base — must be ignored
 	var scan: Dictionary = ImportScanner.find_sibling_scripts(_tmp, "scene")
 	assert_str(scan["funscript"]).is_equal("%s/scene.funscript" % _tmp)
 	assert_bool((scan["axis"] as Dictionary).has("L1")).is_true()
 	assert_bool((scan["vib"] as Dictionary).has("vib1")).is_true()
 	assert_bool((scan["axis"] as Dictionary).has("R0")).is_false()
 
+
 func test_find_sibling_video() -> void:
 	_touch("scene.mp4")
 	assert_str(ImportScanner.find_sibling_video(_tmp, "scene")).is_equal("%s/scene.mp4" % _tmp)
 	assert_str(ImportScanner.find_sibling_video(_tmp, "missing")).is_equal("")
 
+
 func test_autofill_fills_empty_slots() -> void:
 	_touch("scene.mp4")
 	_touch("scene.funscript")
 	_touch("scene.R0.funscript")
-	var round_data: Dictionary = {"funscript_path": "", "video_path": "", "axis_scripts": {}, "vib_scripts": {}}
-	var changed: bool = ImportScanner.autofill_round_siblings(round_data, "%s/scene.funscript" % _tmp)
+	var round_data: Dictionary = {
+		"funscript_path": "", "video_path": "", "axis_scripts": {}, "vib_scripts": {}
+	}
+	var changed: bool = ImportScanner.autofill_round_siblings(
+		round_data, "%s/scene.funscript" % _tmp
+	)
 	assert_bool(changed).is_true()
 	assert_str(round_data["funscript_path"]).is_equal("%s/scene.funscript" % _tmp)
 	assert_str(round_data["video_path"]).is_equal("%s/scene.mp4" % _tmp)
 	assert_bool((round_data["axis_scripts"] as Dictionary).has("R0")).is_true()
 
+
 func test_autofill_never_overwrites_a_set_slot() -> void:
 	_touch("scene.mp4")
 	_touch("scene.funscript")
-	var round_data: Dictionary = {"funscript_path": "KEEP", "video_path": "", "axis_scripts": {}, "vib_scripts": {}}
+	var round_data: Dictionary = {
+		"funscript_path": "KEEP", "video_path": "", "axis_scripts": {}, "vib_scripts": {}
+	}
 	ImportScanner.autofill_round_siblings(round_data, "%s/scene.funscript" % _tmp)
-	assert_str(round_data["funscript_path"]).is_equal("KEEP")                  # author's value untouched
-	assert_str(round_data["video_path"]).is_equal("%s/scene.mp4" % _tmp)       # empty slot still filled
+	assert_str(round_data["funscript_path"]).is_equal("KEEP")  # author's value untouched
+	assert_str(round_data["video_path"]).is_equal("%s/scene.mp4" % _tmp)  # empty slot still filled
+
 
 func test_expand_dropped_paths_walks_dirs_and_filters() -> void:
 	_touch("a.mp4")
 	_touch("a.funscript")
-	_touch("notes.txt")   # non-media — must be filtered out
+	_touch("notes.txt")  # non-media — must be filtered out
 	var out: PackedStringArray = ImportScanner.expand_dropped_paths(PackedStringArray([_tmp]))
 	assert_int(out.size()).is_equal(2)
 	assert_bool(out.has("%s/a.mp4" % _tmp)).is_true()

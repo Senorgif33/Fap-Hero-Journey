@@ -64,31 +64,31 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 	var data: Dictionary = parser.data
 
 	var journey: Dictionary = {
-		"folder":          path,
-		"folder_name":     folder,
-		"title":           data.get("Name", folder),
-		"description":     data.get("Description", ""),
-		"difficulty":      data.get("Difficulty", "Unknown"),
-		"author":          data.get("Author", "Unknown"),
+		"folder": path,
+		"folder_name": folder,
+		"title": data.get("Name", folder),
+		"description": data.get("Description", ""),
+		"difficulty": data.get("Difficulty", "Unknown"),
+		"author": data.get("Author", "Unknown"),
 		# Journey-level: author can disable the player map to enforce surprise.
 		# Absent → true so the whole pre-existing catalogue keeps the map.
-		"map_enabled":     bool(data.get("MapEnabled", true)),
+		"map_enabled": bool(data.get("MapEnabled", true)),
 		# Fog of war on the player map: reveal nodes as they're discovered (off → whole map shown).
-		"map_fog":         bool(data.get("MapFog", false)),
+		"map_fog": bool(data.get("MapFog", false)),
 		# Fog reveal depth: ghost levels shown ahead of the visited trail (< 0 = whole structure ghosted).
-		"map_fog_reveal":  int(data.get("MapFogReveal", 1)),
+		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
 		# Redirect overlay (skip/converge/end), composed onto the graph in parse_graph.
-		"redirects":       data.get("Redirects", {}),
-		"rounds":          [],
-		"forks":           [],
-		"shops":           [],
-		"storyboards":     [],
-		"cover_path":      "",
-		"tags":            TagRegistry.sanitize(data.get("Tags", [])),
-		"total_actions":   0,
+		"redirects": data.get("Redirects", {}),
+		"rounds": [],
+		"forks": [],
+		"shops": [],
+		"storyboards": [],
+		"cover_path": "",
+		"tags": TagRegistry.sanitize(data.get("Tags", [])),
+		"total_actions": 0,
 		"total_length_ms": 0,
-		"total_rounds":    0,
-		"modified_time":   FileAccess.get_modified_time(json_path),
+		"total_rounds": 0,
+		"modified_time": FileAccess.get_modified_time(json_path),
 	}
 
 	var raw_shops: Array = data.get("Shops", [])
@@ -110,29 +110,40 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 			if not raw_line is Dictionary:
 				continue
 			var line_img_file: String = raw_line.get("Image", raw_line.get("image", ""))
-			sb_lines.append({
-				"speaker": raw_line.get("Speaker", raw_line.get("speaker", "")),
-				"text":    raw_line.get("Text",    raw_line.get("text",    "")),
-				"image":   (path + "/" + line_img_file) if line_img_file != "" else "",
-			})
-		journey["storyboards"].append({
-			"order":  raw_sb.get("Order",        raw_sb.get("order",        0)),
-			"node_id": raw_sb.get("NodeId", raw_sb.get("node_id", "")),
-			"coins":  raw_sb.get("CoinsAwarded", raw_sb.get("coins",        0)),
-			"item":   raw_sb.get("Item",         raw_sb.get("item",         "")),
-			"image":  (path + "/" + sb_img_file) if sb_img_file != "" else "",
-			"lines":  sb_lines,
-		})
+			(
+				sb_lines
+				. append(
+					{
+						"speaker": raw_line.get("Speaker", raw_line.get("speaker", "")),
+						"text": raw_line.get("Text", raw_line.get("text", "")),
+						"image": (path + "/" + line_img_file) if line_img_file != "" else "",
+					}
+				)
+			)
+		(
+			journey["storyboards"]
+			. append(
+				{
+					"order": raw_sb.get("Order", raw_sb.get("order", 0)),
+					"node_id": raw_sb.get("NodeId", raw_sb.get("node_id", "")),
+					"coins": raw_sb.get("CoinsAwarded", raw_sb.get("coins", 0)),
+					"item": raw_sb.get("Item", raw_sb.get("item", "")),
+					"image": (path + "/" + sb_img_file) if sb_img_file != "" else "",
+					"lines": sb_lines,
+				}
+			)
+		)
 
 	journey["cover_path"] = find_cover_image(path)
 
 	var raw_rounds: Array = data.get("Rounds", [])
 	# Filter out any legacy Shop-type rounds — shops are now declared via "Shops": [...]
-	raw_rounds = raw_rounds.filter(func(r: Dictionary) -> bool:
-		return r.get("RoundType", "Normal") != "Shop"
+	raw_rounds = raw_rounds.filter(
+		func(r: Dictionary) -> bool: return r.get("RoundType", "Normal") != "Shop"
 	)
-	raw_rounds.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return (a.get("Order", 0) as int) < (b.get("Order", 0) as int)
+	raw_rounds.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return (a.get("Order", 0) as int) < (b.get("Order", 0) as int)
 	)
 
 	for raw: Dictionary in raw_rounds:
@@ -141,7 +152,7 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		# in "FolderName". Old journeys used the human-readable Name as the
 		# folder, so fall back to that when FolderName is absent — keeps the
 		# entire pre-rXXX catalogue loading without migration.
-		var folder_slug: String  = raw.get("FolderName", round_name)
+		var folder_slug: String = raw.get("FolderName", round_name)
 		var round_folder: String = path + "/" + folder_slug
 
 		var funscript_stats: Dictionary = _resolve_round_stats(raw, path, round_folder)
@@ -178,36 +189,40 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 				boss_modifiers.append(_parse_boss_modifier(raw_mod))
 
 		var round_data: Dictionary = {
-			"name":           round_name,
-			"folder":         round_folder,
-			"node_id":        raw.get("NodeId", raw.get("node_id", "")),
-			"video_path":     video_path,
+			"name": round_name,
+			"folder": round_folder,
+			"node_id": raw.get("NodeId", raw.get("node_id", "")),
+			"video_path": video_path,
 			"funscript_path": funscript_stats["path"],
-			"axis_scripts":   axis_scripts,
-			"vib_scripts":    vib_scripts,
-			"round_type":     round_type,
-			"is_checkpoint":  bool(raw.get("IsCheckpoint", raw.get("is_checkpoint", false))),
-			"curse_reward":   int(raw.get("CurseReward", raw.get("curse_reward", 0))),
-			"cleanse_cost":   int(raw.get("CleanseCost", raw.get("cleanse_cost", 50))),
-			"curse_random":   bool(raw.get("CurseRandom", raw.get("curse_random", true))),
-			"curses":         raw.get("Curses", raw.get("curses", [])),
-			"boon_random":    bool(raw.get("BoonRandom", raw.get("boon_random", true))),
-			"boons":          raw.get("Boons", raw.get("boons", [])),
-			"gift_item":      raw.get("GiftItem", raw.get("gift_item", "")),
-			"boss_image":     boss_image,
-			"boss_tagline":   raw.get("BossTagline", ""),
+			"axis_scripts": axis_scripts,
+			"vib_scripts": vib_scripts,
+			"round_type": round_type,
+			"is_checkpoint": bool(raw.get("IsCheckpoint", raw.get("is_checkpoint", false))),
+			"curse_reward": int(raw.get("CurseReward", raw.get("curse_reward", 0))),
+			"cleanse_cost": int(raw.get("CleanseCost", raw.get("cleanse_cost", 50))),
+			"curse_random": bool(raw.get("CurseRandom", raw.get("curse_random", true))),
+			"curses": raw.get("Curses", raw.get("curses", [])),
+			"boon_random": bool(raw.get("BoonRandom", raw.get("boon_random", true))),
+			"boons": raw.get("Boons", raw.get("boons", [])),
+			"gift_item": raw.get("GiftItem", raw.get("gift_item", "")),
+			"boss_image": boss_image,
+			"boss_tagline": raw.get("BossTagline", ""),
 			"boss_modifiers": boss_modifiers,
-			"sensory":        raw.get("Sensory", raw.get("BossHexes", raw.get("sensory", []))),
+			"sensory": raw.get("Sensory", raw.get("BossHexes", raw.get("sensory", []))),
 			"sensory_in_pool": bool(raw.get("SensoryInPool", raw.get("sensory_in_pool", false))),
 			"sensory_intensity": raw.get("SensoryIntensity", raw.get("sensory_intensity", {})),
-			"show_reveal":    bool(raw.get("ShowReveal", raw.get("show_reveal", true))),
-			"coins":          raw.get("CoinsAwarded", 0),
-			"order":          raw.get("Order", 0),
-			"action_count":   funscript_stats["count"],
-			"length_ms":      funscript_stats["length_ms"],
+			"show_reveal": bool(raw.get("ShowReveal", raw.get("show_reveal", true))),
+			"coins": raw.get("CoinsAwarded", 0),
+			"order": raw.get("Order", 0),
+			"action_count": funscript_stats["count"],
+			"length_ms": funscript_stats["length_ms"],
 		}
-		journey["total_actions"]   = (journey["total_actions"] as int) + (funscript_stats["count"] as int)
-		journey["total_length_ms"] = (journey["total_length_ms"] as int) + (funscript_stats["length_ms"] as int)
+		journey["total_actions"] = (
+			(journey["total_actions"] as int) + (funscript_stats["count"] as int)
+		)
+		journey["total_length_ms"] = (
+			(journey["total_length_ms"] as int) + (funscript_stats["length_ms"] as int)
+		)
 		journey["rounds"].append(round_data)
 
 	journey["total_rounds"] = (journey["rounds"] as Array).size()
@@ -221,9 +236,9 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 	# Accumulate the longest-path contribution from each fork.
 	for fork: Dictionary in journey["forks"]:
 		var lps: Dictionary = _longest_path_stats(fork)
-		journey["total_actions"]   = (journey["total_actions"] as int)   + (lps["count"] as int)
+		journey["total_actions"] = (journey["total_actions"] as int) + (lps["count"] as int)
 		journey["total_length_ms"] = (journey["total_length_ms"] as int) + (lps["length_ms"] as int)
-		journey["total_rounds"]    = (journey["total_rounds"] as int)    + (lps["round_count"] as int)
+		journey["total_rounds"] = (journey["total_rounds"] as int) + (lps["round_count"] as int)
 
 	return journey
 
@@ -261,18 +276,18 @@ static func parse_graph(path: String, folder: String) -> Dictionary:
 		# nested arrays _graph_meta leaves empty). Each fork's branches are walked up to their rejoin,
 		# so the modal shows the real fork structure (see _graph_catalogue_sequence).
 		var seq_lists: Dictionary = _graph_catalogue_sequence(graph)
-		result["rounds"]      = seq_lists["rounds"]
-		result["shops"]       = seq_lists["shops"]
+		result["rounds"] = seq_lists["rounds"]
+		result["shops"] = seq_lists["shops"]
 		result["storyboards"] = seq_lists["storyboards"]
-		result["forks"]       = seq_lists["forks"]
+		result["forks"] = seq_lists["forks"]
 		# DAG totals: the longest round path is the most a player can hit; node sums
 		# feed the catalogue (see _graph_node_totals for the Phase-3 refinement note).
 		result["total_rounds"] = JourneyGraph.longest_round_path(graph, str(graph["start"]))
 		var totals: Dictionary = _graph_node_totals(graph)
-		result["total_actions"]   = totals["actions"]
+		result["total_actions"] = totals["actions"]
 		result["total_length_ms"] = totals["length_ms"]
-		result["comments"] = _parse_comments(data)   # editor-only sticky notes; runtime ignores them
-		result["groups"]   = _parse_groups(data)     # editor-only group frames; runtime ignores them
+		result["comments"] = _parse_comments(data)  # editor-only sticky notes; runtime ignores them
+		result["groups"] = _parse_groups(data)  # editor-only group frames; runtime ignores them
 		return result
 
 	# Legacy tree format → parse the old way (full nested model + meta + totals), then
@@ -314,7 +329,7 @@ static func parse_graph_for_editor(path: String, folder: String) -> Dictionary:
 					d["video_path"] = vid
 	for id: String in graph.get("nodes", {}):
 		if not (graph["nodes"][id] as Dictionary).has("pos"):
-			GraphLayout.seed_positions(graph)   # any node missing a pos → (re)seed the whole graph
+			GraphLayout.seed_positions(graph)  # any node missing a pos → (re)seed the whole graph
 			break
 	return graph
 
@@ -325,19 +340,22 @@ static func parse_graph_for_editor(path: String, folder: String) -> Dictionary:
 # in Phase 3, at which point those consumers stop reading the nested arrays.
 static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dictionary:
 	return {
-		"folder":        path,
-		"folder_name":   folder,
-		"title":         data.get("Name", folder),
-		"description":   data.get("Description", ""),
-		"difficulty":    data.get("Difficulty", "Unknown"),
-		"author":        data.get("Author", "Unknown"),
-		"tags":          TagRegistry.sanitize(data.get("Tags", [])),
-		"map_enabled":   bool(data.get("MapEnabled", true)),
-		"map_fog":       bool(data.get("MapFog", false)),
+		"folder": path,
+		"folder_name": folder,
+		"title": data.get("Name", folder),
+		"description": data.get("Description", ""),
+		"difficulty": data.get("Difficulty", "Unknown"),
+		"author": data.get("Author", "Unknown"),
+		"tags": TagRegistry.sanitize(data.get("Tags", [])),
+		"map_enabled": bool(data.get("MapEnabled", true)),
+		"map_fog": bool(data.get("MapFog", false)),
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
-		"cover_path":    find_cover_image(path),
+		"cover_path": find_cover_image(path),
 		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
-		"rounds": [], "forks": [], "shops": [], "storyboards": [],
+		"rounds": [],
+		"forks": [],
+		"shops": [],
+		"storyboards": [],
 	}
 
 
@@ -391,7 +409,7 @@ static func _graph_node_totals(graph: Dictionary) -> Dictionary:
 		var n: Dictionary = graph["nodes"][id]
 		if n.get("type", "") == "round":
 			actions += int((n.get("data", {}) as Dictionary).get("action_count", 0))
-			length  += int((n.get("data", {}) as Dictionary).get("length_ms", 0))
+			length += int((n.get("data", {}) as Dictionary).get("length_ms", 0))
 	return {"actions": actions, "length_ms": length}
 
 
@@ -422,7 +440,9 @@ static func _graph_catalogue_sequence(graph: Dictionary) -> Dictionary:
 # until it hits `stop`, an already-placed node, or the end. A fork recurses each branch (stopping at
 # the fork's rejoin) and continues the level from that rejoin. order/after_order = position in the
 # level, so _add_seq_to_list sorts the level back into walk order.
-static func _walk_level(graph: Dictionary, start_id: String, stop: Dictionary, visited: Dictionary, depth: Dictionary) -> Dictionary:
+static func _walk_level(
+	graph: Dictionary, start_id: String, stop: Dictionary, visited: Dictionary, depth: Dictionary
+) -> Dictionary:
 	var nodes: Dictionary = graph.get("nodes", {})
 	var lists: Dictionary = {"rounds": [], "shops": [], "storyboards": [], "forks": []}
 	# `pos` indexes the next NUMBERED item (round / storyboard) in this level. Shops and forks are
@@ -443,15 +463,28 @@ static func _walk_level(graph: Dictionary, start_id: String, stop: Dictionary, v
 				branch_stop[merge] = true
 			var paths: Array = []
 			for e: Dictionary in out:
-				var branch: Dictionary = _walk_level(graph, str(e.get("to", "")), branch_stop, visited, depth)
-				paths.append({
-					"name":        str(e.get("name", "")),
-					"rounds":      branch["rounds"],
-					"shops":       branch["shops"],
-					"storyboards": branch["storyboards"],
-					"forks":       branch["forks"],
-				})
-			(lists["forks"] as Array).append({"title": (n.get("data", {}) as Dictionary).get("title", ""), "paths": paths, "after_order": pos - 1})
+				var branch: Dictionary = _walk_level(
+					graph, str(e.get("to", "")), branch_stop, visited, depth
+				)
+				(
+					paths
+					. append(
+						{
+							"name": str(e.get("name", "")),
+							"rounds": branch["rounds"],
+							"shops": branch["shops"],
+							"storyboards": branch["storyboards"],
+							"forks": branch["forks"],
+						}
+					)
+				)
+			(lists["forks"] as Array).append(
+				{
+					"title": (n.get("data", {}) as Dictionary).get("title", ""),
+					"paths": paths,
+					"after_order": pos - 1
+				}
+			)
 			id = merge
 		else:
 			_append_node(n, lists, pos)
@@ -468,20 +501,32 @@ static func _append_node(n: Dictionary, lists: Dictionary, pos: int) -> void:
 	var d: Dictionary = n.get("data", {})
 	match str(n.get("type", "")):
 		"round":
-			(lists["rounds"] as Array).append({
-				"name": d.get("name", ""), "round_type": d.get("round_type", "normal"),
-				"coins": int(d.get("coins", 0)), "action_count": int(d.get("action_count", 0)),
-				"length_ms": int(d.get("length_ms", 0)), "order": pos,
-			})
+			(
+				(lists["rounds"] as Array)
+				. append(
+					{
+						"name": d.get("name", ""),
+						"round_type": d.get("round_type", "normal"),
+						"coins": int(d.get("coins", 0)),
+						"action_count": int(d.get("action_count", 0)),
+						"length_ms": int(d.get("length_ms", 0)),
+						"order": pos,
+					}
+				)
+			)
 		"shop":
 			(lists["shops"] as Array).append({"title": d.get("title", ""), "after_order": pos - 1})
 		"storyboard":
-			(lists["storyboards"] as Array).append({"lines": d.get("lines", []), "coins": int(d.get("coins", 0)), "order": pos})
+			(lists["storyboards"] as Array).append(
+				{"lines": d.get("lines", []), "coins": int(d.get("coins", 0)), "order": pos}
+			)
 
 
 # The rejoin node for a fork: the earliest (min longest-path depth) node reachable from ≥2 of the
 # fork's branches and outside `stop`, or "" when the branches don't reconverge.
-static func _fork_merge(graph: Dictionary, fork_id: String, stop: Dictionary, depth: Dictionary) -> String:
+static func _fork_merge(
+	graph: Dictionary, fork_id: String, stop: Dictionary, depth: Dictionary
+) -> String:
 	var out: Array = (graph["nodes"][fork_id] as Dictionary).get("out", [])
 	var reach_count: Dictionary = {}
 	for e: Dictionary in out:
@@ -537,7 +582,7 @@ static func _longest_depths(graph: Dictionary) -> Dictionary:
 	while qi < queue.size():
 		var cur: String = queue[qi]
 		qi += 1
-		for to: String in (succ[cur] as Array):
+		for to: String in succ[cur] as Array:
 			depth[to] = maxi(int(depth.get(to, 0)), int(depth[cur]) + 1)
 			indeg[to] = int(indeg[to]) - 1
 			if int(indeg[to]) == 0:
@@ -552,38 +597,38 @@ static func _longest_depths(graph: Dictionary) -> Dictionary:
 # in its "Forks" array.
 static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary:
 	var fork_entry: Dictionary = {
-		"after_order":  raw_fork.get("AfterOrder", raw_fork.get("after_order", 0)),
-		"node_id":      raw_fork.get("NodeId",     raw_fork.get("node_id",     "")),
-		"title":        raw_fork.get("Title",       raw_fork.get("title",       "")),
-		"description":  raw_fork.get("Description", raw_fork.get("description", "")),
+		"after_order": raw_fork.get("AfterOrder", raw_fork.get("after_order", 0)),
+		"node_id": raw_fork.get("NodeId", raw_fork.get("node_id", "")),
+		"title": raw_fork.get("Title", raw_fork.get("title", "")),
+		"description": raw_fork.get("Description", raw_fork.get("description", "")),
 		# Fork resolution config (defaults keep legacy journeys as player-choice).
-		"resolution":   raw_fork.get("Resolution",  raw_fork.get("resolution",  "choice")),
-		"cond_metric":  raw_fork.get("CondMetric",  raw_fork.get("cond_metric", "score")),
+		"resolution": raw_fork.get("Resolution", raw_fork.get("resolution", "choice")),
+		"cond_metric": raw_fork.get("CondMetric", raw_fork.get("cond_metric", "score")),
 		"default_path": int(raw_fork.get("DefaultPath", raw_fork.get("default_path", 0))),
-		"paths":        [],
+		"paths": [],
 	}
 	var raw_paths: Array = raw_fork.get("Paths", raw_fork.get("paths", []))
 	for raw_path: Dictionary in raw_paths:
 		var img_file: String = raw_path.get("Image", raw_path.get("image", ""))
 		var path_entry: Dictionary = {
-			"name":          raw_path.get("Name",        raw_path.get("name",        "Path")),
-			"description":   raw_path.get("Description", raw_path.get("description", "")),
-			"image_path":    (journey_path + "/" + img_file) if img_file != "" else "",
-			"weight":        int(raw_path.get("Weight",       raw_path.get("weight",        1))),
-			"threshold":     int(raw_path.get("Threshold",    raw_path.get("threshold",     0))),
+			"name": raw_path.get("Name", raw_path.get("name", "Path")),
+			"description": raw_path.get("Description", raw_path.get("description", "")),
+			"image_path": (journey_path + "/" + img_file) if img_file != "" else "",
+			"weight": int(raw_path.get("Weight", raw_path.get("weight", 1))),
+			"threshold": int(raw_path.get("Threshold", raw_path.get("threshold", 0))),
 			"required_item": raw_path.get("RequiredItem", raw_path.get("required_item", "")),
-			"cost":          int(raw_path.get("Cost",         raw_path.get("cost",          0))),
-			"rounds":        [],
-			"shops":         [],
-			"storyboards":   [],
-			"forks":         [],
+			"cost": int(raw_path.get("Cost", raw_path.get("cost", 0))),
+			"rounds": [],
+			"shops": [],
+			"storyboards": [],
+			"forks": [],
 		}
 		var raw_pr_rounds: Array = raw_path.get("Rounds", raw_path.get("rounds", []))
 		for raw_pr: Dictionary in raw_pr_rounds:
-			var pr_name: String   = raw_pr.get("Name", raw_pr.get("name", "Round"))
+			var pr_name: String = raw_pr.get("Name", raw_pr.get("name", "Round"))
 			# Fall back to Name for pre-rXXX journeys; new journeys persist the
 			# short folder slug in FolderName.
-			var pr_slug: String   = raw_pr.get("FolderName", raw_pr.get("folder_name", pr_name))
+			var pr_slug: String = raw_pr.get("FolderName", raw_pr.get("folder_name", pr_name))
 			var pr_folder: String = journey_path + "/" + pr_slug
 
 			var pr_fs: Dictionary = _resolve_round_stats(raw_pr, journey_path, pr_folder)
@@ -604,7 +649,9 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 
 			var pr_round_type: String = (raw_pr.get("RoundType", "Normal") as String).to_lower()
 			var pr_raw_video: String = raw_pr.get("VideoPath", raw_pr.get("video_path", ""))
-			var pr_video_path: String = (journey_path + "/" + pr_raw_video) if pr_raw_video != "" else ""
+			var pr_video_path: String = (
+				(journey_path + "/" + pr_raw_video) if pr_raw_video != "" else ""
+			)
 			var pr_boss_image: String = raw_pr.get("BossImage", "")
 			if pr_boss_image != "":
 				pr_boss_image = journey_path + "/" + pr_boss_image
@@ -613,35 +660,49 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				if raw_mod is Dictionary:
 					pr_boss_modifiers.append(_parse_boss_modifier(raw_mod))
 
-			path_entry["rounds"].append({
-				"name":           pr_name,
-				"folder":         pr_folder,
-				"node_id":        raw_pr.get("NodeId", raw_pr.get("node_id", "")),
-				"video_path":     pr_video_path,
-				"funscript_path": pr_fs["path"],
-				"axis_scripts":   pr_axis_scripts,
-				"vib_scripts":    pr_vib_scripts,
-				"round_type":     pr_round_type,
-				"is_checkpoint":  bool(raw_pr.get("IsCheckpoint", raw_pr.get("is_checkpoint", false))),
-				"curse_reward":   int(raw_pr.get("CurseReward", raw_pr.get("curse_reward", 0))),
-				"cleanse_cost":   int(raw_pr.get("CleanseCost", raw_pr.get("cleanse_cost", 50))),
-				"curse_random":   bool(raw_pr.get("CurseRandom", raw_pr.get("curse_random", true))),
-				"curses":         raw_pr.get("Curses", raw_pr.get("curses", [])),
-				"boon_random":    bool(raw_pr.get("BoonRandom", raw_pr.get("boon_random", true))),
-				"boons":          raw_pr.get("Boons", raw_pr.get("boons", [])),
-				"gift_item":      raw_pr.get("GiftItem", raw_pr.get("gift_item", "")),
-				"boss_image":     pr_boss_image,
-				"boss_tagline":   raw_pr.get("BossTagline", ""),
-				"boss_modifiers": pr_boss_modifiers,
-				"sensory":        raw_pr.get("Sensory", raw_pr.get("BossHexes", raw_pr.get("sensory", []))),
-				"sensory_in_pool": bool(raw_pr.get("SensoryInPool", raw_pr.get("sensory_in_pool", false))),
-				"sensory_intensity": raw_pr.get("SensoryIntensity", raw_pr.get("sensory_intensity", {})),
-				"show_reveal":    bool(raw_pr.get("ShowReveal", raw_pr.get("show_reveal", true))),
-				"coins":          raw_pr.get("CoinsAwarded", raw_pr.get("coins", 0)),
-				"order":          raw_pr.get("Order",        raw_pr.get("order", 0)),
-				"action_count":   pr_fs["count"],
-				"length_ms":      pr_fs["length_ms"],
-			})
+			(
+				path_entry["rounds"]
+				. append(
+					{
+						"name": pr_name,
+						"folder": pr_folder,
+						"node_id": raw_pr.get("NodeId", raw_pr.get("node_id", "")),
+						"video_path": pr_video_path,
+						"funscript_path": pr_fs["path"],
+						"axis_scripts": pr_axis_scripts,
+						"vib_scripts": pr_vib_scripts,
+						"round_type": pr_round_type,
+						"is_checkpoint":
+						bool(raw_pr.get("IsCheckpoint", raw_pr.get("is_checkpoint", false))),
+						"curse_reward":
+						int(raw_pr.get("CurseReward", raw_pr.get("curse_reward", 0))),
+						"cleanse_cost":
+						int(raw_pr.get("CleanseCost", raw_pr.get("cleanse_cost", 50))),
+						"curse_random":
+						bool(raw_pr.get("CurseRandom", raw_pr.get("curse_random", true))),
+						"curses": raw_pr.get("Curses", raw_pr.get("curses", [])),
+						"boon_random":
+						bool(raw_pr.get("BoonRandom", raw_pr.get("boon_random", true))),
+						"boons": raw_pr.get("Boons", raw_pr.get("boons", [])),
+						"gift_item": raw_pr.get("GiftItem", raw_pr.get("gift_item", "")),
+						"boss_image": pr_boss_image,
+						"boss_tagline": raw_pr.get("BossTagline", ""),
+						"boss_modifiers": pr_boss_modifiers,
+						"sensory":
+						raw_pr.get("Sensory", raw_pr.get("BossHexes", raw_pr.get("sensory", []))),
+						"sensory_in_pool":
+						bool(raw_pr.get("SensoryInPool", raw_pr.get("sensory_in_pool", false))),
+						"sensory_intensity":
+						raw_pr.get("SensoryIntensity", raw_pr.get("sensory_intensity", {})),
+						"show_reveal":
+						bool(raw_pr.get("ShowReveal", raw_pr.get("show_reveal", true))),
+						"coins": raw_pr.get("CoinsAwarded", raw_pr.get("coins", 0)),
+						"order": raw_pr.get("Order", raw_pr.get("order", 0)),
+						"action_count": pr_fs["count"],
+						"length_ms": pr_fs["length_ms"],
+					}
+				)
+			)
 		var raw_pr_shops: Array = raw_path.get("Shops", raw_path.get("shops", []))
 		for raw_ps in raw_pr_shops:
 			if raw_ps is Dictionary:
@@ -659,19 +720,30 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				if not raw_pl is Dictionary:
 					continue
 				var pl_img_file: String = raw_pl.get("Image", raw_pl.get("image", ""))
-				psb_lines.append({
-					"speaker": raw_pl.get("Speaker", raw_pl.get("speaker", "")),
-					"text":    raw_pl.get("Text",    raw_pl.get("text",    "")),
-					"image":   (journey_path + "/" + pl_img_file) if pl_img_file != "" else "",
-				})
-			path_entry["storyboards"].append({
-				"order":  raw_psb.get("Order",        raw_psb.get("order",        0)),
-				"node_id": raw_psb.get("NodeId", raw_psb.get("node_id", "")),
-				"coins":  raw_psb.get("CoinsAwarded", raw_psb.get("coins",        0)),
-				"item":   raw_psb.get("Item",         raw_psb.get("item",         "")),
-				"image":  (journey_path + "/" + psb_img_file) if psb_img_file != "" else "",
-				"lines":  psb_lines,
-			})
+				(
+					psb_lines
+					. append(
+						{
+							"speaker": raw_pl.get("Speaker", raw_pl.get("speaker", "")),
+							"text": raw_pl.get("Text", raw_pl.get("text", "")),
+							"image":
+							(journey_path + "/" + pl_img_file) if pl_img_file != "" else "",
+						}
+					)
+				)
+			(
+				path_entry["storyboards"]
+				. append(
+					{
+						"order": raw_psb.get("Order", raw_psb.get("order", 0)),
+						"node_id": raw_psb.get("NodeId", raw_psb.get("node_id", "")),
+						"coins": raw_psb.get("CoinsAwarded", raw_psb.get("coins", 0)),
+						"item": raw_psb.get("Item", raw_psb.get("item", "")),
+						"image": (journey_path + "/" + psb_img_file) if psb_img_file != "" else "",
+						"lines": psb_lines,
+					}
+				)
+			)
 		# Nested forks — recurse.
 		var raw_pr_forks: Array = raw_path.get("Forks", raw_path.get("forks", []))
 		for raw_nf in raw_pr_forks:
@@ -691,12 +763,12 @@ static func _parse_shop(raw: Dictionary) -> Dictionary:
 	for it in raw.get("Items", raw.get("items", [])):
 		items.append(str(it))
 	return {
-		"after_order":      raw.get("AfterOrder", raw.get("after_order", 0)),
-		"node_id":          raw.get("NodeId", raw.get("node_id", "")),
-		"title":            raw.get("Title",      raw.get("title",       "")),
-		"mode":             raw.get("Mode",       raw.get("mode",        "pool")),
-		"count":            int(raw.get("Count",  raw.get("count",       3))),
-		"items":            items,
+		"after_order": raw.get("AfterOrder", raw.get("after_order", 0)),
+		"node_id": raw.get("NodeId", raw.get("node_id", "")),
+		"title": raw.get("Title", raw.get("title", "")),
+		"mode": raw.get("Mode", raw.get("mode", "pool")),
+		"count": int(raw.get("Count", raw.get("count", 3))),
+		"items": items,
 		"price_multiplier": float(raw.get("PriceMultiplier", raw.get("price_multiplier", 1.0))),
 	}
 
@@ -718,24 +790,24 @@ static func _parse_boss_modifier(raw_mod: Dictionary) -> Dictionary:
 # "Longest" is determined by total length_ms; ties broken by action count.
 # Recurses into nested forks within each path.
 static func _longest_path_stats(fork: Dictionary) -> Dictionary:
-	var best_count: int  = 0
-	var best_ms: int     = 0
+	var best_count: int = 0
+	var best_ms: int = 0
 	var best_rounds: int = 0
 	for path: Dictionary in fork.get("paths", []):
-		var path_count: int  = 0
-		var path_ms: int     = 0
+		var path_count: int = 0
+		var path_ms: int = 0
 		var path_rounds: int = (path.get("rounds", []) as Array).size()
 		for r: Dictionary in path.get("rounds", []):
 			path_count += (r.get("action_count", 0) as int)
-			path_ms    += (r.get("length_ms",    0) as int)
+			path_ms += (r.get("length_ms", 0) as int)
 		for nested_fork: Dictionary in path.get("forks", []):
 			var nested: Dictionary = _longest_path_stats(nested_fork)
-			path_count  += (nested["count"] as int)
-			path_ms     += (nested["length_ms"] as int)
+			path_count += (nested["count"] as int)
+			path_ms += (nested["length_ms"] as int)
 			path_rounds += (nested["round_count"] as int)
 		if path_ms > best_ms or (path_ms == best_ms and path_count > best_count):
-			best_ms     = path_ms
-			best_count  = path_count
+			best_ms = path_ms
+			best_count = path_count
 			best_rounds = path_rounds
 	return {"count": best_count, "length_ms": best_ms, "round_count": best_rounds}
 
@@ -783,15 +855,17 @@ static func find_cover_image(path: String) -> String:
 # JourneyBuilder at save time), no funscript is parsed at all. Otherwise it
 # parses the file directly, or — for pre-cache journeys with no FunscriptPath —
 # scans the round folder.
-static func _resolve_round_stats(raw: Dictionary, base_path: String, scan_folder: String) -> Dictionary:
+static func _resolve_round_stats(
+	raw: Dictionary, base_path: String, scan_folder: String
+) -> Dictionary:
 	var explicit_rel: String = raw.get("FunscriptPath", raw.get("funscript_path", ""))
 	if explicit_rel != "":
 		var full_path: String = base_path + "/" + explicit_rel
 		if raw.has("ActionCount") and raw.has("LengthMs"):
 			return {
-				"count":     int(raw["ActionCount"]),
+				"count": int(raw["ActionCount"]),
 				"length_ms": int(raw["LengthMs"]),
-				"path":      full_path,
+				"path": full_path,
 			}
 		var stats: Dictionary = JourneyData.read_funscript_stats(full_path)
 		stats["path"] = full_path if stats["count"] > 0 else ""

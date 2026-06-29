@@ -19,7 +19,7 @@ extends Control
 # ---------------------------------------------------------------------------
 
 var _graph: _Graph = null
-var _modifiers: Array = []        # effect-shaped dicts (boss modifiers / curse / boon)
+var _modifiers: Array = []  # effect-shaped dicts (boss modifiers / curse / boon)
 var _mod_label: String = "Boss Modifiers"  # what the modifiers are called for this round
 var _show_modifiers: bool = true
 var _caption: Label = null
@@ -38,7 +38,14 @@ var _play_btn: Button = null
 # effect dicts (each {kind, factor?/min?/max?}); pass [] for none. `mod_label`
 # names them ("Boss Modifiers" / "Curse effects" / "Boon effects").
 # video_path may be "" (graph-only) or a non-decodable codec (falls back too).
-func open(parent: Control, funscript_path: String, video_path: String, modifiers: Array, round_name: String, mod_label: String = "Boss Modifiers") -> void:
+func open(
+	parent: Control,
+	funscript_path: String,
+	video_path: String,
+	modifiers: Array,
+	round_name: String,
+	mod_label: String = "Boss Modifiers"
+) -> void:
 	_modifiers = modifiers
 	_mod_label = mod_label
 	_build_ui(round_name)
@@ -85,7 +92,9 @@ func _build_ui(round_name: String) -> void:
 	# Header: title + close.
 	var header: HBoxContainer = HBoxContainer.new()
 	var title: Label = Label.new()
-	title.text = "▶  FUNSCRIPT PREVIEW" + ("  —  " + round_name.to_upper() if round_name != "" else "")
+	title.text = (
+		"▶  FUNSCRIPT PREVIEW" + ("  —  " + round_name.to_upper() if round_name != "" else "")
+	)
 	title.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	title.add_theme_font_size_override("font_size", 18)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -123,9 +132,9 @@ func _build_ui(round_name: String) -> void:
 	# stay legible on long scripts.
 	var scroll: ScrollContainer = ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	scroll.vertical_scroll_mode   = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.size_flags_horizontal  = Control.SIZE_EXPAND_FILL
-	scroll.size_flags_vertical    = Control.SIZE_EXPAND_FILL
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_graph = _Graph.new()
 	_graph.size_flags_vertical = Control.SIZE_EXPAND_FILL  # fill the viewport height
 	_graph.time_label_format = func(ms: float) -> String: return _format_time(ms)
@@ -162,9 +171,11 @@ func _build_ui(round_name: String) -> void:
 		toggle.text = "SHOW %s" % _mod_label.to_upper()
 		toggle.button_pressed = true
 		toggle.add_theme_font_size_override("font_size", 12)
-		toggle.toggled.connect(func(on: bool) -> void:
-			_show_modifiers = on
-			_refresh_modified())
+		toggle.toggled.connect(
+			func(on: bool) -> void:
+				_show_modifiers = on
+				_refresh_modified()
+		)
 		footer.add_child(toggle)
 	_caption = Label.new()
 	_caption.add_theme_font_size_override("font_size", 11)
@@ -191,7 +202,9 @@ func _refresh_modified() -> void:
 	# holds. Represent that as a flat neutral line rather than a transformed curve.
 	if _has_block():
 		_graph.set_modified(_flat_line(50.0), true)
-		_caption.text = "BLOCK active — the device ignores the script (holds position). " + _modifier_summary()
+		_caption.text = (
+			"BLOCK active — the device ignores the script (holds position). " + _modifier_summary()
+		)
 		_caption.add_theme_color_override("font_color", UITheme.AMBER)
 		return
 
@@ -230,7 +243,9 @@ func _transform_pos_at(points: Array, i: int, effects: Array) -> float:
 			scale_factor *= float(e["factor"])
 	if not is_equal_approx(scale_factor, 1.0):
 		var prev: float = _mirror_one((points[maxi(0, i - 1)] as Vector2).y, mirrored)
-		var nxt: float = _mirror_one((points[mini(points.size() - 1, i + 1)] as Vector2).y, mirrored)
+		var nxt: float = _mirror_one(
+			(points[mini(points.size() - 1, i + 1)] as Vector2).y, mirrored
+		)
 		var center: float = (prev + nxt) * 0.5
 		pos = center + (pos - center) * scale_factor
 
@@ -270,12 +285,18 @@ func _modifier_summary() -> String:
 	var parts: Array = []
 	for e: Dictionary in _modifiers:
 		match String(e.get("kind", "")):
-			"scale":     parts.append("Scale ×%s" % str(e.get("factor", 1.0)))
-			"clamp":     parts.append("Clamp %d–%d" % [int(e.get("min", 0)), int(e.get("max", 100))])
-			"reverse":   parts.append("Mirror")
-			"block":     parts.append("Block")
-			"blackout":  parts.append("Blackout (video only)")
-			_:           parts.append(String(e.get("kind", "")).capitalize())
+			"scale":
+				parts.append("Scale ×%s" % str(e.get("factor", 1.0)))
+			"clamp":
+				parts.append("Clamp %d–%d" % [int(e.get("min", 0)), int(e.get("max", 100))])
+			"reverse":
+				parts.append("Mirror")
+			"block":
+				parts.append("Block")
+			"blackout":
+				parts.append("Blackout (video only)")
+			_:
+				parts.append(String(e.get("kind", "")).capitalize())
 	return "Modifiers: " + "  ·  ".join(parts) if not parts.is_empty() else ""
 
 
@@ -306,6 +327,7 @@ func _input(event: InputEvent) -> void:
 
 
 # ── Video ────────────────────────────────────────────────────────────────────
+
 
 # Loads the round's video into the preview, mirroring GameLoop's runtime loader
 # (ogv via ResourceLoader, mp4/mkv/webm via EIRTeam). EIRTeam only decodes H.264,
@@ -407,8 +429,9 @@ func _on_scrubbed(ms: float) -> void:
 # ===========================================================================
 # Inner graph control — draws the curves + a draggable playhead.
 # ===========================================================================
-class _Graph extends Control:
-	const PAD_LEFT: float = 34.0   # left gutter the floating Y labels sit over
+class _Graph:
+	extends Control
+	const PAD_LEFT: float = 34.0  # left gutter the floating Y labels sit over
 	const PAD_RIGHT: float = 16.0
 	const PAD_TOP: float = 10.0
 	const PAD_BOTTOM: float = 22.0
@@ -425,8 +448,8 @@ class _Graph extends Control:
 	signal scrubbed(ms: float)
 
 	var _px_per_sec: float = DEFAULT_PX_PER_SEC
-	var _raw: Array = []          # Array[Vector2(at_ms, pos)]
-	var _modified: Array = []     # Array[Vector2(at_ms, pos)], empty when hidden
+	var _raw: Array = []  # Array[Vector2(at_ms, pos)]
+	var _modified: Array = []  # Array[Vector2(at_ms, pos)], empty when hidden
 	var _has_modified: bool = false
 	var _length_ms: float = 1.0
 	var _playhead_ms: float = 0.0
@@ -475,7 +498,9 @@ class _Graph extends Control:
 	# Drive the scrollable width from the time scale. Min height is a floor; the
 	# ScrollContainer stretches us to the viewport height via size flags.
 	func _update_width() -> void:
-		custom_minimum_size = Vector2(PAD_LEFT + PAD_RIGHT + (_length_ms / 1000.0) * _px_per_sec, 240.0)
+		custom_minimum_size = Vector2(
+			PAD_LEFT + PAD_RIGHT + (_length_ms / 1000.0) * _px_per_sec, 240.0
+		)
 
 	# Multiply the zoom by `factor`, keeping the playhead centred in the viewport.
 	func zoom_by(factor: float) -> void:
@@ -487,7 +512,9 @@ class _Graph extends Control:
 	func _center_on_playhead() -> void:
 		var p: Node = get_parent()
 		if p is ScrollContainer:
-			(p as ScrollContainer).scroll_horizontal = int(_time_to_x(_playhead_ms) - (p as ScrollContainer).size.x / 2.0)
+			(p as ScrollContainer).scroll_horizontal = int(
+				_time_to_x(_playhead_ms) - (p as ScrollContainer).size.x / 2.0
+			)
 			queue_redraw()
 
 	func set_modified(points: Array, has_modified: bool) -> void:
@@ -496,7 +523,9 @@ class _Graph extends Control:
 		queue_redraw()
 
 	func _plot_area() -> Rect2:
-		return Rect2(PAD_LEFT, PAD_TOP, size.x - PAD_LEFT - PAD_RIGHT, size.y - PAD_TOP - PAD_BOTTOM)
+		return Rect2(
+			PAD_LEFT, PAD_TOP, size.x - PAD_LEFT - PAD_RIGHT, size.y - PAD_TOP - PAD_BOTTOM
+		)
 
 	func _time_to_x(at_ms: float) -> float:
 		return PAD_LEFT + (at_ms / 1000.0) * _px_per_sec
@@ -513,7 +542,9 @@ class _Graph extends Control:
 		if points.is_empty():
 			return out
 		var sx: float = _scroll_x()
-		var view_w: float = (get_parent() as Control).size.x if get_parent() is ScrollContainer else size.x
+		var view_w: float = (
+			(get_parent() as Control).size.x if get_parent() is ScrollContainer else size.x
+		)
 		var t_min: float = (sx - PAD_LEFT) / _px_per_sec * 1000.0
 		var t_max: float = (sx + view_w - PAD_LEFT) / _px_per_sec * 1000.0
 		var prev_in: bool = false
@@ -541,31 +572,62 @@ class _Graph extends Control:
 
 		# Plot background + frame.
 		draw_rect(area, Color(0.04, 0.02, 0.06, 1.0), true)
-		draw_rect(area, Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.5), false, 1.0)
+		draw_rect(
+			area,
+			Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.5),
+			false,
+			1.0
+		)
 
 		# Vertical time gridlines + labels every GRID_SECONDS.
 		var total_s: int = int(_length_ms / 1000.0)
 		for s in range(0, total_s + 1, GRID_SECONDS):
 			var gx: float = _time_to_x(s * 1000.0)
-			draw_line(Vector2(gx, area.position.y), Vector2(gx, area.position.y + area.size.y),
-				Color(1, 1, 1, 0.06), 1.0)
-			draw_string(font, Vector2(gx + 2, area.position.y + area.size.y + 14),
-				time_label_format.call(s * 1000.0), HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(1, 1, 1, 0.4))
+			draw_line(
+				Vector2(gx, area.position.y),
+				Vector2(gx, area.position.y + area.size.y),
+				Color(1, 1, 1, 0.06),
+				1.0
+			)
+			draw_string(
+				font,
+				Vector2(gx + 2, area.position.y + area.size.y + 14),
+				time_label_format.call(s * 1000.0),
+				HORIZONTAL_ALIGNMENT_LEFT,
+				-1,
+				9,
+				Color(1, 1, 1, 0.4)
+			)
 
 		# Horizontal gridlines at 0 / 25 / 50 / 75 / 100.
 		for pos in [0, 25, 50, 75, 100]:
 			var y: float = _to_px(Vector2(0.0, float(pos)), area).y
-			draw_line(Vector2(area.position.x, y), Vector2(area.position.x + area.size.x, y),
-				Color(1, 1, 1, 0.16 if pos == 50 else 0.06), 1.0)
+			draw_line(
+				Vector2(area.position.x, y),
+				Vector2(area.position.x + area.size.x, y),
+				Color(1, 1, 1, 0.16 if pos == 50 else 0.06),
+				1.0
+			)
 
 		if _raw.size() >= 2:
 			# Raw curve (dim when a modified curve is overlaid, so the modified pops).
-			var raw_col: Color = Color(UITheme.WHITE_SOFT.r, UITheme.WHITE_SOFT.g, UITheme.WHITE_SOFT.b,
-				0.35 if _has_modified else 0.9)
+			var raw_col: Color = Color(
+				UITheme.WHITE_SOFT.r,
+				UITheme.WHITE_SOFT.g,
+				UITheme.WHITE_SOFT.b,
+				0.35 if _has_modified else 0.9
+			)
 			_draw_curve(_curve_px(_raw, area), raw_col, 1.5)
 		elif _raw.is_empty():
-			draw_string(font, Vector2(_scroll_x() + PAD_LEFT + 20, area.position.y + area.size.y * 0.5),
-				"No funscript to preview", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(1, 1, 1, 0.5))
+			draw_string(
+				font,
+				Vector2(_scroll_x() + PAD_LEFT + 20, area.position.y + area.size.y * 0.5),
+				"No funscript to preview",
+				HORIZONTAL_ALIGNMENT_LEFT,
+				-1,
+				13,
+				Color(1, 1, 1, 0.5)
+			)
 
 		# Modified curve on top.
 		if _has_modified and _modified.size() >= 2:
@@ -578,11 +640,20 @@ class _Graph extends Control:
 	# backing strip so curves don't run through the text) as the plot scrolls.
 	func _draw_y_labels(area: Rect2, font: Font) -> void:
 		var sx: float = _scroll_x()
-		draw_rect(Rect2(sx, area.position.y, PAD_LEFT, area.size.y), Color(0.04, 0.02, 0.06, 0.85), true)
+		draw_rect(
+			Rect2(sx, area.position.y, PAD_LEFT, area.size.y), Color(0.04, 0.02, 0.06, 0.85), true
+		)
 		for pos in [0, 25, 50, 75, 100]:
 			var y: float = _to_px(Vector2(0.0, float(pos)), area).y
-			draw_string(font, Vector2(sx + 4, y + 4), str(pos), HORIZONTAL_ALIGNMENT_LEFT, -1, 9,
-				Color(1, 1, 1, 0.45))
+			draw_string(
+				font,
+				Vector2(sx + 4, y + 4),
+				str(pos),
+				HORIZONTAL_ALIGNMENT_LEFT,
+				-1,
+				9,
+				Color(1, 1, 1, 0.45)
+			)
 
 	# Draws a curve as individual line segments. draw_polyline triangulates the
 	# whole strip and breaks up (looks dashed) on the sharp V-turns a funscript is
@@ -591,13 +662,26 @@ class _Graph extends Control:
 		for i in range(1, pts.size()):
 			draw_line(pts[i - 1], pts[i], color, width)
 
-
 	func _draw_playhead(area: Rect2, font: Font) -> void:
 		var x: float = _time_to_x(_playhead_ms)
-		draw_line(Vector2(x, area.position.y), Vector2(x, area.position.y + area.size.y), UITheme.AMBER, 1.0)
-		var label: String = time_label_format.call(_playhead_ms) + " / " + time_label_format.call(_length_ms)
-		draw_string(font, Vector2(x + 4, area.position.y + 12), label,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, UITheme.AMBER)
+		draw_line(
+			Vector2(x, area.position.y),
+			Vector2(x, area.position.y + area.size.y),
+			UITheme.AMBER,
+			1.0
+		)
+		var label: String = (
+			time_label_format.call(_playhead_ms) + " / " + time_label_format.call(_length_ms)
+		)
+		draw_string(
+			font,
+			Vector2(x + 4, area.position.y + 12),
+			label,
+			HORIZONTAL_ALIGNMENT_LEFT,
+			-1,
+			10,
+			UITheme.AMBER
+		)
 
 	func _gui_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:

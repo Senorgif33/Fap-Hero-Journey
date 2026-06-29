@@ -6,22 +6,22 @@ extends Control
 # Reads/writes all settings through the SettingsService autoload.
 # ---------------------------------------------------------------------------
 
-const TOP_BAR_HEIGHT:  int = 64
-const TAB_BAR_HEIGHT:  int = 48
-const PANEL_HALF_W:    int = 480
-const PANEL_PAD_V:     int = 24
-const BORDER_WIDTH:    int = 3
-const ROW_LABEL_W:     int = 260
-const SLIDER_MIN_W:    int = 260
-const VALUE_LABEL_W:   int = 64
+const TOP_BAR_HEIGHT: int = 64
+const TAB_BAR_HEIGHT: int = 48
+const PANEL_HALF_W: int = 480
+const PANEL_PAD_V: int = 24
+const BORDER_WIDTH: int = 3
+const ROW_LABEL_W: int = 260
+const SLIDER_MIN_W: int = 260
+const VALUE_LABEL_W: int = 64
 
 # Tab categories. Each groups a set of sections; only one tab is shown at a time.
 const TAB_NAMES: Array = ["GENERAL", "CONNECTION", "DEVICE", "ABOUT"]
 
-const DEFAULT_BP_ADDRESS:  String = "ws://localhost:12345"
-const DEFAULT_BAUD_RATE:   int    = 115200
-const OUTPUT_MODES:        Array  = ["Buttplug (Intiface)", "Serial T-code (SR6 / OSR2)"]
-const OUTPUT_MODE_KEYS:    Array  = ["buttplug", "serial"]
+const DEFAULT_BP_ADDRESS: String = "ws://localhost:12345"
+const DEFAULT_BAUD_RATE: int = 115200
+const OUTPUT_MODES: Array = ["Buttplug (Intiface)", "Serial T-code (SR6 / OSR2)"]
+const OUTPUT_MODE_KEYS: Array = ["buttplug", "serial"]
 
 const RESOLUTIONS: Array = [
 	Vector2i(1280, 720),
@@ -30,99 +30,123 @@ const RESOLUTIONS: Array = [
 	Vector2i(3840, 2160),
 ]
 
-@onready var _bg:              ColorRect     = $Background
-@onready var _top_bar:         HBoxContainer = $TopBar
-@onready var _back_btn:        Button        = $TopBar/BackButton
-@onready var _title_lbl:       Label         = $TopBar/TitleLabel
-@onready var _content_panel:   PanelContainer = $ContentPanel
-@onready var _content_vbox:    VBoxContainer  = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox
-@onready var _master_slider:   HSlider        = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow/MasterSlider
-@onready var _master_value:    Label          = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow/MasterValue
-@onready var _fs_toggle:       Button         = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/FullscreenRow/FsToggle
-@onready var _res_dropdown:    OptionButton   = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/ResolutionRow/ResDropdown
-@onready var _address_input:   LineEdit       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AddressRow/AddressInput
-@onready var _auto_toggle:     Button         = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AutoConnectRow/AutoConnectToggle
-@onready var _connect_btn:     Button         = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/ConnectBtn
-@onready var _scan_btn:        Button         = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/ScanBtn
-@onready var _status_lbl:      Label          = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/StatusLabel
-@onready var _device_dropdown: OptionButton   = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/DeviceRow/DeviceDropdown
-@onready var _bp_test_btn:     Button         = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/BpTestBtn
+@onready var _bg: ColorRect = $Background
+@onready var _top_bar: HBoxContainer = $TopBar
+@onready var _back_btn: Button = $TopBar/BackButton
+@onready var _title_lbl: Label = $TopBar/TitleLabel
+@onready var _content_panel: PanelContainer = $ContentPanel
+@onready var _content_vbox: VBoxContainer = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox
+@onready
+var _master_slider: HSlider = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow/MasterSlider
+@onready
+var _master_value: Label = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow/MasterValue
+@onready
+var _fs_toggle: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/FullscreenRow/FsToggle
+@onready
+var _res_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/ResolutionRow/ResDropdown
+@onready
+var _address_input: LineEdit = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AddressRow/AddressInput
+@onready
+var _auto_toggle: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/AutoConnectRow/AutoConnectToggle
+@onready
+var _connect_btn: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/ConnectBtn
+@onready
+var _scan_btn: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/ScanBtn
+@onready
+var _status_lbl: Label = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/StatusLabel
+@onready
+var _device_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/DeviceRow/DeviceDropdown
+@onready
+var _bp_test_btn: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/IntifaceSection/ConnectionRow/BpTestBtn
 
-@onready var _open_folder_btn:      Button       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/JourneysSection/JourneysRow/OpenFolderBtn
+@onready
+var _open_folder_btn: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/JourneysSection/JourneysRow/OpenFolderBtn
 
 # Built dynamically in _build_journey_location_row(). The path label shows the
 # current storage location and updates when the user picks a new folder.
-var _journeys_path_label: Label  = null
+var _journeys_path_label: Label = null
 var _journeys_browse_btn: Button = null
-var _journeys_reset_btn:  Button = null
+var _journeys_reset_btn: Button = null
 
 # Built dynamically in _build_transcode_section().
-var _ffmpeg_path_label:   Label  = null
-var _ffmpeg_status_label: Label  = null
+var _ffmpeg_path_label: Label = null
+var _ffmpeg_status_label: Label = null
 var _auto_transcode_toggle: Button = null
 
-@onready var _output_mode_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeDropdown
+@onready
+var _output_mode_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeDropdown
 
-@onready var _serial_port_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialPortRow/SerialPortDropdown
-@onready var _serial_refresh_btn:   Button       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialPortRow/SerialRefreshBtn
-@onready var _serial_baud_input:    LineEdit     = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialBaudRow/SerialBaudInput
-@onready var _serial_auto_toggle:   Button       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialAutoRow/SerialAutoToggle
-@onready var _serial_connect_btn:   Button       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialConnectBtn
-@onready var _serial_test_btn:      Button       = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialTestBtn
-@onready var _serial_status_lbl:    Label        = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialStatusLabel
+@onready
+var _serial_port_dropdown: OptionButton = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialPortRow/SerialPortDropdown
+@onready
+var _serial_refresh_btn: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialPortRow/SerialRefreshBtn
+@onready
+var _serial_baud_input: LineEdit = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialBaudRow/SerialBaudInput
+@onready
+var _serial_auto_toggle: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialAutoRow/SerialAutoToggle
+@onready
+var _serial_connect_btn: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialConnectBtn
+@onready
+var _serial_test_btn: Button = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialTestBtn
+@onready
+var _serial_status_lbl: Label = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/SerialSection/SerialConnRow/SerialStatusLabel
 
 var _is_connected: bool = false
 var overlay_mode: bool = false
 var _loading: bool = false
 
-var _music_slider:    HSlider = null
-var _music_value_lbl: Label   = null
+var _music_slider: HSlider = null
+var _music_value_lbl: Label = null
 
-var _range_slider:  RangeSlider = null
-var _range_min_lbl: Label       = null
-var _range_max_lbl: Label       = null
+var _range_slider: RangeSlider = null
+var _range_min_lbl: Label = null
+var _range_max_lbl: Label = null
 
 # Secondary positional axes (T-code id, human name) — each gets its own range row.
 const SECONDARY_AXES: Array = [
-	["L1", "Surge"], ["L2", "Sway"], ["R0", "Twist"], ["R1", "Roll"], ["R2", "Pitch"],
+	["L1", "Surge"],
+	["L2", "Sway"],
+	["R0", "Twist"],
+	["R1", "Roll"],
+	["R2", "Pitch"],
 ]
-var _axis_range_sliders:  Dictionary = {}  # axis id → RangeSlider
+var _axis_range_sliders: Dictionary = {}  # axis id → RangeSlider
 var _axis_range_min_lbls: Dictionary = {}  # axis id → MIN Label
 var _axis_range_max_lbls: Dictionary = {}  # axis id → MAX Label
 
-var _home_slider:    HSlider  = null
-var _home_value_lbl: Label    = null
+var _home_slider: HSlider = null
+var _home_value_lbl: Label = null
 var _home_ease_input: LineEdit = null
 
-var _latency_slider:    HSlider = null
-var _latency_value_lbl: Label   = null
-var _vibe_slider:       HSlider = null
-var _vibe_value_lbl:    Label   = null
-var _max_speed_slider:    HSlider = null
-var _max_speed_value_lbl: Label   = null
-var _hud_delay_slider:    HSlider = null
-var _hud_delay_value_lbl: Label   = null
-var _ui_scale_slider:     HSlider = null
-var _ui_scale_value_lbl:  Label   = null
-var _beat_bar_toggle:     Button  = null
-var _update_check_toggle: Button  = null
-var _ui_sound_toggle:     Button  = null
-var _ui_sound_slider:     HSlider = null
-var _ui_sound_value_lbl:  Label   = null
+var _latency_slider: HSlider = null
+var _latency_value_lbl: Label = null
+var _vibe_slider: HSlider = null
+var _vibe_value_lbl: Label = null
+var _max_speed_slider: HSlider = null
+var _max_speed_value_lbl: Label = null
+var _hud_delay_slider: HSlider = null
+var _hud_delay_value_lbl: Label = null
+var _ui_scale_slider: HSlider = null
+var _ui_scale_value_lbl: Label = null
+var _beat_bar_toggle: Button = null
+var _update_check_toggle: Button = null
+var _ui_sound_toggle: Button = null
+var _ui_sound_slider: HSlider = null
+var _ui_sound_value_lbl: Label = null
 
-var _filler_toggle:     Button      = null
-var _filler_speed_input: LineEdit   = null
-var _filler_range_slider:  RangeSlider = null
-var _filler_range_min_lbl: Label       = null
-var _filler_range_max_lbl: Label       = null
+var _filler_toggle: Button = null
+var _filler_speed_input: LineEdit = null
+var _filler_range_slider: RangeSlider = null
+var _filler_range_min_lbl: Label = null
+var _filler_range_max_lbl: Label = null
 
 # Tab bar + references to the three code-built sections, needed so tab
 # switching can toggle their visibility alongside the scene-built sections.
-var _tab_bar:         TabBar        = null
-var _range_section:    VBoxContainer = null
-var _filler_section:   VBoxContainer = null
+var _tab_bar: TabBar = null
+var _range_section: VBoxContainer = null
+var _filler_section: VBoxContainer = null
 var _transcode_section: VBoxContainer = null
-var _credits_section:  VBoxContainer = null
+var _credits_section: VBoxContainer = null
 
 
 func _ready() -> void:
@@ -141,39 +165,42 @@ func _ready() -> void:
 # Layout
 # ---------------------------------------------------------------------------
 
+
 func _apply_layout() -> void:
-	anchor_right  = 1.0
+	anchor_right = 1.0
 	anchor_bottom = 1.0
 
-	_bg.anchor_right  = 1.0
+	_bg.anchor_right = 1.0
 	_bg.anchor_bottom = 1.0
 	_bg.offset_left = 0
 	_bg.offset_top = 0
 	_bg.offset_right = 0
 	_bg.offset_bottom = 0
-	
+
 	var animated_bg: Control = $AnimatedBackground
-	animated_bg.anchor_right  = 1.0
+	animated_bg.anchor_right = 1.0
 	animated_bg.anchor_bottom = 1.0
 
-	_top_bar.anchor_right  = 1.0
+	_top_bar.anchor_right = 1.0
 	_top_bar.anchor_bottom = 0.0
-	_top_bar.offset_left   = 16
-	_top_bar.offset_right  = -16
+	_top_bar.offset_left = 16
+	_top_bar.offset_right = -16
 	_top_bar.offset_bottom = TOP_BAR_HEIGHT
 	_top_bar.add_theme_constant_override("separation", 0)
 
-	_content_panel.anchor_left   = 0.5
-	_content_panel.anchor_right  = 0.5
-	_content_panel.anchor_top    = 0.0
+	_content_panel.anchor_left = 0.5
+	_content_panel.anchor_right = 0.5
+	_content_panel.anchor_top = 0.0
 	_content_panel.anchor_bottom = 1.0
 	_content_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_content_panel.offset_left   = -PANEL_HALF_W
-	_content_panel.offset_right  =  PANEL_HALF_W
-	_content_panel.offset_top    = TOP_BAR_HEIGHT + TAB_BAR_HEIGHT + PANEL_PAD_V
+	_content_panel.offset_left = -PANEL_HALF_W
+	_content_panel.offset_right = PANEL_HALF_W
+	_content_panel.offset_top = TOP_BAR_HEIGHT + TAB_BAR_HEIGHT + PANEL_PAD_V
 	_content_panel.offset_bottom = -PANEL_PAD_V
 
-	($ContentPanel/ContentScroll/MarginWrapper as MarginContainer).add_theme_constant_override("margin_right", 24)
+	($ContentPanel/ContentScroll/MarginWrapper as MarginContainer).add_theme_constant_override(
+		"margin_right", 24
+	)
 
 	# Wider inter-section spacing — the old fixed gap spacer nodes are hidden
 	# below now that each tab shows only a few sections at a time.
@@ -222,7 +249,7 @@ func _apply_layout() -> void:
 	var master_lbl: Label = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection/MasterRow/MasterLabel
 	master_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
 	_master_slider.custom_minimum_size = Vector2(SLIDER_MIN_W, 0)
-	_master_value.custom_minimum_size  = Vector2(VALUE_LABEL_W, 0)
+	_master_value.custom_minimum_size = Vector2(VALUE_LABEL_W, 0)
 
 	# ── Music Volume row (code-generated, appended to AudioSection) ───────────
 	var audio_section: VBoxContainer = $ContentPanel/ContentScroll/MarginWrapper/ContentVBox/AudioSection
@@ -253,10 +280,11 @@ func _apply_layout() -> void:
 	_style_label(_music_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
 	music_row.add_child(_music_value_lbl)
 
-	_music_slider.value_changed.connect(func(v: float) -> void:
-		_music_value_lbl.text = "%d%%" % roundi(v * 100.0)
-		MusicService.set_volume(v)
-		_save_settings()
+	_music_slider.value_changed.connect(
+		func(v: float) -> void:
+			_music_value_lbl.text = "%d%%" % roundi(v * 100.0)
+			MusicService.set_volume(v)
+			_save_settings()
 	)
 
 	# ── UI Sounds toggle (code-generated, appended to AudioSection) ───────────
@@ -272,14 +300,15 @@ func _apply_layout() -> void:
 
 	_ui_sound_toggle = Button.new()
 	_ui_sound_toggle.toggle_mode = true
-	_ui_sound_toggle.focus_mode  = Control.FOCUS_NONE
+	_ui_sound_toggle.focus_mode = Control.FOCUS_NONE
 	_style_toggle(_ui_sound_toggle, false)
 	ui_sound_row.add_child(_ui_sound_toggle)
-	_ui_sound_toggle.toggled.connect(func(pressed: bool) -> void:
-		_style_toggle(_ui_sound_toggle, pressed)
-		_save_settings()
-		if pressed:
-			UISound.confirm()  # audible cue when enabling (disabling is cued by the click itself)
+	_ui_sound_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_ui_sound_toggle, pressed)
+			_save_settings()
+			if pressed:
+				UISound.confirm()  # audible cue when enabling (disabling is cued by the click itself)
 	)
 
 	var ui_sound_hint: Label = Label.new()
@@ -315,9 +344,10 @@ func _apply_layout() -> void:
 	_style_label(_ui_sound_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
 	ui_vol_row.add_child(_ui_sound_value_lbl)
 
-	_ui_sound_slider.value_changed.connect(func(v: float) -> void:
-		_ui_sound_value_lbl.text = "%d%%" % roundi(v * 100.0)
-		_save_settings()
+	_ui_sound_slider.value_changed.connect(
+		func(v: float) -> void:
+			_ui_sound_value_lbl.text = "%d%%" % roundi(v * 100.0)
+			_save_settings()
 	)
 	# Audible preview when the drag finishes (not on every tick).
 	_ui_sound_slider.drag_ended.connect(func(_changed: bool) -> void: UISound.click())
@@ -350,9 +380,10 @@ func _apply_layout() -> void:
 	_style_label(_hud_delay_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
 	hud_delay_row.add_child(_hud_delay_value_lbl)
 
-	_hud_delay_slider.value_changed.connect(func(v: float) -> void:
-		_hud_delay_value_lbl.text = "%.1fs" % v
-		_save_settings()
+	_hud_delay_slider.value_changed.connect(
+		func(v: float) -> void:
+			_hud_delay_value_lbl.text = "%.1fs" % v
+			_save_settings()
 	)
 
 	# ── UI Scale row (code-generated, appended to DisplaySection) ────────────
@@ -384,13 +415,14 @@ func _apply_layout() -> void:
 	_style_label(_ui_scale_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
 	ui_scale_row.add_child(_ui_scale_value_lbl)
 
-	_ui_scale_slider.value_changed.connect(func(v: float) -> void:
-		_ui_scale_value_lbl.text = "%d%%" % roundi(v * 100.0)
-		# Apply live so the author sees the change immediately.
-		var w: Window = get_window()
-		if w != null:
-			w.content_scale_factor = v
-		_save_settings()
+	_ui_scale_slider.value_changed.connect(
+		func(v: float) -> void:
+			_ui_scale_value_lbl.text = "%d%%" % roundi(v * 100.0)
+			# Apply live so the author sees the change immediately.
+			var w: Window = get_window()
+			if w != null:
+				w.content_scale_factor = v
+			_save_settings()
 	)
 
 	var ui_scale_hint: Label = Label.new()
@@ -412,12 +444,13 @@ func _apply_layout() -> void:
 
 	_beat_bar_toggle = Button.new()
 	_beat_bar_toggle.toggle_mode = true
-	_beat_bar_toggle.focus_mode  = Control.FOCUS_NONE
+	_beat_bar_toggle.focus_mode = Control.FOCUS_NONE
 	_style_toggle(_beat_bar_toggle, false)
 	beat_row.add_child(_beat_bar_toggle)
-	_beat_bar_toggle.toggled.connect(func(pressed: bool) -> void:
-		_style_toggle(_beat_bar_toggle, pressed)
-		_save_settings()
+	_beat_bar_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_beat_bar_toggle, pressed)
+			_save_settings()
 	)
 
 	var beat_hint: Label = Label.new()
@@ -439,12 +472,13 @@ func _apply_layout() -> void:
 
 	_update_check_toggle = Button.new()
 	_update_check_toggle.toggle_mode = true
-	_update_check_toggle.focus_mode  = Control.FOCUS_NONE
+	_update_check_toggle.focus_mode = Control.FOCUS_NONE
 	_style_toggle(_update_check_toggle, false)
 	upd_row.add_child(_update_check_toggle)
-	_update_check_toggle.toggled.connect(func(pressed: bool) -> void:
-		_style_toggle(_update_check_toggle, pressed)
-		_save_settings()
+	_update_check_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_update_check_toggle, pressed)
+			_save_settings()
 	)
 
 	var upd_hint: Label = Label.new()
@@ -464,7 +498,7 @@ func _apply_layout() -> void:
 	]:
 		(get_node(label_path) as Label).custom_minimum_size = Vector2(ROW_LABEL_W, 0)
 
-	_res_dropdown.custom_minimum_size  = Vector2(220, 0)
+	_res_dropdown.custom_minimum_size = Vector2(220, 0)
 	_device_dropdown.custom_minimum_size = Vector2(220, 0)
 	_output_mode_dropdown.custom_minimum_size = Vector2(280, 0)
 	_serial_port_dropdown.custom_minimum_size = Vector2(180, 0)
@@ -524,11 +558,12 @@ func _apply_layout() -> void:
 	val_row.add_child(_range_max_lbl)
 
 	# Update labels, push live into the player, and auto-save whenever a handle is moved.
-	_range_slider.range_changed.connect(func(lo: float, hi: float) -> void:
-		_range_min_lbl.text = "MIN: %d" % roundi(lo)
-		_range_max_lbl.text = "MAX: %d" % roundi(hi)
-		FunscriptPlayer.SetRangeClamp(roundi(lo), roundi(hi))
-		_save_settings()
+	_range_slider.range_changed.connect(
+		func(lo: float, hi: float) -> void:
+			_range_min_lbl.text = "MIN: %d" % roundi(lo)
+			_range_max_lbl.text = "MAX: %d" % roundi(hi)
+			FunscriptPlayer.SetRangeClamp(roundi(lo), roundi(hi))
+			_save_settings()
 	)
 
 	# Hint beneath the slider
@@ -594,11 +629,13 @@ func _apply_layout() -> void:
 		_axis_range_max_lbls[axis_id] = ax_max_lbl
 
 		# Live-push this axis's window and autosave on drag (mirrors Stroke Range).
-		ax_slider.range_changed.connect(func(lo: float, hi: float) -> void:
-			ax_min_lbl.text = "MIN: %d" % roundi(lo)
-			ax_max_lbl.text = "MAX: %d" % roundi(hi)
-			FunscriptPlayer.SetAxisRangeClamp(axis_id, roundi(lo), roundi(hi))
-			_save_settings())
+		ax_slider.range_changed.connect(
+			func(lo: float, hi: float) -> void:
+				ax_min_lbl.text = "MIN: %d" % roundi(lo)
+				ax_max_lbl.text = "MAX: %d" % roundi(hi)
+				FunscriptPlayer.SetAxisRangeClamp(axis_id, roundi(lo), roundi(hi))
+				_save_settings()
+		)
 
 	# ── Home Position row ────────────────────────────────────────────────────
 	var home_row: HBoxContainer = HBoxContainer.new()
@@ -630,9 +667,10 @@ func _apply_layout() -> void:
 	_style_label(_home_value_lbl, UITheme.PURPLE_MID, 11, true)
 	home_slider_col.add_child(_home_value_lbl)
 
-	_home_slider.value_changed.connect(func(v: float) -> void:
-		_home_value_lbl.text = str(roundi(v))
-		_save_settings()
+	_home_slider.value_changed.connect(
+		func(v: float) -> void:
+			_home_value_lbl.text = str(roundi(v))
+			_save_settings()
 	)
 
 	# ── Home Ease row ────────────────────────────────────────────────────────
@@ -658,9 +696,7 @@ func _apply_layout() -> void:
 	_style_label(home_ease_hint_lbl, UITheme.SEPARATOR, 12, false)
 	home_ease_row.add_child(home_ease_hint_lbl)
 
-	_home_ease_input.text_changed.connect(func(_t: String) -> void:
-		_save_settings()
-	)
+	_home_ease_input.text_changed.connect(func(_t: String) -> void: _save_settings())
 
 	var home_hint: Label = Label.new()
 	home_hint.text = "L0 target position when playback pauses or stops. Secondary axes always return to centre."
@@ -698,9 +734,10 @@ func _apply_layout() -> void:
 	_style_label(_latency_value_lbl, UITheme.PURPLE_MID, 11, true)
 	latency_col.add_child(_latency_value_lbl)
 
-	_latency_slider.value_changed.connect(func(v: float) -> void:
-		_latency_value_lbl.text = "%d ms" % roundi(v)
-		_save_settings()
+	_latency_slider.value_changed.connect(
+		func(v: float) -> void:
+			_latency_value_lbl.text = "%d ms" % roundi(v)
+			_save_settings()
 	)
 
 	var latency_hint: Label = Label.new()
@@ -739,9 +776,10 @@ func _apply_layout() -> void:
 	_style_label(_vibe_value_lbl, UITheme.PURPLE_MID, 11, true)
 	vibe_col.add_child(_vibe_value_lbl)
 
-	_vibe_slider.value_changed.connect(func(v: float) -> void:
-		_vibe_value_lbl.text = "%d%%" % roundi(v)
-		_save_settings()
+	_vibe_slider.value_changed.connect(
+		func(v: float) -> void:
+			_vibe_value_lbl.text = "%d%%" % roundi(v)
+			_save_settings()
 	)
 
 	var vibe_hint: Label = Label.new()
@@ -780,9 +818,10 @@ func _apply_layout() -> void:
 	_style_label(_max_speed_value_lbl, UITheme.PURPLE_MID, 11, true)
 	speed_col.add_child(_max_speed_value_lbl)
 
-	_max_speed_slider.value_changed.connect(func(v: float) -> void:
-		_max_speed_value_lbl.text = ("Off" if roundi(v) <= 0 else "%d u/s" % roundi(v))
-		_save_settings()
+	_max_speed_slider.value_changed.connect(
+		func(v: float) -> void:
+			_max_speed_value_lbl.text = ("Off" if roundi(v) <= 0 else "%d u/s" % roundi(v))
+			_save_settings()
 	)
 
 	var speed_hint: Label = Label.new()
@@ -819,7 +858,7 @@ func _apply_layout() -> void:
 
 	_filler_toggle = Button.new()
 	_filler_toggle.toggle_mode = true
-	_filler_toggle.focus_mode  = Control.FOCUS_NONE
+	_filler_toggle.focus_mode = Control.FOCUS_NONE
 	_style_toggle(_filler_toggle, false)
 	filler_enable_row.add_child(_filler_toggle)
 
@@ -884,25 +923,31 @@ func _apply_layout() -> void:
 	_style_label(_filler_range_max_lbl, UITheme.PURPLE_MID, 11, true)
 	filler_val_row.add_child(_filler_range_max_lbl)
 
-	_filler_range_slider.range_changed.connect(func(lo: float, hi: float) -> void:
-		_filler_range_min_lbl.text = "MIN: %d" % roundi(lo)
-		_filler_range_max_lbl.text = "MAX: %d" % roundi(hi)
-		# Apply live so an active storyboard's filler picks up the new range
-		# immediately, not just on the next storyboard.
-		FunscriptPlayer.SetFillerParams(roundi(lo), roundi(hi), _filler_speed_input.text.to_int())
-		_save_settings()
+	_filler_range_slider.range_changed.connect(
+		func(lo: float, hi: float) -> void:
+			_filler_range_min_lbl.text = "MIN: %d" % roundi(lo)
+			_filler_range_max_lbl.text = "MAX: %d" % roundi(hi)
+			# Apply live so an active storyboard's filler picks up the new range
+			# immediately, not just on the next storyboard.
+			FunscriptPlayer.SetFillerParams(
+				roundi(lo), roundi(hi), _filler_speed_input.text.to_int()
+			)
+			_save_settings()
 	)
-	_filler_toggle.toggled.connect(func(pressed: bool) -> void:
-		_style_toggle(_filler_toggle, pressed)
-		_save_settings()
+	_filler_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_filler_toggle, pressed)
+			_save_settings()
 	)
-	_filler_speed_input.text_changed.connect(func(_t: String) -> void:
-		# Same live-apply for half-cycle changes.
-		FunscriptPlayer.SetFillerParams(
-			roundi(_filler_range_slider.lo),
-			roundi(_filler_range_slider.hi),
-			_filler_speed_input.text.to_int())
-		_save_settings()
+	_filler_speed_input.text_changed.connect(
+		func(_t: String) -> void:
+			# Same live-apply for half-cycle changes.
+			FunscriptPlayer.SetFillerParams(
+				roundi(_filler_range_slider.lo),
+				roundi(_filler_range_slider.hi),
+				_filler_speed_input.text.to_int()
+			)
+			_save_settings()
 	)
 
 	var filler_hint: Label = Label.new()
@@ -945,6 +990,7 @@ func _apply_layout() -> void:
 # Tabs
 # ---------------------------------------------------------------------------
 
+
 # Builds the category tab bar and shows the first tab. The tab bar floats
 # between the top bar and the content panel; switching tabs toggles the
 # visibility of each section rather than reparenting (the rest of this file
@@ -953,16 +999,16 @@ func _build_tabs() -> void:
 	_tab_bar = TabBar.new()
 	for tab_name: String in TAB_NAMES:
 		_tab_bar.add_tab(tab_name)
-	_tab_bar.clip_tabs     = false
+	_tab_bar.clip_tabs = false
 	_tab_bar.tab_alignment = TabBar.ALIGNMENT_CENTER
-	_tab_bar.focus_mode    = Control.FOCUS_NONE
-	_tab_bar.anchor_left   = 0.5
-	_tab_bar.anchor_right  = 0.5
-	_tab_bar.anchor_top    = 0.0
+	_tab_bar.focus_mode = Control.FOCUS_NONE
+	_tab_bar.anchor_left = 0.5
+	_tab_bar.anchor_right = 0.5
+	_tab_bar.anchor_top = 0.0
 	_tab_bar.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_tab_bar.offset_left   = -PANEL_HALF_W
-	_tab_bar.offset_right  =  PANEL_HALF_W
-	_tab_bar.offset_top    = TOP_BAR_HEIGHT
+	_tab_bar.offset_left = -PANEL_HALF_W
+	_tab_bar.offset_right = PANEL_HALF_W
+	_tab_bar.offset_top = TOP_BAR_HEIGHT
 	_tab_bar.offset_bottom = TOP_BAR_HEIGHT + TAB_BAR_HEIGHT
 	_style_tab_bar(_tab_bar)
 	add_child(_tab_bar)
@@ -972,14 +1018,20 @@ func _build_tabs() -> void:
 
 
 func _style_tab_bar(tabs: TabBar) -> void:
-	tabs.add_theme_color_override("font_selected_color",   UITheme.PURPLE_BRIGHT)
+	tabs.add_theme_color_override("font_selected_color", UITheme.PURPLE_BRIGHT)
 	tabs.add_theme_color_override("font_unselected_color", UITheme.PURPLE_MID)
-	tabs.add_theme_color_override("font_hovered_color",    UITheme.WHITE_SOFT)
+	tabs.add_theme_color_override("font_hovered_color", UITheme.WHITE_SOFT)
 	tabs.add_theme_font_size_override("font_size", 14)
-	tabs.add_theme_stylebox_override("tab_selected",   _make_btn_style(UITheme.PURPLE_BRIGHT, UITheme.PURPLE_MID))
-	tabs.add_theme_stylebox_override("tab_unselected", _make_btn_style(UITheme.PURPLE_MID,    UITheme.PURPLE_DARK))
-	tabs.add_theme_stylebox_override("tab_hovered",    _make_btn_style(UITheme.PURPLE_BRIGHT, UITheme.PURPLE_DARK))
-	tabs.add_theme_stylebox_override("tab_focus",      StyleBoxEmpty.new())
+	tabs.add_theme_stylebox_override(
+		"tab_selected", _make_btn_style(UITheme.PURPLE_BRIGHT, UITheme.PURPLE_MID)
+	)
+	tabs.add_theme_stylebox_override(
+		"tab_unselected", _make_btn_style(UITheme.PURPLE_MID, UITheme.PURPLE_DARK)
+	)
+	tabs.add_theme_stylebox_override(
+		"tab_hovered", _make_btn_style(UITheme.PURPLE_BRIGHT, UITheme.PURPLE_DARK)
+	)
+	tabs.add_theme_stylebox_override("tab_focus", StyleBoxEmpty.new())
 
 
 # Shows the sections that belong to tab `idx` and hides all others.
@@ -987,9 +1039,18 @@ func _on_tab_changed(idx: int) -> void:
 	const VBOX: String = "ContentPanel/ContentScroll/MarginWrapper/ContentVBox/"
 	var pages: Array = [
 		# GENERAL
-		[get_node(VBOX + "JourneysSection"), get_node(VBOX + "AudioSection"), get_node(VBOX + "DisplaySection"), _transcode_section],
+		[
+			get_node(VBOX + "JourneysSection"),
+			get_node(VBOX + "AudioSection"),
+			get_node(VBOX + "DisplaySection"),
+			_transcode_section
+		],
 		# CONNECTION
-		[get_node(VBOX + "OutputSection"), get_node(VBOX + "IntifaceSection"), get_node(VBOX + "SerialSection")],
+		[
+			get_node(VBOX + "OutputSection"),
+			get_node(VBOX + "IntifaceSection"),
+			get_node(VBOX + "SerialSection")
+		],
 		# DEVICE
 		[_range_section, _filler_section],
 		# ABOUT
@@ -1009,12 +1070,13 @@ func _on_tab_changed(idx: int) -> void:
 # Theme
 # ---------------------------------------------------------------------------
 
+
 func _apply_theme() -> void:
 	_bg.color = UITheme.BG
 
 	_style_label(_title_lbl, UITheme.PURPLE_BRIGHT, 18, true)
 	_title_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_title_lbl.horizontal_alignment  = HORIZONTAL_ALIGNMENT_CENTER
+	_title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 	_style_button(_back_btn, UITheme.MAGENTA)
 	_style_button(_open_folder_btn, UITheme.PURPLE_MID)
@@ -1059,8 +1121,8 @@ func _apply_theme() -> void:
 		_style_label(get_node(row_label_path), UITheme.WHITE_SOFT, 14, false)
 
 	_style_label(_master_value, UITheme.PURPLE_BRIGHT, 14, false)
-	_style_label(_status_lbl,   UITheme.ERROR,         13, false)
-	_style_label(_serial_status_lbl, UITheme.ERROR,    13, false)
+	_style_label(_status_lbl, UITheme.ERROR, 13, false)
+	_style_label(_serial_status_lbl, UITheme.ERROR, 13, false)
 
 	_style_slider(_master_slider)
 	_style_option_button(_res_dropdown)
@@ -1069,34 +1131,35 @@ func _apply_theme() -> void:
 	_style_option_button(_serial_port_dropdown)
 	_style_line_edit(_address_input)
 	_style_line_edit(_serial_baud_input)
-	_style_toggle(_fs_toggle,   false)
+	_style_toggle(_fs_toggle, false)
 	_style_toggle(_auto_toggle, false)
 	_style_toggle(_serial_auto_toggle, false)
-	_style_button(_bp_test_btn,        UITheme.PURPLE_MID)
+	_style_button(_bp_test_btn, UITheme.PURPLE_MID)
 	_style_button(_serial_refresh_btn, UITheme.PURPLE_MID)
 	_style_button(_serial_connect_btn, UITheme.PURPLE_BRIGHT)
-	_style_button(_serial_test_btn,    UITheme.PURPLE_MID)
+	_style_button(_serial_test_btn, UITheme.PURPLE_MID)
 
 
 func _style_panel() -> void:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
-	s.bg_color            = UITheme.PANEL_BG
-	s.border_color        = UITheme.PURPLE_BRIGHT
-	s.border_width_left   = BORDER_WIDTH
-	s.border_width_right  = BORDER_WIDTH
-	s.border_width_top    = BORDER_WIDTH
+	s.bg_color = UITheme.PANEL_BG
+	s.border_color = UITheme.PURPLE_BRIGHT
+	s.border_width_left = BORDER_WIDTH
+	s.border_width_right = BORDER_WIDTH
+	s.border_width_top = BORDER_WIDTH
 	s.border_width_bottom = BORDER_WIDTH
-	s.corner_radius_top_left     = 4
-	s.corner_radius_top_right    = 4
-	s.corner_radius_bottom_left  = 4
+	s.corner_radius_top_left = 4
+	s.corner_radius_top_right = 4
+	s.corner_radius_bottom_left = 4
 	s.corner_radius_bottom_right = 4
 	s.shadow_color = Color(UITheme.MAGENTA.r, UITheme.MAGENTA.g, UITheme.MAGENTA.b, 0.5)
-	s.shadow_size  = 12
-	s.content_margin_left   = 32
-	s.content_margin_right  = 32
-	s.content_margin_top    = 28
+	s.shadow_size = 12
+	s.content_margin_left = 32
+	s.content_margin_right = 32
+	s.content_margin_top = 28
 	s.content_margin_bottom = 28
 	_content_panel.add_theme_stylebox_override("panel", s)
+
 
 func _make_separator_style() -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
@@ -1118,28 +1181,28 @@ func _make_btn_style(border: Color, fill: Color) -> StyleBoxFlat:
 
 
 func _style_toggle(btn: Button, pressed: bool) -> void:
-	var active_color:   Color = UITheme.PURPLE_BRIGHT
+	var active_color: Color = UITheme.PURPLE_BRIGHT
 	var inactive_color: Color = UITheme.PURPLE_MID
 	var accent: Color = active_color if pressed else inactive_color
-	btn.add_theme_color_override("font_color",          accent)
-	btn.add_theme_color_override("font_hover_color",    UITheme.WHITE_SOFT)
-	btn.add_theme_color_override("font_pressed_color",  UITheme.BG)
+	btn.add_theme_color_override("font_color", accent)
+	btn.add_theme_color_override("font_hover_color", UITheme.WHITE_SOFT)
+	btn.add_theme_color_override("font_pressed_color", UITheme.BG)
 	btn.add_theme_font_size_override("font_size", 14)
 	btn.text = btn.text.to_upper()
 	var fill: Color = UITheme.PURPLE_MID if pressed else UITheme.PURPLE_DARK
-	btn.add_theme_stylebox_override("normal",   _make_btn_style(accent, fill))
-	btn.add_theme_stylebox_override("hover",    _make_btn_style(accent, UITheme.PURPLE_MID))
-	btn.add_theme_stylebox_override("pressed",  _make_btn_style(active_color, active_color))
-	btn.add_theme_stylebox_override("focus",    StyleBoxEmpty.new())
+	btn.add_theme_stylebox_override("normal", _make_btn_style(accent, fill))
+	btn.add_theme_stylebox_override("hover", _make_btn_style(accent, UITheme.PURPLE_MID))
+	btn.add_theme_stylebox_override("pressed", _make_btn_style(active_color, active_color))
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 	btn.text = "ON" if pressed else "OFF"
 
 
 func _style_slider(slider: HSlider) -> void:
 	var track: StyleBoxFlat = StyleBoxFlat.new()
-	track.bg_color          = UITheme.PURPLE_DARK
-	track.border_color      = UITheme.PURPLE_MID
+	track.bg_color = UITheme.PURPLE_DARK
+	track.border_color = UITheme.PURPLE_MID
 	track.border_width_left = 1
-	track.border_width_right = 1 
+	track.border_width_right = 1
 	track.border_width_top = 1
 	track.border_width_bottom = 1
 	track.content_margin_top = 4
@@ -1150,47 +1213,55 @@ func _style_slider(slider: HSlider) -> void:
 	fill.content_margin_top = 4
 	fill.content_margin_bottom = 4
 
-	slider.add_theme_stylebox_override("slider",       track)
+	slider.add_theme_stylebox_override("slider", track)
 	slider.add_theme_stylebox_override("grabber_area", fill)
-	slider.add_theme_color_override("grabber_color",   UITheme.MAGENTA)
+	slider.add_theme_color_override("grabber_color", UITheme.MAGENTA)
 	slider.custom_minimum_size.y = 24
 
 
 func _style_option_button(opt: OptionButton) -> void:
-	opt.add_theme_color_override("font_color",       UITheme.WHITE_SOFT)
+	opt.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	opt.add_theme_color_override("font_hover_color", UITheme.PURPLE_BRIGHT)
 	opt.add_theme_font_size_override("font_size", 14)
-	opt.add_theme_stylebox_override("normal", _make_btn_style(UITheme.PURPLE_MID,    UITheme.PURPLE_DARK))
-	opt.add_theme_stylebox_override("hover",  _make_btn_style(UITheme.PURPLE_BRIGHT, UITheme.PURPLE_MID))
-	opt.add_theme_stylebox_override("focus",  StyleBoxEmpty.new())
+	opt.add_theme_stylebox_override(
+		"normal", _make_btn_style(UITheme.PURPLE_MID, UITheme.PURPLE_DARK)
+	)
+	opt.add_theme_stylebox_override(
+		"hover", _make_btn_style(UITheme.PURPLE_BRIGHT, UITheme.PURPLE_MID)
+	)
+	opt.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 
 
 func _style_line_edit(edit: LineEdit) -> void:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
-	s.bg_color          = UITheme.PURPLE_DARK
-	s.border_color      = UITheme.PURPLE_MID
-	
+	s.bg_color = UITheme.PURPLE_DARK
+	s.border_color = UITheme.PURPLE_MID
+
 	s.border_width_left = 2
 	s.border_width_right = 2
 	s.border_width_top = 2
 	s.border_width_bottom = 2
-	
+
 	s.content_margin_left = 12
 	s.content_margin_right = 12
 	s.content_margin_top = 8
 	s.content_margin_bottom = 8
-	
+
 	edit.add_theme_stylebox_override("normal", s)
 	edit.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	edit.add_theme_color_override("font_placeholder_color", UITheme.PURPLE_MID)
 	edit.add_theme_color_override("caret_color", UITheme.PURPLE_BRIGHT)
-	edit.add_theme_color_override("selection_color", Color(UITheme.PURPLE_BRIGHT.r, UITheme.PURPLE_BRIGHT.g, UITheme.PURPLE_BRIGHT.b, 0.4))
+	edit.add_theme_color_override(
+		"selection_color",
+		Color(UITheme.PURPLE_BRIGHT.r, UITheme.PURPLE_BRIGHT.g, UITheme.PURPLE_BRIGHT.b, 0.4)
+	)
 	edit.add_theme_font_size_override("font_size", 14)
 
 
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
+
 
 func _populate_resolution_dropdown() -> void:
 	_res_dropdown.clear()
@@ -1235,7 +1306,9 @@ func _load_settings() -> void:
 		_music_slider.value = music_vol
 		_music_value_lbl.text = "%d%%" % roundi(music_vol * 100.0)
 
-	_res_dropdown.selected = clampi(SettingsService.get_resolution_index(), 0, RESOLUTIONS.size() - 1)
+	_res_dropdown.selected = clampi(
+		SettingsService.get_resolution_index(), 0, RESOLUTIONS.size() - 1
+	)
 
 	var fullscreen: bool = SettingsService.get_fullscreen()
 	_fs_toggle.button_pressed = fullscreen
@@ -1377,13 +1450,17 @@ func _save_settings() -> void:
 	SettingsService.set_intiface_address(_address_input.text)
 	SettingsService.set_intiface_auto_connect(_auto_toggle.button_pressed)
 	if _device_dropdown.selected >= 0 and _device_dropdown.item_count > 0:
-		SettingsService.set_selected_device(_device_dropdown.get_item_text(_device_dropdown.selected))
+		SettingsService.set_selected_device(
+			_device_dropdown.get_item_text(_device_dropdown.selected)
+		)
 
 	var mode_idx: int = clampi(_output_mode_dropdown.selected, 0, OUTPUT_MODE_KEYS.size() - 1)
 	SettingsService.set_output_mode(OUTPUT_MODE_KEYS[mode_idx])
 
 	if _serial_port_dropdown.selected >= 0 and _serial_port_dropdown.item_count > 0:
-		SettingsService.set_serial_port(_serial_port_dropdown.get_item_text(_serial_port_dropdown.selected))
+		SettingsService.set_serial_port(
+			_serial_port_dropdown.get_item_text(_serial_port_dropdown.selected)
+		)
 	var baud: int = _serial_baud_input.text.to_int()
 	if baud <= 0:
 		baud = DEFAULT_BAUD_RATE
@@ -1472,6 +1549,7 @@ func _sync_buttplug_state() -> void:
 # Signals
 # ---------------------------------------------------------------------------
 
+
 func _connect_signals() -> void:
 	_back_btn.pressed.connect(_on_back_pressed)
 	_open_folder_btn.pressed.connect(_on_open_journeys_folder_pressed)
@@ -1491,15 +1569,15 @@ func _connect_signals() -> void:
 	_serial_test_btn.pressed.connect(_on_serial_test_pressed)
 	_serial_auto_toggle.toggled.connect(_on_serial_auto_toggled)
 
-	ButtplugService.connect("Connected",     _on_bp_connected)
-	ButtplugService.connect("Disconnected",  _on_bp_disconnected)
-	ButtplugService.connect("DeviceAdded",   _on_bp_device_added)
+	ButtplugService.connect("Connected", _on_bp_connected)
+	ButtplugService.connect("Disconnected", _on_bp_disconnected)
+	ButtplugService.connect("DeviceAdded", _on_bp_device_added)
 	ButtplugService.connect("DeviceRemoved", _on_bp_device_removed)
-	ButtplugService.connect("ScanFinished",  _on_bp_scan_finished)
+	ButtplugService.connect("ScanFinished", _on_bp_scan_finished)
 	ButtplugService.connect("ErrorOccurred", _on_bp_error)
 
-	SerialDeviceService.connect("Connected",     _on_serial_connected)
-	SerialDeviceService.connect("Disconnected",  _on_serial_disconnected)
+	SerialDeviceService.connect("Connected", _on_serial_connected)
+	SerialDeviceService.connect("Disconnected", _on_serial_disconnected)
 	SerialDeviceService.connect("ErrorOccurred", _on_serial_error)
 
 
@@ -1513,6 +1591,7 @@ func _on_open_journeys_folder_pressed() -> void:
 # ---------------------------------------------------------------------------
 # Journey storage location
 # ---------------------------------------------------------------------------
+
 
 # Builds the "STORAGE LOCATION" row showing the current journeys folder with
 # Browse + Reset buttons, then slots it into JourneysSection above the
@@ -1567,12 +1646,13 @@ func _build_transcode_section() -> void:
 	var clear_btn: Button = Button.new()
 	clear_btn.text = "↺ USE BUNDLED"
 	_style_button(clear_btn, UITheme.PURPLE_MID)
-	clear_btn.pressed.connect(func() -> void:
-		SettingsService.set_ffmpeg_dir("")
-		SettingsService.save()
-		_refresh_ffmpeg_path_label()
-		if _ffmpeg_status_label != null:
-			_ffmpeg_status_label.text = ""
+	clear_btn.pressed.connect(
+		func() -> void:
+			SettingsService.set_ffmpeg_dir("")
+			SettingsService.save()
+			_refresh_ffmpeg_path_label()
+			if _ffmpeg_status_label != null:
+				_ffmpeg_status_label.text = ""
 	)
 	path_row.add_child(clear_btn)
 
@@ -1596,14 +1676,15 @@ func _build_transcode_section() -> void:
 
 	_auto_transcode_toggle = Button.new()
 	_auto_transcode_toggle.toggle_mode = true
-	_auto_transcode_toggle.focus_mode  = Control.FOCUS_NONE
+	_auto_transcode_toggle.focus_mode = Control.FOCUS_NONE
 	var auto_on: bool = SettingsService.get_auto_transcode()
 	_auto_transcode_toggle.button_pressed = auto_on
 	_style_toggle(_auto_transcode_toggle, auto_on)
-	_auto_transcode_toggle.toggled.connect(func(pressed: bool) -> void:
-		_style_toggle(_auto_transcode_toggle, pressed)
-		SettingsService.set_auto_transcode(pressed)
-		SettingsService.save()
+	_auto_transcode_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_auto_transcode_toggle, pressed)
+			SettingsService.set_auto_transcode(pressed)
+			SettingsService.save()
 	)
 	auto_row.add_child(_auto_transcode_toggle)
 
@@ -1628,20 +1709,21 @@ func _refresh_ffmpeg_path_label() -> void:
 
 func _on_ffmpeg_browse_pressed() -> void:
 	var dialog: FileDialog = FileDialog.new()
-	dialog.access    = FileDialog.ACCESS_FILESYSTEM
+	dialog.access = FileDialog.ACCESS_FILESYSTEM
 	dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
-	dialog.title     = "Select Folder Containing ffmpeg and ffprobe"
+	dialog.title = "Select Folder Containing ffmpeg and ffprobe"
 	var cur: String = SettingsService.get_ffmpeg_dir()
 	if cur != "" and DirAccess.dir_exists_absolute(cur):
 		dialog.current_dir = cur
 	add_child(dialog)
 	dialog.popup_centered(Vector2i(900, 600))
-	dialog.dir_selected.connect(func(picked: String) -> void:
-		dialog.queue_free()
-		SettingsService.set_ffmpeg_dir(picked)
-		SettingsService.save()
-		_refresh_ffmpeg_path_label()
-		_run_ffmpeg_test()
+	dialog.dir_selected.connect(
+		func(picked: String) -> void:
+			dialog.queue_free()
+			SettingsService.set_ffmpeg_dir(picked)
+			SettingsService.save()
+			_refresh_ffmpeg_path_label()
+			_run_ffmpeg_test()
 	)
 	dialog.canceled.connect(func() -> void: dialog.queue_free())
 
@@ -1653,7 +1735,9 @@ func _run_ffmpeg_test() -> void:
 		return
 	var out: Array = []
 	# Same resolver the builder's save path uses, so the test reflects reality.
-	var code: int = OS.execute(SettingsService.resolve_ffmpeg_binary("ffprobe"), ["-version"], out, true, false)
+	var code: int = OS.execute(
+		SettingsService.resolve_ffmpeg_binary("ffprobe"), ["-version"], out, true, false
+	)
 	if code == 0:
 		var ver: String = ""
 		if not out.is_empty():
@@ -1707,23 +1791,24 @@ func _refresh_journeys_path_label() -> void:
 	if _journeys_path_label == null:
 		return
 	var path: String = ProjectSettings.globalize_path(SettingsService.get_journeys_dir())
-	_journeys_path_label.text         = path
+	_journeys_path_label.text = path
 	_journeys_path_label.tooltip_text = path
 
 
 func _on_journeys_browse_pressed() -> void:
 	var dialog: FileDialog = FileDialog.new()
-	dialog.access    = FileDialog.ACCESS_FILESYSTEM
+	dialog.access = FileDialog.ACCESS_FILESYSTEM
 	dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
-	dialog.title     = "Select Journey Storage Folder"
+	dialog.title = "Select Journey Storage Folder"
 	var current_abs: String = ProjectSettings.globalize_path(SettingsService.get_journeys_dir())
 	if DirAccess.dir_exists_absolute(current_abs):
 		dialog.current_dir = current_abs
 	add_child(dialog)
 	dialog.popup_centered(Vector2i(900, 600))
-	dialog.dir_selected.connect(func(picked: String) -> void:
-		dialog.queue_free()
-		_apply_new_journeys_dir(picked)
+	dialog.dir_selected.connect(
+		func(picked: String) -> void:
+			dialog.queue_free()
+			_apply_new_journeys_dir(picked)
 	)
 	dialog.canceled.connect(func() -> void: dialog.queue_free())
 
@@ -1743,10 +1828,9 @@ func _apply_new_journeys_dir(new_dir_abs: String) -> void:
 	# Guard against picking a folder nested inside the current one (or vice
 	# versa) — moving a tree into itself would create infinite recursion and
 	# clobber the source as we copy. globalize_path returns forward-slash form.
-	if new_dir_abs.begins_with(old_dir_abs + "/") \
-			or old_dir_abs.begins_with(new_dir_abs + "/"):
+	if new_dir_abs.begins_with(old_dir_abs + "/") or old_dir_abs.begins_with(new_dir_abs + "/"):
 		var alert: AcceptDialog = AcceptDialog.new()
-		alert.title       = "INVALID FOLDER"
+		alert.title = "INVALID FOLDER"
 		alert.dialog_text = "Cannot move journeys into a folder nested inside the current location (or vice versa).\n\nPlease choose a separate folder."
 		add_child(alert)
 		alert.popup_centered()
@@ -1766,12 +1850,15 @@ func _apply_new_journeys_dir(new_dir_abs: String) -> void:
 		return
 
 	# Confirm with the user before moving — cross-volume moves can take a while.
-	var msg: String = "Move %d journey%s\nfrom %s\nto %s?\n\nLarge journeys may take a while if the drive is different." % [
-		existing.size(),
-		"s" if existing.size() != 1 else "",
-		old_dir_abs,
-		new_dir_abs,
-	]
+	var msg: String = (
+		"Move %d journey%s\nfrom %s\nto %s?\n\nLarge journeys may take a while if the drive is different."
+		% [
+			existing.size(),
+			"s" if existing.size() != 1 else "",
+			old_dir_abs,
+			new_dir_abs,
+		]
+	)
 	var confirmed: bool = await _show_move_confirm(msg)
 	if not confirmed:
 		return
@@ -1780,9 +1867,9 @@ func _apply_new_journeys_dir(new_dir_abs: String) -> void:
 	var modal: Control = _create_move_modal()
 	add_child(modal)
 
-	var moved:   int = 0
+	var moved: int = 0
 	var skipped: int = 0
-	var idx:     int = 0
+	var idx: int = 0
 	for sub_name: String in existing:
 		idx += 1
 		_update_move_modal(modal, "Moving %d / %d — %s" % [idx, existing.size(), sub_name])
@@ -1864,21 +1951,23 @@ func _copy_dir_recursive(src_abs: String, dst_abs: String) -> bool:
 # Confirmation dialog for the move action. Returns true on Move, false on Cancel.
 func _show_move_confirm(message: String) -> bool:
 	var popup: ConfirmationDialog = ConfirmationDialog.new()
-	popup.title              = "MOVE JOURNEYS"
-	popup.dialog_text        = message
-	popup.ok_button_text     = "MOVE"
+	popup.title = "MOVE JOURNEYS"
+	popup.dialog_text = message
+	popup.ok_button_text = "MOVE"
 	popup.cancel_button_text = "CANCEL"
 	add_child(popup)
 	popup.popup_centered()
-	var done:   Array = [false]   # boxed so lambdas can mutate via reference
+	var done: Array = [false]  # boxed so lambdas can mutate via reference
 	var result: Array = [false]
-	popup.confirmed.connect(func() -> void:
-		result[0] = true
-		done[0]   = true
+	popup.confirmed.connect(
+		func() -> void:
+			result[0] = true
+			done[0] = true
 	)
-	popup.canceled.connect(func() -> void:
-		result[0] = false
-		done[0]   = true
+	popup.canceled.connect(
+		func() -> void:
+			result[0] = false
+			done[0] = true
 	)
 	while not done[0]:
 		await get_tree().process_frame
@@ -1889,9 +1978,11 @@ func _show_move_confirm(message: String) -> bool:
 # Builds the "MOVING JOURNEYS" modal shown during a move operation. The status
 # label inside is updated via _update_move_modal as each journey is processed.
 func _create_move_modal() -> Control:
-	var parts: Dictionary    = UITheme.build_centered_modal("MOVING JOURNEYS", UITheme.PURPLE_BRIGHT, Vector2i(600, 160))
-	var modal: Control       = parts["modal"]
-	var vbox:  VBoxContainer = parts["vbox"]
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"MOVING JOURNEYS", UITheme.PURPLE_BRIGHT, Vector2i(600, 160)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
 	vbox.add_theme_constant_override("separation", 14)
 
 	var status: Label = Label.new()
@@ -1899,7 +1990,7 @@ func _create_move_modal() -> Control:
 	status.text = "Starting…"
 	_style_label(status, UITheme.WHITE_SOFT, 13, false)
 	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	status.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(status)
 
 	return modal
@@ -2029,7 +2120,7 @@ func _on_bp_device_removed(index: int) -> void:
 			break
 	var no_devices: bool = _device_dropdown.item_count == 0
 	_device_dropdown.disabled = no_devices
-	_bp_test_btn.disabled     = no_devices
+	_bp_test_btn.disabled = no_devices
 
 
 func _on_bp_scan_finished() -> void:
@@ -2052,9 +2143,10 @@ func _on_bp_error(message: String) -> void:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 func _set_connected_ui(connected: bool) -> void:
 	_connect_btn.disabled = false
-	_scan_btn.disabled    = not connected
+	_scan_btn.disabled = not connected
 	_bp_test_btn.disabled = not connected or _device_dropdown.item_count == 0
 	if connected:
 		_style_button(_connect_btn, UITheme.MAGENTA)
@@ -2076,14 +2168,18 @@ func _update_volume_label(value: float) -> void:
 
 
 func _apply_fullscreen(enabled: bool) -> void:
-	var mode: DisplayServer.WindowMode = DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN if enabled \
+	var mode: DisplayServer.WindowMode = (
+		DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN
+		if enabled
 		else DisplayServer.WINDOW_MODE_WINDOWED
+	)
 	DisplayServer.window_set_mode(mode)
 
 
 # ---------------------------------------------------------------------------
 # Output mode + Serial
 # ---------------------------------------------------------------------------
+
 
 func _on_output_mode_selected(_index: int) -> void:
 	_save_settings()
@@ -2102,7 +2198,7 @@ func _on_serial_connect_pressed() -> void:
 		_set_serial_status("● NO PORT SELECTED", UITheme.ERROR)
 		return
 	var port: String = _serial_port_dropdown.get_item_text(_serial_port_dropdown.selected)
-	var baud: int    = _serial_baud_input.text.to_int()
+	var baud: int = _serial_baud_input.text.to_int()
 	if baud <= 0:
 		baud = DEFAULT_BAUD_RATE
 	_set_serial_status("● CONNECTING…", UITheme.PURPLE_MID)

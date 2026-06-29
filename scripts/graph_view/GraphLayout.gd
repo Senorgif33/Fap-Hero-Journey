@@ -16,9 +16,9 @@ extends RefCounted
 # auto-layout (Sugiyama — GRAPH_EDITOR_OVERHAUL.md §9 / L5) to slot in later.
 # ---------------------------------------------------------------------------
 
-const COL_W: float = 320.0   # horizontal spacing between columns within a layer
-const ROW_H: float = 140.0   # vertical spacing between layers
-const GRID:  float = 24.0    # snap grid for author drags (kept here as the layout authority)
+const COL_W: float = 320.0  # horizontal spacing between columns within a layer
+const ROW_H: float = 140.0  # vertical spacing between layers
+const GRID: float = 24.0  # snap grid for author drags (kept here as the layout authority)
 
 
 # Assigns a "pos" (Vector2) to every node in `graph`, IN PLACE. A simple layered placement: each
@@ -29,7 +29,7 @@ static func seed_positions(graph: Dictionary) -> void:
 	var nodes: Dictionary = graph.get("nodes", {})
 	var depth: Dictionary = _depths(graph)
 	# Bucket node ids by row (= depth; unreachable nodes default to row 0), id-sorted for stability.
-	var rows: Dictionary = {}   # int row -> Array[String]
+	var rows: Dictionary = {}  # int row -> Array[String]
 	var ids: Array = nodes.keys()
 	ids.sort()
 	for id: String in ids:
@@ -58,11 +58,13 @@ static func _depths(graph: Dictionary) -> Dictionary:
 	return depth
 
 
-static func _depth_dfs(graph: Dictionary, id: String, d: int, depth: Dictionary, seen: Dictionary) -> void:
+static func _depth_dfs(
+	graph: Dictionary, id: String, d: int, depth: Dictionary, seen: Dictionary
+) -> void:
 	if id == "" or not (graph.get("nodes", {}) as Dictionary).has(id) or seen.has(id):
 		return
 	if depth.has(id) and int(depth[id]) >= d:
-		return   # already reached by an equal-or-longer path
+		return  # already reached by an equal-or-longer path
 	depth[id] = d
 	seen[id] = true
 	for e: Dictionary in JourneyGraph.out_edges(graph, id):
@@ -77,6 +79,7 @@ static func _depth_dfs(graph: Dictionary, id: String, d: int, depth: Dictionary,
 # overlap removal) and the whole graph is centred on x=0. Deterministic (id-sorted seeds), so
 # re-arranging twice gives the same result.
 const LAYOUT_PASSES: int = 4
+
 
 static func auto_layout(graph: Dictionary) -> void:
 	var nodes: Dictionary = graph.get("nodes", {})
@@ -129,7 +132,7 @@ static func _assign_layers(graph: Dictionary, adj: Dictionary) -> Dictionary:
 		qi += 1
 		if not layer.has(id):
 			layer[id] = 0
-		for to: String in (succ[id] as Array):
+		for to: String in succ[id] as Array:
 			layer[to] = maxi(int(layer.get(to, 0)), int(layer[id]) + 1)
 			indeg[to] = int(indeg[to]) - 1
 			if int(indeg[to]) == 0:
@@ -175,14 +178,20 @@ static func _order_layer(layers: Array, l_idx: int, ref_idx: int, neigh: Diction
 	for i in cur.size():
 		var id: String = cur[i]
 		var positions: Array = []
-		for n: String in (neigh[id] as Array):
+		for n: String in neigh[id] as Array:
 			if ref_pos.has(n):
 				positions.append(int(ref_pos[n]))
 		positions.sort()
 		var key: float = _median(positions) if not positions.is_empty() else float(i)
 		keyed.append({"id": id, "key": key, "idx": i})
-	keyed.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return a["key"] < b["key"] if not is_equal_approx(a["key"], b["key"]) else a["idx"] < b["idx"])
+	keyed.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return (
+				a["key"] < b["key"]
+				if not is_equal_approx(a["key"], b["key"])
+				else a["idx"] < b["idx"]
+			)
+	)
 	var ordered: Array = []
 	for k: Dictionary in keyed:
 		ordered.append(k["id"])

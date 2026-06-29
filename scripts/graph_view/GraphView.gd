@@ -15,24 +15,23 @@ extends Control
 #   connect_target_picked(node_id) — a node was clicked while wiring an edge
 # ---------------------------------------------------------------------------
 
-const NODE_WIDTH:  float = 200.0
+const NODE_WIDTH: float = 200.0
 const NODE_HEIGHT: float = 64.0
-const V_GAP:       float = 40.0
-const H_GAP:       float = 36.0
+const V_GAP: float = 40.0
+const H_GAP: float = 36.0
 const PATH_LABEL_HEIGHT: float = 32.0
-const ZOOM_MIN:    float = 0.15
-const ZOOM_MAX:    float = 4.0
-const ZOOM_STEP:   float = 0.1
+const ZOOM_MIN: float = 0.15
+const ZOOM_MAX: float = 4.0
+const ZOOM_STEP: float = 0.1
 # Screen-space top margin when framing the graph at the top-center of the view.
 const VIEW_TOP_MARGIN: float = 40.0
 # Padding kept around the content when fit-to-view frames the whole graph.
-const FIT_PADDING:     float = 60.0
+const FIT_PADDING: float = 60.0
 # Minimum canvas extent, and extra margin added around the laid-out content. The
 # canvas is grown to fit tall/wide journeys so its draw (the edges) is never
 # culled — see _resize_canvas_to_content.
-const CANVAS_MIN_SIZE:       float = 8000.0
+const CANVAS_MIN_SIZE: float = 8000.0
 const CANVAS_CONTENT_MARGIN: float = 600.0
-
 
 # Read-only "map mode" (player-facing journey map): suppresses editing affordances
 # (node selection / drag wiring) while keeping pan/zoom. Set before set_graph().
@@ -41,16 +40,14 @@ var map_mode: bool = false
 
 # Pan / zoom state
 var _pan_offset: Vector2 = Vector2(40, 40)
-var _zoom:       float   = 1.0
-var _panning:    bool    = false
+var _zoom: float = 1.0
+var _panning: bool = false
 var _last_mouse: Vector2 = Vector2.ZERO
 var _has_initial_center: bool = false
-
 
 # Auto-layout artefacts (rebuilt on refresh).
 # Edges: list of {from: Vector2, to: Vector2, color: Color, dashed?: bool}
 var _edges: Array = []
-
 
 # The free-form graph model (GRAPH_EDITOR_OVERHAUL.md): {start, nodes:{id:{type,data,pos,out}}}.
 # Rendered by _layout_graph — nodes at their saved pos, edges from each node's out-list.
@@ -58,55 +55,55 @@ var _graph_model: Dictionary = {}
 # Fog of war (player map only): when on, visited nodes render in full, nodes within _fog_depth out-edge
 # hops of the visited trail render as "?" ghosts, and everything else is hidden. Recomputed each layout.
 var _fog_enabled: bool = false
-var _fog_depth: int = 1               # ghost levels revealed beyond the visited trail (< 0 = whole structure)
-var _fog_revealed: Dictionary = {}   # node_id -> true (discovered this run; full render)
-var _fog_ghost: Dictionary = {}      # node_id -> true (within _fog_depth of the trail; "?" ghost render)
-var _selected_ids: Array = []               # selected node ids (graph mode) — drives the highlight + group ops
-var _current_layout_node_id: String = ""    # transient: the node _make_node is building (graph mode)
-var _node_ctrls: Dictionary = {}            # node_id -> Control (graph mode), for live drag moves
-var _node_warnings: Dictionary = {}         # node_id -> soft-validation summary (author badge); pulled per layout
-var warning_provider: Callable = Callable() # builder hook → {node_id: warning}; called each layout (editor only)
-var _connect_mode: bool = false             # builder is wiring an edge — a node click is a target, not a drag
+var _fog_depth: int = 1  # ghost levels revealed beyond the visited trail (< 0 = whole structure)
+var _fog_revealed: Dictionary = {}  # node_id -> true (discovered this run; full render)
+var _fog_ghost: Dictionary = {}  # node_id -> true (within _fog_depth of the trail; "?" ghost render)
+var _selected_ids: Array = []  # selected node ids (graph mode) — drives the highlight + group ops
+var _current_layout_node_id: String = ""  # transient: the node _make_node is building (graph mode)
+var _node_ctrls: Dictionary = {}  # node_id -> Control (graph mode), for live drag moves
+var _node_warnings: Dictionary = {}  # node_id -> soft-validation summary (author badge); pulled per layout
+var warning_provider: Callable = Callable()  # builder hook → {node_id: warning}; called each layout (editor only)
+var _connect_mode: bool = false  # builder is wiring an edge — a node click is a target, not a drag
 
 # Node-drag state. A plain press on a node arms a drag of the whole selection; _input tracks
 # motion/release globally so it survives the cursor leaving the node.
-var _dragging_node: String = ""             # the pressed node, or "" when no drag is armed
-var _drag_moved: bool = false               # did the drag actually move (vs a plain click)?
-var _drag_started: bool = false             # has the drag emitted nodes_drag_started yet (one undo per drag)?
+var _dragging_node: String = ""  # the pressed node, or "" when no drag is armed
+var _drag_moved: bool = false  # did the drag actually move (vs a plain click)?
+var _drag_started: bool = false  # has the drag emitted nodes_drag_started yet (one undo per drag)?
 
 # Comment (sticky-note) drag state — mirrors the node-drag model above.
-var _comment_ctrls: Array = []              # index -> Control, rebuilt each layout
-var _dragging_comment: int = -1             # the pressed comment index, or -1 when none
+var _comment_ctrls: Array = []  # index -> Control, rebuilt each layout
+var _dragging_comment: int = -1  # the pressed comment index, or -1 when none
 var _comment_drag_moved: bool = false
 var _comment_drag_started: bool = false
 
 # Group-frame drag/resize state — a labelled rectangle that moves the nodes inside it.
-var _frame_ctrls: Array = []                # index -> Control, rebuilt each layout
-var _collapsed_frame_of: Dictionary = {}    # node_id -> its collapsed group's bar Control (edges reroute to it)
-var _dragging_frame: int = -1               # the frame being moved (by its header), or -1
+var _frame_ctrls: Array = []  # index -> Control, rebuilt each layout
+var _collapsed_frame_of: Dictionary = {}  # node_id -> its collapsed group's bar Control (edges reroute to it)
+var _dragging_frame: int = -1  # the frame being moved (by its header), or -1
 var _frame_drag_moved: bool = false
 var _frame_drag_started: bool = false
-var _frame_drag_node_ids: Array = []        # nodes captured inside the frame at drag start
-var _resizing_frame: int = -1               # the frame being resized (by its corner grip), or -1
+var _frame_drag_node_ids: Array = []  # nodes captured inside the frame at drag start
+var _resizing_frame: int = -1  # the frame being resized (by its corner grip), or -1
 var _frame_resize_started: bool = false
-var _drag_collapse_to: String = ""          # plain-press on a multi-selected node → collapse to it on release-no-move
+var _drag_collapse_to: String = ""  # plain-press on a multi-selected node → collapse to it on release-no-move
 
 # Drag-to-connect state (dragging from a node's out-handle to a target node). _input tracks the
 # motion/release globally, like the node drag; _draw renders the rubber-band line.
 const HANDLE_SIZE: float = 16.0
-var _connect_drag_active:   bool       = false
-var _connect_drag_source:   String     = ""             # the node the edge starts from
-var _connect_drag_edge_idx: int        = -1             # fork choice index, or -1 for a regular node's single out-edge
-var _connect_drag_from:     Vector2    = Vector2.ZERO   # canvas-space handle position (line start)
-var _connect_drag_to:       Vector2    = Vector2.ZERO   # canvas-space cursor position (line end)
-var _connect_drag_target:   String     = ""             # node under the cursor (the drop target), or ""
-var _connect_drag_invalid:  Dictionary = {}             # node ids that can't be targets (source + ancestors → would cycle)
+var _connect_drag_active: bool = false
+var _connect_drag_source: String = ""  # the node the edge starts from
+var _connect_drag_edge_idx: int = -1  # fork choice index, or -1 for a regular node's single out-edge
+var _connect_drag_from: Vector2 = Vector2.ZERO  # canvas-space handle position (line start)
+var _connect_drag_to: Vector2 = Vector2.ZERO  # canvas-space cursor position (line end)
+var _connect_drag_target: String = ""  # node under the cursor (the drop target), or ""
+var _connect_drag_invalid: Dictionary = {}  # node ids that can't be targets (source + ancestors → would cycle)
 
 # Marquee (box-select) state, in GraphView-local (screen) space.
-var _marquee_active:   bool    = false
-var _marquee_additive: bool    = false      # Ctrl/Shift held at drag start → add to the selection
-var _marquee_start:    Vector2 = Vector2.ZERO
-var _marquee_end:      Vector2 = Vector2.ZERO
+var _marquee_active: bool = false
+var _marquee_additive: bool = false  # Ctrl/Shift held at drag start → add to the selection
+var _marquee_start: Vector2 = Vector2.ZERO
+var _marquee_end: Vector2 = Vector2.ZERO
 const MARQUEE_DRAG_THRESHOLD: float = 6.0
 
 # Emitted when the selected-node set changes (click / ctrl-click / shift-click / marquee / clear /
@@ -116,7 +113,7 @@ signal graph_selection_changed(ids: Array)
 # A node was clicked while connect mode is armed — the builder wires the edge to it.
 signal connect_target_picked(node_id: String)
 # A node drag actually started moving — the builder snapshots for undo (one entry per drag).
-signal nodes_drag_started()
+signal nodes_drag_started
 # An out-handle was dragged onto a target node — the builder wires source→target (edge_idx = fork
 # choice, or -1 for a regular node's single out-edge), reusing its connect validation + undo.
 signal edge_drawn(source_id: String, edge_idx: int, target_id: String)
@@ -140,7 +137,7 @@ signal node_context_menu_requested(node_id: String)
 # "You are here" marker (map mode). A glowing ring around the current node, child
 # of _canvas so it pans/zooms with the graph.
 const MARKER_PAD: float = 9.0
-var _marker:       Panel = null
+var _marker: Panel = null
 var _marker_color: Color = UITheme.PURPLE_BRIGHT
 
 # Background grid + edges live on _canvas. Nodes are added as children of _canvas
@@ -166,12 +163,14 @@ func _ready() -> void:
 	_empty_hint = Label.new()
 	_empty_hint.text = "Drop videos or a folder here to auto-create rounds,\nor use  ADD NODE  in the side panel."
 	_empty_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_empty_hint.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+	_empty_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_empty_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_empty_hint.anchor_right  = 1.0
+	_empty_hint.anchor_right = 1.0
 	_empty_hint.anchor_bottom = 1.0
-	_empty_hint.mouse_filter  = Control.MOUSE_FILTER_IGNORE
-	_empty_hint.add_theme_color_override("font_color", Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.75))
+	_empty_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_empty_hint.add_theme_color_override(
+		"font_color", Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.75)
+	)
 	_empty_hint.add_theme_font_size_override("font_size", 16)
 	_empty_hint.visible = false
 	add_child(_empty_hint)
@@ -231,11 +230,12 @@ func _resize_canvas_to_content(content_size: Vector2) -> void:
 
 # ── Graph-editor layout (L1) ─────────────────────────────────────────────────
 
+
 # Renders the free-form graph: each node at its saved pos, edges drawn from every node's
 # out-list. Reuses _make_node via a tree-item-shaped display adapter.
 func _layout_graph() -> void:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
-	_node_ctrls = {}   # node_id -> Control (rebuilt each layout)
+	_node_ctrls = {}  # node_id -> Control (rebuilt each layout)
 	# Fog of war (player map): BFS out from the visited trail along out-edges, marking ghosts up to
 	# _fog_depth hops away (unlimited when _fog_depth < 0 → the whole structure, since every node is
 	# reachable from the always-visited start). Nodes neither revealed nor ghost are hidden below.
@@ -259,7 +259,9 @@ func _layout_graph() -> void:
 			ring = next_ring
 	# Pull fresh soft-validation badges from the builder once per layout, so EVERY render path (edit,
 	# selection, create / paste / import) shows them. No provider on the player map / export → no badges.
-	_node_warnings = warning_provider.call() if (not map_mode and warning_provider.is_valid()) else {}
+	_node_warnings = (
+		warning_provider.call() if (not map_mode and warning_provider.is_valid()) else {}
+	)
 	# Group frames render at the very back, then sticky-note comments, then the nodes on top. Both are
 	# editor furniture the player map never has; image export shows them static (map_mode → no gui_input).
 	_frame_ctrls = []
@@ -276,7 +278,7 @@ func _layout_graph() -> void:
 			# dragging a collapsed bar over an unrelated node would swallow it.
 			for hid: String in g.get("members", []):
 				if nodes.has(hid):
-					_collapsed_frame_of[hid] = fc   # hidden node → its bar; crossing edges reroute to it
+					_collapsed_frame_of[hid] = fc  # hidden node → its bar; crossing edges reroute to it
 	_comment_ctrls = []
 	var comments: Array = _graph_model.get("comments", [])
 	for ci: int in comments.size():
@@ -285,7 +287,7 @@ func _layout_graph() -> void:
 		_canvas.add_child(cc)
 		_comment_ctrls.append(cc)
 	for id: String in nodes:
-		if _collapsed_frame_of.has(id):   # inside a collapsed group — drawn as the collapsed bar instead
+		if _collapsed_frame_of.has(id):  # inside a collapsed group — drawn as the collapsed bar instead
 			continue
 		if _fog_enabled and not _fog_revealed.has(id):
 			# Not yet reached: render a "?" ghost if it's within the reveal depth, else nothing at all
@@ -298,15 +300,15 @@ func _layout_graph() -> void:
 				_node_ctrls[id] = ghost
 			continue
 		var n: Dictionary = nodes[id]
-		_current_layout_node_id = id   # read by _make_node to mark the selected node
+		_current_layout_node_id = id  # read by _make_node to mark the selected node
 		var disp: Dictionary = _graph_display_item(n)
-		if not map_mode:               # author-only badges (never on the player map)
+		if not map_mode:  # author-only badges (never on the player map)
 			disp["warning"] = str(_node_warnings.get(id, ""))
 			disp["is_start"] = (id == str(_graph_model.get("start", "")))
 		var ctrl: Control = _make_node(disp, JourneyGraph.is_end(_graph_model, id))
 		ctrl.position = n.get("pos", Vector2.ZERO)
 		ctrl.set_meta("graph_node_id", id)
-		if not map_mode:   # player-facing map: nodes are read-only (no select/drag wiring)
+		if not map_mode:  # player-facing map: nodes are read-only (no select/drag wiring)
 			ctrl.gui_input.connect(_on_graph_node_gui_input.bind(id))
 		_canvas.add_child(ctrl)
 		_node_ctrls[id] = ctrl
@@ -315,7 +317,7 @@ func _layout_graph() -> void:
 		for id: String in nodes:
 			if _node_ctrls.has(id):
 				_add_out_handles(id, nodes[id], (_node_ctrls[id] as Control).position)
-	var drawn: Dictionary = {}   # dedup edges that resolve to the same control pair (collapsed bars)
+	var drawn: Dictionary = {}  # dedup edges that resolve to the same control pair (collapsed bars)
 	for id: String in nodes:
 		# In fog mode, hidden nodes have no control so _edge_endpoint_ctrl returns null and their edges
 		# drop out below; edges among shown nodes (visited + ghosts) draw, so the revealed structure
@@ -331,7 +333,7 @@ func _layout_graph() -> void:
 				continue
 			var tgt_ctrl: Control = _edge_endpoint_ctrl(to)
 			if tgt_ctrl == null or tgt_ctrl == src_ctrl:
-				continue   # missing target, or both ends collapse into the same bar (an internal edge)
+				continue  # missing target, or both ends collapse into the same bar (an internal edge)
 			var key: String = "%d>%d" % [src_ctrl.get_instance_id(), tgt_ctrl.get_instance_id()]
 			if drawn.has(key):
 				continue
@@ -364,16 +366,22 @@ func _make_fog_node() -> Control:
 	var sb: StyleBoxFlat = StyleBoxFlat.new()
 	sb.bg_color = Color(UITheme.PANEL_BG.r, UITheme.PANEL_BG.g, UITheme.PANEL_BG.b, 0.45)
 	sb.border_color = Color(UITheme.SEPARATOR.r, UITheme.SEPARATOR.g, UITheme.SEPARATOR.b, 0.55)
-	sb.border_width_left = 1; sb.border_width_right = 1
-	sb.border_width_top = 1;  sb.border_width_bottom = 1
-	sb.corner_radius_top_left = 6; sb.corner_radius_top_right = 6
-	sb.corner_radius_bottom_left = 6; sb.corner_radius_bottom_right = 6
+	sb.border_width_left = 1
+	sb.border_width_right = 1
+	sb.border_width_top = 1
+	sb.border_width_bottom = 1
+	sb.corner_radius_top_left = 6
+	sb.corner_radius_top_right = 6
+	sb.corner_radius_bottom_left = 6
+	sb.corner_radius_bottom_right = 6
 	panel.add_theme_stylebox_override("panel", sb)
 	var lbl: Label = Label.new()
 	lbl.text = "?"
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	lbl.add_theme_color_override("font_color", Color(UITheme.SEPARATOR.r, UITheme.SEPARATOR.g, UITheme.SEPARATOR.b, 0.8))
+	lbl.add_theme_color_override(
+		"font_color", Color(UITheme.SEPARATOR.r, UITheme.SEPARATOR.g, UITheme.SEPARATOR.b, 0.8)
+	)
 	lbl.add_theme_font_size_override("font_size", 28)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(lbl)
@@ -454,7 +462,7 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		if not _drag_started:
 			_drag_started = true
-			nodes_drag_started.emit()   # builder snapshots the pre-drag state for undo
+			nodes_drag_started.emit()  # builder snapshots the pre-drag state for undo
 		var delta: Vector2 = (event as InputEventMouseMotion).relative / _zoom
 		for id: String in _selected_ids:
 			var n: Dictionary = nodes.get(id, {})
@@ -473,14 +481,15 @@ func _input(event: InputEvent) -> void:
 					var n2: Dictionary = nodes.get(id, {})
 					if not n2.is_empty():
 						n2["pos"] = GraphLayout.snap(n2.get("pos", Vector2.ZERO))
-				refresh()   # re-render: highlights, grid-snapped positions, edges reconnected
+				refresh()  # re-render: highlights, grid-snapped positions, edges reconnected
 			elif _drag_collapse_to != "":
-				_set_selection([_drag_collapse_to])   # plain click on a multi-selected node → just it
+				_set_selection([_drag_collapse_to])  # plain click on a multi-selected node → just it
 			_drag_collapse_to = ""
 			get_viewport().set_input_as_handled()
 
 
 # ── Drag-to-connect (out-handles) ────────────────────────────────────────────
+
 
 # Adds the out-handle nub(s) to a node's bottom edge: one centred handle for a regular node (its
 # single out-edge), one per choice for a fork (spread along the bottom, tinted like fork edges).
@@ -505,32 +514,40 @@ func _make_handle(node_id: String, edge_idx: int, center: Vector2, color: Color)
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(0.04, 0.0, 0.06, 0.98)
 	s.border_color = color
-	s.border_width_left = 2; s.border_width_right = 2
-	s.border_width_top = 2;  s.border_width_bottom = 2
+	s.border_width_left = 2
+	s.border_width_right = 2
+	s.border_width_top = 2
+	s.border_width_bottom = 2
 	var rad: int = int(HANDLE_SIZE * 0.5)
-	s.corner_radius_top_left = rad;    s.corner_radius_top_right = rad
-	s.corner_radius_bottom_left = rad; s.corner_radius_bottom_right = rad
+	s.corner_radius_top_left = rad
+	s.corner_radius_top_right = rad
+	s.corner_radius_bottom_left = rad
+	s.corner_radius_bottom_right = rad
 	h.add_theme_stylebox_override("panel", s)
 	h.gui_input.connect(_on_handle_gui_input.bind(node_id, edge_idx, center))
 	_canvas.add_child(h)
 
 
 # Press on an out-handle → begin a connect-drag from it. _input then tracks the rubber-band.
-func _on_handle_gui_input(event: InputEvent, node_id: String, edge_idx: int, center: Vector2) -> void:
+func _on_handle_gui_input(
+	event: InputEvent, node_id: String, edge_idx: int, center: Vector2
+) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
-			_connect_drag_active   = true
-			_connect_drag_source   = node_id
+			_connect_drag_active = true
+			_connect_drag_source = node_id
 			_connect_drag_edge_idx = edge_idx
-			_connect_drag_from     = center
-			_connect_drag_to       = center
-			_connect_drag_target   = ""
-			_connect_drag_invalid  = _ancestors_and_self(node_id)
+			_connect_drag_from = center
+			_connect_drag_to = center
+			_connect_drag_target = ""
+			_connect_drag_invalid = _ancestors_and_self(node_id)
 			# A fork can't point two choices at the same node — block any node another of this fork's
 			# choices already targets (one choice per target).
 			if edge_idx >= 0:
-				var node_d: Dictionary = (_graph_model.get("nodes", {}) as Dictionary).get(node_id, {})
+				var node_d: Dictionary = (_graph_model.get("nodes", {}) as Dictionary).get(
+					node_id, {}
+				)
 				var out: Array = node_d.get("out", [])
 				for j in out.size():
 					if j != edge_idx:
@@ -591,7 +608,7 @@ func _ancestors_and_self(source: String) -> Dictionary:
 	while qi < queue.size():
 		var cur: String = queue[qi]
 		qi += 1
-		for p: String in (preds.get(cur, []) as Array):
+		for p: String in preds.get(cur, []) as Array:
 			if not invalid.has(p):
 				invalid[p] = true
 				queue.append(p)
@@ -689,7 +706,12 @@ func _tree_positions(items: Array, x_center: float, y: float, pos: Dictionary) -
 			for pi in paths.size():
 				var pw: float = path_widths[pi]
 				var path_cx: float = col_x + pw * 0.5
-				var sub: Vector2 = _tree_positions((paths[pi] as Dictionary).get("items", []), path_cx, cur_y + PATH_LABEL_HEIGHT + V_GAP, pos)
+				var sub: Vector2 = _tree_positions(
+					(paths[pi] as Dictionary).get("items", []),
+					path_cx,
+					cur_y + PATH_LABEL_HEIGHT + V_GAP,
+					pos
+				)
 				max_branch_y = maxf(max_branch_y, sub.y)
 				col_x += pw + H_GAP
 			cur_y = max_branch_y
@@ -729,6 +751,7 @@ func _measure_items_width(items: Array) -> float:
 # Node makers
 # ---------------------------------------------------------------------------
 
+
 # is_terminal: true when this node ends the run (no path leads beyond it).
 func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 	var item_type: String = item.get("type", "round")
@@ -744,10 +767,18 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 	elif round_type == "cursed":
 		accent = Color(0.45, 0.95, 0.30)  # toxic green
 	elif round_type == "blessed":
-		accent = Color(1.0, 0.84, 0.30)   # gold
+		accent = Color(1.0, 0.84, 0.30)  # gold
 	else:
 		accent = _type_color(item_type)
-	var icon: String = "⚔" if is_boss else ("☠" if round_type == "cursed" else ("✦" if round_type == "blessed" else _type_icon(item_type)))
+	var icon: String = (
+		"⚔"
+		if is_boss
+		else (
+			"☠"
+			if round_type == "cursed"
+			else ("✦" if round_type == "blessed" else _type_icon(item_type))
+		)
+	)
 	var primary: String = _type_label(item)
 	var secondary: String = _type_sublabel(item)
 	if is_terminal:
@@ -767,9 +798,9 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 	panel.set_meta("graph_item", item)
 
 	var margin: MarginContainer = MarginContainer.new()
-	margin.add_theme_constant_override("margin_left",   10)
-	margin.add_theme_constant_override("margin_right",  10)
-	margin.add_theme_constant_override("margin_top",    6)
+	margin.add_theme_constant_override("margin_left", 10)
+	margin.add_theme_constant_override("margin_right", 10)
+	margin.add_theme_constant_override("margin_top", 6)
 	margin.add_theme_constant_override("margin_bottom", 6)
 	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(margin)
@@ -850,39 +881,47 @@ func _node_stylebox(accent: Color, selected: bool, terminal: bool = false) -> St
 	s.border_color = accent
 	# Border: thicker when selected; slightly heavier than default when terminal.
 	var w: int = 3 if selected else (2 if terminal else 1)
-	s.border_width_left   = w
-	s.border_width_right  = w
-	s.border_width_top    = w
+	s.border_width_left = w
+	s.border_width_right = w
+	s.border_width_top = w
 	s.border_width_bottom = w
-	s.corner_radius_top_left     = 6
-	s.corner_radius_top_right    = 6
-	s.corner_radius_bottom_left  = 6
+	s.corner_radius_top_left = 6
+	s.corner_radius_top_right = 6
+	s.corner_radius_bottom_left = 6
 	s.corner_radius_bottom_right = 6
 	if selected:
 		s.shadow_color = Color(accent.r, accent.g, accent.b, 0.50)
-		s.shadow_size  = 8
+		s.shadow_size = 8
 	elif terminal:
 		# Warm amber glow to signal "this is where the run ends".
 		s.shadow_color = Color(accent.r, accent.g, accent.b, 0.55)
-		s.shadow_size  = 14
+		s.shadow_size = 14
 	return s
 
 
 func _type_color(item_type: String) -> Color:
 	match item_type:
-		"round":      return UITheme.PURPLE_BRIGHT
-		"shop":       return UITheme.AMBER
-		"storyboard": return UITheme.CYAN
-		"fork":       return UITheme.MAGENTA
+		"round":
+			return UITheme.PURPLE_BRIGHT
+		"shop":
+			return UITheme.AMBER
+		"storyboard":
+			return UITheme.CYAN
+		"fork":
+			return UITheme.MAGENTA
 	return UITheme.PURPLE_MID
 
 
 func _type_icon(item_type: String) -> String:
 	match item_type:
-		"round":      return "▶"
-		"shop":       return "◆"
-		"storyboard": return "◈"
-		"fork":       return "⑂"
+		"round":
+			return "▶"
+		"shop":
+			return "◆"
+		"storyboard":
+			return "◈"
+		"fork":
+			return "⑂"
 	return "•"
 
 
@@ -915,9 +954,12 @@ func _type_sublabel(item: Dictionary) -> String:
 			var rt: String = item.get("round_type", "normal")
 			var rlabel: String = "ROUND"
 			match rt:
-				"boss":    rlabel = "BOSS ROUND"
-				"cursed":  rlabel = "☠ CURSED ROUND"
-				"blessed": rlabel = "✦ BLESSED ROUND"
+				"boss":
+					rlabel = "BOSS ROUND"
+				"cursed":
+					rlabel = "☠ CURSED ROUND"
+				"blessed":
+					rlabel = "✦ BLESSED ROUND"
 			# Checkpoint marker — author-set save point, honoured on every round
 			# type (the banner shows before a boss round's intro card).
 			if item.get("is_checkpoint", false):
@@ -938,7 +980,9 @@ func _type_sublabel(item: Dictionary) -> String:
 			return sub
 		"fork":
 			var paths: Array = item.get("paths", [])
-			return "%s   %d PATHS" % [_fork_type_label(item.get("resolution", "choice")), paths.size()]
+			return (
+				"%s   %d PATHS" % [_fork_type_label(item.get("resolution", "choice")), paths.size()]
+			)
 	return ""
 
 
@@ -946,15 +990,19 @@ func _type_sublabel(item: Dictionary) -> String:
 # "CONDITIONAL FORK", "SACRIFICE FORK".
 func _fork_type_label(resolution: String) -> String:
 	match resolution:
-		"random":      return "RANDOM FORK"
-		"conditional": return "CONDITIONAL FORK"
-		"sacrifice":   return "SACRIFICE FORK"
+		"random":
+			return "RANDOM FORK"
+		"conditional":
+			return "CONDITIONAL FORK"
+		"sacrifice":
+			return "SACRIFICE FORK"
 	return "FORK"
 
 
 # ---------------------------------------------------------------------------
 # Edges
 # ---------------------------------------------------------------------------
+
 
 # The control an edge endpoint attaches to: the node itself, or — when it's inside a collapsed group —
 # that group's bar (so a boundary-crossing edge reroutes to the bar instead of vanishing). null when
@@ -985,7 +1033,7 @@ func _edge_route(src: Control, tgt: Control) -> Dictionary:
 	var sc: Vector2 = src.position + ss * 0.5
 	var tc: Vector2 = tgt.position + ts * 0.5
 	var delta: Vector2 = tc - sc
-	var approach: float = 20.0   # how far before the entry face the route makes its final turn
+	var approach: float = 20.0  # how far before the entry face the route makes its final turn
 	var from: Vector2
 	var to: Vector2
 	var arrow_dir: Vector2
@@ -993,19 +1041,37 @@ func _edge_route(src: Control, tgt: Control) -> Dictionary:
 	# Vertical when the centre line exits the top/bottom face rather than a side: compare slopes
 	# scaled by the half-extents, i.e. |dy|/halfH vs |dx|/halfW → |dy|*W vs |dx|*H.
 	if absf(delta.y) * ss.x >= absf(delta.x) * ss.y:
-		if delta.y >= 0.0:   # target below → leave bottom, enter top
-			from = Vector2(sc.x, src.position.y + ss.y); to = Vector2(tc.x, tgt.position.y);        arrow_dir = Vector2(0, 1)
-		else:                # target above → leave top, enter bottom
-			from = Vector2(sc.x, src.position.y);        to = Vector2(tc.x, tgt.position.y + ts.y); arrow_dir = Vector2(0, -1)
-		var bend_y: float = clampf(to.y - arrow_dir.y * approach, minf(from.y, to.y), maxf(from.y, to.y))
-		pts.append(from); pts.append(Vector2(from.x, bend_y)); pts.append(Vector2(to.x, bend_y)); pts.append(to)
+		if delta.y >= 0.0:  # target below → leave bottom, enter top
+			from = Vector2(sc.x, src.position.y + ss.y)
+			to = Vector2(tc.x, tgt.position.y)
+			arrow_dir = Vector2(0, 1)
+		else:  # target above → leave top, enter bottom
+			from = Vector2(sc.x, src.position.y)
+			to = Vector2(tc.x, tgt.position.y + ts.y)
+			arrow_dir = Vector2(0, -1)
+		var bend_y: float = clampf(
+			to.y - arrow_dir.y * approach, minf(from.y, to.y), maxf(from.y, to.y)
+		)
+		pts.append(from)
+		pts.append(Vector2(from.x, bend_y))
+		pts.append(Vector2(to.x, bend_y))
+		pts.append(to)
 	else:
-		if delta.x >= 0.0:   # target right → leave right, enter left
-			from = Vector2(src.position.x + ss.x, sc.y); to = Vector2(tgt.position.x, tc.y);        arrow_dir = Vector2(1, 0)
-		else:                # target left → leave left, enter right
-			from = Vector2(src.position.x, sc.y);        to = Vector2(tgt.position.x + ts.x, tc.y); arrow_dir = Vector2(-1, 0)
-		var bend_x: float = clampf(to.x - arrow_dir.x * approach, minf(from.x, to.x), maxf(from.x, to.x))
-		pts.append(from); pts.append(Vector2(bend_x, from.y)); pts.append(Vector2(bend_x, to.y)); pts.append(to)
+		if delta.x >= 0.0:  # target right → leave right, enter left
+			from = Vector2(src.position.x + ss.x, sc.y)
+			to = Vector2(tgt.position.x, tc.y)
+			arrow_dir = Vector2(1, 0)
+		else:  # target left → leave left, enter right
+			from = Vector2(src.position.x, sc.y)
+			to = Vector2(tgt.position.x + ts.x, tc.y)
+			arrow_dir = Vector2(-1, 0)
+		var bend_x: float = clampf(
+			to.x - arrow_dir.x * approach, minf(from.x, to.x), maxf(from.x, to.x)
+		)
+		pts.append(from)
+		pts.append(Vector2(bend_x, from.y))
+		pts.append(Vector2(bend_x, to.y))
+		pts.append(to)
 	return {"points": pts, "arrow_dir": arrow_dir}
 
 
@@ -1015,6 +1081,7 @@ func _edge_route(src: Control, tgt: Control) -> Dictionary:
 # model); image export shows them static (map_mode → no gui_input).
 
 const COMMENT_WIDTH: float = 220.0
+
 
 func _make_comment(_idx: int, comment: Dictionary) -> Control:
 	var color: Color = comment.get("color", UITheme.AMBER)
@@ -1046,12 +1113,16 @@ func _make_comment(_idx: int, comment: Dictionary) -> Control:
 
 func _comment_stylebox(color: Color) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
-	s.bg_color     = Color(color.r * 0.18, color.g * 0.18, color.b * 0.18, 0.92)
+	s.bg_color = Color(color.r * 0.18, color.g * 0.18, color.b * 0.18, 0.92)
 	s.border_color = Color(color.r, color.g, color.b, 0.7)
-	s.border_width_left = 3   # a sticky-note "tab" down the left edge
-	s.border_width_right = 1; s.border_width_top = 1; s.border_width_bottom = 1
-	s.corner_radius_top_left = 3; s.corner_radius_top_right = 3
-	s.corner_radius_bottom_left = 3; s.corner_radius_bottom_right = 3
+	s.border_width_left = 3  # a sticky-note "tab" down the left edge
+	s.border_width_right = 1
+	s.border_width_top = 1
+	s.border_width_bottom = 1
+	s.corner_radius_top_left = 3
+	s.corner_radius_top_right = 3
+	s.corner_radius_bottom_left = 3
+	s.corner_radius_bottom_right = 3
 	return s
 
 
@@ -1074,7 +1145,7 @@ func _handle_comment_drag(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		if not _comment_drag_started:
 			_comment_drag_started = true
-			nodes_drag_started.emit()   # one undo entry per drag (the builder snapshots comments too)
+			nodes_drag_started.emit()  # one undo entry per drag (the builder snapshots comments too)
 		var delta: Vector2 = (event as InputEventMouseMotion).relative / _zoom
 		var c: Dictionary = comments[_dragging_comment]
 		c["pos"] = (c.get("pos", Vector2.ZERO) as Vector2) + delta
@@ -1090,9 +1161,9 @@ func _handle_comment_drag(event: InputEvent) -> void:
 			if _comment_drag_moved:
 				var cd: Dictionary = comments[idx]
 				cd["pos"] = GraphLayout.snap(cd.get("pos", Vector2.ZERO))
-			_selected_ids = []   # drop node highlights; the note becomes the active selection
+			_selected_ids = []  # drop node highlights; the note becomes the active selection
 			refresh()
-			comment_clicked.emit(idx)   # select it (click or drag) so the side panel + Delete target it
+			comment_clicked.emit(idx)  # select it (click or drag) so the side panel + Delete target it
 			get_viewport().set_input_as_handled()
 
 
@@ -1112,8 +1183,9 @@ func deselect_nodes_silent() -> void:
 # nodes inside it; the bottom-right grip resizes. Editor furniture only (the player map has no groups).
 
 const FRAME_HEADER_H: float = 24.0
-const FRAME_GRIP:     float = 16.0
-const FRAME_MIN:      Vector2 = Vector2(140, 100)
+const FRAME_GRIP: float = 16.0
+const FRAME_MIN: Vector2 = Vector2(140, 100)
+
 
 func _make_frame(idx: int, group: Dictionary) -> Control:
 	var rect: Rect2 = group.get("rect", Rect2(0, 0, 360, 240))
@@ -1123,7 +1195,7 @@ func _make_frame(idx: int, group: Dictionary) -> Control:
 	# Collapsed: just the header bar (the body and the nodes inside it are hidden). No custom_minimum_size
 	# so a live resize is free to shrink (FRAME_MIN clamps it).
 	frame.size = Vector2(rect.size.x, FRAME_HEADER_H) if collapsed else rect.size
-	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE   # body passes clicks through to the nodes in front
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE  # body passes clicks through to the nodes in front
 
 	if not collapsed:
 		var fill: Panel = Panel.new()
@@ -1147,7 +1219,7 @@ func _make_frame(idx: int, group: Dictionary) -> Control:
 	hmargin.add_child(hrow)
 	header.add_child(hmargin)
 	if not map_mode:
-		var tbtn: Button = Button.new()   # collapse / expand chevron (the rest of the header drags)
+		var tbtn: Button = Button.new()  # collapse / expand chevron (the rest of the header drags)
 		tbtn.text = "▸" if collapsed else "▾"
 		tbtn.focus_mode = Control.FOCUS_NONE
 		tbtn.flat = true
@@ -1172,8 +1244,12 @@ func _make_frame(idx: int, group: Dictionary) -> Control:
 		header.gui_input.connect(_on_frame_header_gui_input.bind(idx))
 		if not collapsed:
 			var grip: Panel = Panel.new()
-			grip.anchor_left = 1.0; grip.anchor_top = 1.0; grip.anchor_right = 1.0; grip.anchor_bottom = 1.0
-			grip.offset_left = -FRAME_GRIP; grip.offset_top = -FRAME_GRIP
+			grip.anchor_left = 1.0
+			grip.anchor_top = 1.0
+			grip.anchor_right = 1.0
+			grip.anchor_bottom = 1.0
+			grip.offset_left = -FRAME_GRIP
+			grip.offset_top = -FRAME_GRIP
 			grip.mouse_filter = Control.MOUSE_FILTER_STOP
 			grip.tooltip_text = "Drag to resize the frame"
 			var gs: StyleBoxFlat = StyleBoxFlat.new()
@@ -1187,18 +1263,24 @@ func _make_frame(idx: int, group: Dictionary) -> Control:
 
 func _frame_stylebox(color: Color) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
-	s.bg_color     = Color(color.r, color.g, color.b, 0.05)
+	s.bg_color = Color(color.r, color.g, color.b, 0.05)
 	s.border_color = Color(color.r, color.g, color.b, 0.5)
-	s.border_width_left = 2; s.border_width_right = 2; s.border_width_top = 2; s.border_width_bottom = 2
-	s.corner_radius_top_left = 6; s.corner_radius_top_right = 6
-	s.corner_radius_bottom_left = 6; s.corner_radius_bottom_right = 6
+	s.border_width_left = 2
+	s.border_width_right = 2
+	s.border_width_top = 2
+	s.border_width_bottom = 2
+	s.corner_radius_top_left = 6
+	s.corner_radius_top_right = 6
+	s.corner_radius_bottom_left = 6
+	s.corner_radius_bottom_right = 6
 	return s
 
 
 func _frame_header_stylebox(color: Color) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(color.r, color.g, color.b, 0.85)
-	s.corner_radius_top_left = 6; s.corner_radius_top_right = 6
+	s.corner_radius_top_left = 6
+	s.corner_radius_top_right = 6
 	return s
 
 
@@ -1213,7 +1295,11 @@ func _on_frame_header_gui_input(event: InputEvent, idx: int) -> void:
 				_frame_drag_started = false
 				var g: Dictionary = groups[idx]
 				# A collapsed frame drags exactly its frozen members; an expanded one takes whatever's inside.
-				_frame_drag_node_ids = (g.get("members", []) as Array).duplicate() if g.get("collapsed", false) else _nodes_in_frame_rect(g.get("rect", Rect2()))
+				_frame_drag_node_ids = (
+					(g.get("members", []) as Array).duplicate()
+					if g.get("collapsed", false)
+					else _nodes_in_frame_rect(g.get("rect", Rect2()))
+				)
 				get_viewport().set_input_as_handled()
 
 
@@ -1274,7 +1360,9 @@ func _handle_frame_drag(event: InputEvent) -> void:
 				g["rect"] = r
 				for id: String in _frame_drag_node_ids:
 					if nodes.has(id):
-						(nodes[id] as Dictionary)["pos"] = GraphLayout.snap((nodes[id] as Dictionary).get("pos", Vector2.ZERO))
+						(nodes[id] as Dictionary)["pos"] = GraphLayout.snap(
+							(nodes[id] as Dictionary).get("pos", Vector2.ZERO)
+						)
 			_frame_drag_node_ids = []
 			_selected_ids = []
 			refresh()
@@ -1294,7 +1382,9 @@ func _handle_frame_resize(event: InputEvent) -> void:
 		var delta: Vector2 = (event as InputEventMouseMotion).relative / _zoom
 		var g: Dictionary = groups[_resizing_frame]
 		var r: Rect2 = g.get("rect", Rect2())
-		r.size = Vector2(maxf(FRAME_MIN.x, r.size.x + delta.x), maxf(FRAME_MIN.y, r.size.y + delta.y))
+		r.size = Vector2(
+			maxf(FRAME_MIN.x, r.size.x + delta.x), maxf(FRAME_MIN.y, r.size.y + delta.y)
+		)
 		g["rect"] = r
 		if _resizing_frame < _frame_ctrls.size():
 			(_frame_ctrls[_resizing_frame] as Control).size = r.size
@@ -1315,6 +1405,7 @@ func _handle_frame_resize(event: InputEvent) -> void:
 # ---------------------------------------------------------------------------
 # Pan + zoom
 # ---------------------------------------------------------------------------
+
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
@@ -1343,10 +1434,10 @@ func _gui_input(event: InputEvent) -> void:
 			elif mb.pressed:
 				# Left press on empty canvas (not a node) → start a marquee box-select. A press+release
 				# with no real drag collapses to "clear selection".
-				_marquee_active   = true
+				_marquee_active = true
 				_marquee_additive = mb.ctrl_pressed or mb.shift_pressed
-				_marquee_start    = mb.position
-				_marquee_end      = mb.position
+				_marquee_start = mb.position
+				_marquee_end = mb.position
 				accept_event()
 			elif _marquee_active:
 				_finish_marquee()
@@ -1374,15 +1465,27 @@ func _draw() -> void:
 	if _connect_drag_active:
 		# Rubber-band from the handle to the cursor, in GraphView-screen space (canvas-local × zoom +
 		# pan). Red over an invalid target (the source or an ancestor → would loop), else edge colour.
-		var bad: bool = _connect_drag_target != "" and (_connect_drag_target == _connect_drag_source or _connect_drag_invalid.has(_connect_drag_target))
-		var col: Color = UITheme.ERROR_SOFT if bad else (UITheme.FORK_EDGE if _connect_drag_edge_idx >= 0 else UITheme.EDGE)
+		var bad: bool = (
+			_connect_drag_target != ""
+			and (
+				_connect_drag_target == _connect_drag_source
+				or _connect_drag_invalid.has(_connect_drag_target)
+			)
+		)
+		var col: Color = (
+			UITheme.ERROR_SOFT
+			if bad
+			else (UITheme.FORK_EDGE if _connect_drag_edge_idx >= 0 else UITheme.EDGE)
+		)
 		var from_s: Vector2 = _canvas.position + _connect_drag_from * _zoom
 		var to_s: Vector2 = _canvas.position + _connect_drag_to * _zoom
 		draw_line(from_s, to_s, col, 2.0)
 		draw_circle(to_s, 4.0, col)
 		if _connect_drag_target != "" and _node_ctrls.has(_connect_drag_target):
 			var tc: Control = _node_ctrls[_connect_drag_target]
-			draw_rect(Rect2(_canvas.position + tc.position * _zoom, tc.size * _zoom), col, false, 2.0)
+			draw_rect(
+				Rect2(_canvas.position + tc.position * _zoom, tc.size * _zoom), col, false, 2.0
+			)
 
 
 # Finalizes a marquee: selects every node whose on-screen rect intersects the box (additive when
@@ -1417,7 +1520,7 @@ func _zoom_at(focus: Vector2, new_zoom: float) -> void:
 
 func _apply_transform() -> void:
 	_canvas.position = _pan_offset
-	_canvas.scale    = Vector2(_zoom, _zoom)
+	_canvas.scale = Vector2(_zoom, _zoom)
 	# Re-invoke _draw() — pan/zoom changes don't automatically invalidate the
 	# CanvasItem's drawn primitives, so without this the edges flicker out.
 	_canvas.queue_redraw()
@@ -1473,7 +1576,7 @@ func frame_for_capture(scale: float, margin: float) -> Vector2:
 	var b: Dictionary = content_bounds()
 	if b.is_empty():
 		return Vector2.ZERO
-	_has_initial_center = true   # block any pending _center_initial_view re-pan
+	_has_initial_center = true  # block any pending _center_initial_view re-pan
 	_zoom = scale
 	_pan_offset = Vector2(margin, margin) - (b["min"] as Vector2) * scale
 	_apply_transform()
@@ -1481,6 +1584,7 @@ func frame_for_capture(scale: float, margin: float) -> Vector2:
 
 
 # ── Journey-map marker (map mode) ────────────────────────────────────────────
+
 
 # Finds the laid-out node for a stable map key. In the graph the key IS the node id,
 # so resolve it directly against the node controls (ids are unique).
@@ -1539,10 +1643,14 @@ func _apply_marker_style() -> void:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(_marker_color.r, _marker_color.g, _marker_color.b, 0.10)
 	s.border_color = _marker_color
-	s.border_width_left = 3; s.border_width_right = 3
-	s.border_width_top = 3;  s.border_width_bottom = 3
-	s.corner_radius_top_left = 12; s.corner_radius_top_right = 12
-	s.corner_radius_bottom_left = 12; s.corner_radius_bottom_right = 12
+	s.border_width_left = 3
+	s.border_width_right = 3
+	s.border_width_top = 3
+	s.border_width_bottom = 3
+	s.corner_radius_top_left = 12
+	s.corner_radius_top_right = 12
+	s.corner_radius_bottom_left = 12
+	s.corner_radius_bottom_right = 12
 	s.shadow_color = Color(_marker_color.r, _marker_color.g, _marker_color.b, 0.6)
 	s.shadow_size = 16
 	_marker.add_theme_stylebox_override("panel", s)

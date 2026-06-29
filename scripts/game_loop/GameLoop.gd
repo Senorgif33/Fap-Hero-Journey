@@ -1,12 +1,12 @@
 extends Control
 
-const OptionsScene         = preload("res://scenes/options/Options.tscn")
-const ForkScene            = preload("res://scenes/fork_screen/ForkScreen.tscn")
-const ShopScene            = preload("res://scenes/shop_screen/ShopScreen.tscn")
-const StoryboardScene      = preload("res://scenes/storyboard_screen/StoryboardScreen.tscn")
-const InventoryPanelScene  = preload("res://scenes/inventory/InventoryPanel.tscn")
-const BeatBarScript        = preload("res://scripts/game_loop/BeatBar.gd")
-const GraphViewScene       = preload("res://scenes/graph_view/GraphView.tscn")
+const OptionsScene = preload("res://scenes/options/Options.tscn")
+const ForkScene = preload("res://scenes/fork_screen/ForkScreen.tscn")
+const ShopScene = preload("res://scenes/shop_screen/ShopScreen.tscn")
+const StoryboardScene = preload("res://scenes/storyboard_screen/StoryboardScreen.tscn")
+const InventoryPanelScene = preload("res://scenes/inventory/InventoryPanel.tscn")
+const BeatBarScript = preload("res://scripts/game_loop/BeatBar.gd")
+const GraphViewScene = preload("res://scenes/graph_view/GraphView.tscn")
 
 # ---------------------------------------------------------------------------
 # GameLoop.gd  –  Round controller and video player
@@ -18,11 +18,11 @@ const GraphViewScene       = preload("res://scenes/graph_view/GraphView.tscn")
 # _load_video() body with that extension's API.
 # ---------------------------------------------------------------------------
 
-const HUD_BAR_HEIGHT:  int   = 68
+const HUD_BAR_HEIGHT: int = 68
 # Playback-capable formats. Intentionally distinct from JourneyData.VIDEO_EXTENSIONS
 # (the import/transcode set): includes "ogv" (Godot-native, no FFmpeg needed) and
 # omits container types that only matter at import time.
-const VIDEO_EXTS:      Array = ["mp4", "mkv", "webm", "avi", "mov", "ogv"]
+const VIDEO_EXTS: Array = ["mp4", "mkv", "webm", "avi", "mov", "ogv"]
 
 # Sequence-boundary fade timings (~1.2s total).
 const TRANSITION_FADE_TIME: float = 0.45
@@ -32,28 +32,28 @@ const TRANSITION_HOLD_TIME: float = 0.30
 const BOSS_CLIMAX_SECS: float = 30.0
 # Boss forced-modifier kind → HUD chip label.
 const BOSS_EFFECT_NAMES: Dictionary = {
-	"scale":            "SCALE",
-	"clamp":            "CLAMP",
-	"reverse":          "REVERSE",
-	"blackout":         "BLACKOUT",
+	"scale": "SCALE",
+	"clamp": "CLAMP",
+	"reverse": "REVERSE",
+	"blackout": "BLACKOUT",
 	"score_multiplier": "SCORE ×",
 }
 
-@onready var _bg:          ColorRect         = $Background
-@onready var _video:       VideoStreamPlayer = $VideoPlayer
-@onready var _hud:         Control           = $HUD
-@onready var _hud_bar:     PanelContainer    = $HUD/HUDBar
-@onready var _hud_layout:  HBoxContainer     = $HUD/HUDBar/HUDLayout
-@onready var _round_lbl:   Label             = $HUD/HUDBar/HUDLayout/RoundLabel
-@onready var _coin_lbl:    Label             = $HUD/HUDBar/HUDLayout/CoinLabel
-@onready var _progress:    ProgressBar       = $HUD/ProgressBar
-@onready var _score_lbl:   Label             = $HUD/HUDBar/HUDLayout/ScoreLabel
-@onready var _pause_btn:   Button            = $HUD/HUDBar/HUDLayout/PauseBtn
-@onready var _inv_btn:     Button            = $HUD/HUDBar/HUDLayout/InventoryBtn
-@onready var _menu_btn:    Button            = $HUD/HUDBar/HUDLayout/MenuBtn
-@onready var _options_btn: Button            = $HUD/HUDBar/HUDLayout/OptionsBtn
-@onready var _chips_row:   HBoxContainer     = $HUD/EffectChipsRow
-@onready var _hide_timer:  Timer             = $HUD/HideTimer
+@onready var _bg: ColorRect = $Background
+@onready var _video: VideoStreamPlayer = $VideoPlayer
+@onready var _hud: Control = $HUD
+@onready var _hud_bar: PanelContainer = $HUD/HUDBar
+@onready var _hud_layout: HBoxContainer = $HUD/HUDBar/HUDLayout
+@onready var _round_lbl: Label = $HUD/HUDBar/HUDLayout/RoundLabel
+@onready var _coin_lbl: Label = $HUD/HUDBar/HUDLayout/CoinLabel
+@onready var _progress: ProgressBar = $HUD/ProgressBar
+@onready var _score_lbl: Label = $HUD/HUDBar/HUDLayout/ScoreLabel
+@onready var _pause_btn: Button = $HUD/HUDBar/HUDLayout/PauseBtn
+@onready var _inv_btn: Button = $HUD/HUDBar/HUDLayout/InventoryBtn
+@onready var _menu_btn: Button = $HUD/HUDBar/HUDLayout/MenuBtn
+@onready var _options_btn: Button = $HUD/HUDBar/HUDLayout/OptionsBtn
+@onready var _chips_row: HBoxContainer = $HUD/EffectChipsRow
+@onready var _hide_timer: Timer = $HUD/HideTimer
 
 # In-play "Quick Settings" drawer (stroke range + delay), toggled by the S key and mutually exclusive
 # with the inventory drawer. Arrow keys nudge the range while it's open. STROKE_RANGE_STEP = per press.
@@ -65,9 +65,9 @@ const STROKE_RANGE_STEP: int = 5
 # _apply_layout so the scene file doesn't need a new node. Lives outside the
 # auto-hiding HUD so it stays visible even when the rest of the HUD fades.
 var _device_warning_banner: PanelContainer = null
-var _device_warning_label:  Label          = null
-@onready var _end_timer:   Timer             = $EndTimer
-@onready var _transition:  ColorRect         = $TransitionLayer/TransitionOverlay
+var _device_warning_label: Label = null
+@onready var _end_timer: Timer = $EndTimer
+@onready var _transition: ColorRect = $TransitionLayer/TransitionOverlay
 
 var _paused: bool = false
 var _inventory_panel: Control = null
@@ -93,13 +93,13 @@ var _current_overlay: Control = null
 # _current_overlay, which the transition frees). Availability is authored per
 # journey (_map_enabled): an author can disable it to enforce surprise, in which
 # case the map is never built and the buttons never appear.
-var _map_enabled: bool      = true   # journey-level: author allows the player map
-var _map_fog: bool          = false  # journey-level: fog of war — reveal the map as it's discovered
-var _map_fog_reveal: int    = 1      # ghost levels revealed ahead of the trail (< 0 = whole structure)
-var _map_view:    GraphView = null
-var _map_overlay: Control   = null   # full-screen host (backdrop + map + chrome)
-var _map_close_btn: Button  = null
-var _map_open:    bool      = false
+var _map_enabled: bool = true  # journey-level: author allows the player map
+var _map_fog: bool = false  # journey-level: fog of war — reveal the map as it's discovered
+var _map_fog_reveal: int = 1  # ghost levels revealed ahead of the trail (< 0 = whole structure)
+var _map_view: GraphView = null
+var _map_overlay: Control = null  # full-screen host (backdrop + map + chrome)
+var _map_close_btn: Button = null
+var _map_open: bool = false
 # True while the active full-screen overlay permits opening the journey map over it
 # (shop, storyboard, and INTERACTIVE forks). Lets the map open even though
 # _is_overlay_open is set. Auto-resolving forks (random / conditional) leave it false
@@ -110,8 +110,8 @@ var _overlay_map_allowed: bool = false
 
 # True for the duration of a boss round (set when the round loads, cleared at
 # round end). Drives item lockout, the red frame, and the climax pulse.
-var _is_boss_round: bool  = false
-var _boss_frame:    Panel = null
+var _is_boss_round: bool = false
+var _boss_frame: Panel = null
 
 # Cursed round: random negative effect(s) rolled at the start. Distinct from a
 # boss round — items stay usable (the player can fight back), it hits mid-flow
@@ -130,24 +130,24 @@ var _is_cursed_round: bool = false
 const DOUBLE_CURSE_CHANCE: float = 0.22
 const CLEANSE_COST_DEFAULT: int = 50
 
-var _curse_frame:   Panel     = null  # green "hex" border (cursed counterpart to _boss_frame)
-var _curse_tint:    ColorRect = null  # faint sickly tint over the play area
+var _curse_frame: Panel = null  # green "hex" border (cursed counterpart to _boss_frame)
+var _curse_tint: ColorRect = null  # faint sickly tint over the play area
 # The non-gameplay (visual/audio) modifier engine — overlays, video shader,
 # audio bus, tremor, mute. Built in _build_curse_overlay; every hex routes
 # through it first (see _apply_hex). Gameplay hexes below stay here.
 var _sensory: SensoryFX = null
-var _curse_hud_hidden: bool   = false  # a "Fog" hex hid the HUD for this round
-var _curse_no_pause:   bool   = false  # a "Restless" hex disabled pausing this round
+var _curse_hud_hidden: bool = false  # a "Fog" hex hid the HUD for this round
+var _curse_no_pause: bool = false  # a "Restless" hex disabled pausing this round
 const TOLL_AMOUNT: int = 40  # coins a "Toll" hex takes immediately
 
 # Blessed round — the positive mirror of cursed. Applies boon(s) from
 # JourneyData.BLESSING_CATALOG (gold frame, no cleanse/cost). Some boons carry
 # state: Ward shields the next curse, Lingering freezes the effect clock.
-var _is_blessed_round:  bool      = false
-var _blessing_frame:    Panel     = null  # gold frame
-var _blessing_tint:     ColorRect = null  # faint gold tint
-var _ward_next_curse:   bool      = false  # a "Ward" boon repels the next curse
-var _blessing_lingering: bool     = false  # a "Lingering" boon froze the effect clock
+var _is_blessed_round: bool = false
+var _blessing_frame: Panel = null  # gold frame
+var _blessing_tint: ColorRect = null  # faint gold tint
+var _ward_next_curse: bool = false  # a "Ward" boon repels the next curse
+var _blessing_lingering: bool = false  # a "Lingering" boon froze the effect clock
 const INTEREST_PCT: float = 0.25  # "Interest" boon pays this fraction of the coin balance
 # Effects to show on the pre-round reveal card for a cursed/blessed round. Each:
 # {name, desc, benefit:bool}. Empty = no card (normal/boss rounds, warded curse).
@@ -156,9 +156,9 @@ const REVEAL_HOLD_SECS: float = 2.6
 # Cleanse / endure decision: pay to lift the curse mid-round, or endure it to the
 # end for the round's curse_reward bonus. Its own floating button (not in the HUD,
 # so a Fog hex can't lock the player out of cleansing).
-var _curse_cleansed:    bool   = false
+var _curse_cleansed: bool = false
 var _curse_cleanse_btn: Button = null
-var _curse_cleanse_cost: int   = CLEANSE_COST_DEFAULT  # per-round, set on curse enter
+var _curse_cleanse_cost: int = CLEANSE_COST_DEFAULT  # per-round, set on curse enter
 
 # Optional beat-bar visualiser — created only when the setting is enabled.
 var _beat_bar: Control = null
@@ -289,6 +289,7 @@ func _apply_pause_penalty(delta: float) -> void:
 # Item loading (round or fork)
 # ---------------------------------------------------------------------------
 
+
 func _load_current_item() -> void:
 	match GameState.CurrentItemType():
 		"fork":
@@ -322,7 +323,8 @@ func _start_storyboard_filler() -> void:
 	FunscriptPlayer.StartFiller(
 		SettingsService.get_filler_lo(),
 		SettingsService.get_filler_hi(),
-		SettingsService.get_filler_half_cycle_ms())
+		SettingsService.get_filler_half_cycle_ms()
+	)
 
 
 func _on_storyboard_completed(coins: int) -> void:
@@ -339,10 +341,11 @@ func _on_storyboard_completed(coins: int) -> void:
 	if GameState.IsSequenceDone():
 		_transition_to_end_screen()
 		return
-	await _transition_swap(func() -> void:
-		_video.paused = false
-		FunscriptPlayer.Resume()
-		_load_current_item()
+	await _transition_swap(
+		func() -> void:
+			_video.paused = false
+			FunscriptPlayer.Resume()
+			_load_current_item()
 	)
 
 
@@ -367,10 +370,11 @@ func _on_shop_closed() -> void:
 	if GameState.IsSequenceDone():
 		_transition_to_end_screen()
 		return
-	await _transition_swap(func() -> void:
-		_video.paused = false
-		FunscriptPlayer.Resume()
-		_load_current_item()
+	await _transition_swap(
+		func() -> void:
+			_video.paused = false
+			FunscriptPlayer.Resume()
+			_load_current_item()
 	)
 
 
@@ -391,7 +395,10 @@ func _show_fork_screen(fork_data: Dictionary) -> void:
 	var resolution: String = fork_data.get("resolution", "choice")
 	# Conditional forks either auto-resolve (the game "spins" to the best match) or let the player pick
 	# among the paths they've unlocked (cond_decider == "player") — the latter stays interactive.
-	var auto_resolved: bool = resolution == "random" or (resolution == "conditional" and fork_data.get("cond_decider", "game") != "player")
+	var auto_resolved: bool = (
+		resolution == "random"
+		or (resolution == "conditional" and fork_data.get("cond_decider", "game") != "player")
+	)
 	# Interactive forks let the player consult the journey map mid-decision; the auto-resolving reveals
 	# run on timers, so the map stays suppressed there.
 	_overlay_map_allowed = not auto_resolved
@@ -433,14 +440,16 @@ func _conditional_path(fork_data: Dictionary) -> int:
 			metric,
 			int(fork_data.get("default_path", 0)),
 			0,
-			Callable(GameState, "HasFlag"))
+			Callable(GameState, "HasFlag")
+		)
 	var value: int = ScoreService.LastRoundScore if metric == "score" else CoinService.Balance
 	return ForkResolver.conditional_path(
 		fork_data.get("paths", []),
 		metric,
 		int(fork_data.get("default_path", 0)),
 		value,
-		Callable(InventoryService, "OwnsItem"))
+		Callable(InventoryService, "OwnsItem")
+	)
 
 
 # Flavour text shown during a conditional fork's reveal, per metric.
@@ -461,10 +470,11 @@ func _on_fork_path_chosen(path_index: int) -> void:
 	_is_overlay_open = false
 	_overlay_map_allowed = false
 	GameState.ResolveFork(path_index)
-	await _transition_swap(func() -> void:
-		_video.paused = false
-		FunscriptPlayer.Resume()
-		_load_current_item()
+	await _transition_swap(
+		func() -> void:
+			_video.paused = false
+			FunscriptPlayer.Resume()
+			_load_current_item()
 	)
 
 
@@ -476,7 +486,7 @@ func _load_current_round() -> void:
 		return
 
 	var total: int = GameState.TotalRounds()
-	var num:   int = GameState.RoundNumber
+	var num: int = GameState.RoundNumber
 
 	_progress.value = 0.0
 	_paused = false
@@ -487,16 +497,18 @@ func _load_current_round() -> void:
 	_is_cursed_round = rtype == "cursed"
 	_is_blessed_round = rtype == "blessed"
 	if _is_boss_round:
-		_round_lbl.text = "⚔  BOSS  %d / %d  —  %s" % [num, total,
-			(round.get("name", "") as String).to_upper()]
+		_round_lbl.text = (
+			"⚔  BOSS  %d / %d  —  %s" % [num, total, (round.get("name", "") as String).to_upper()]
+		)
 	else:
 		var prefix: String = "ROUND"
 		if _is_cursed_round:
 			prefix = "☠  CURSED"
 		elif _is_blessed_round:
 			prefix = "✦  BLESSED"
-		_round_lbl.text = "%s %d / %d  —  %s" % [prefix, num, total,
-			(round.get("name", "") as String).to_upper()]
+		_round_lbl.text = (
+			"%s %d / %d  —  %s" % [prefix, num, total, (round.get("name", "") as String).to_upper()]
+		)
 
 	# Author-marked checkpoint rounds offer a Save & Quit opt-in before round
 	# playback — honoured on every round type, bosses included (the banner
@@ -582,17 +594,20 @@ func _begin_round(round: Dictionary) -> void:
 # Checkpoint rounds
 # ---------------------------------------------------------------------------
 
+
 # CHECKPOINT REACHED banner shown at the start of any round the author marked
 # as a checkpoint. Two buttons: Save & Quit (writes a save + returns to
 # catalogue) or Continue (dismisses the banner and starts the round normally).
 # Pattern mirrors _show_boss_intro since both gate round start on user input.
 func _show_checkpoint_banner(round: Dictionary) -> void:
-	_is_overlay_open = true   # suppress gameplay hotkeys while the banner is up
+	_is_overlay_open = true  # suppress gameplay hotkeys while the banner is up
 	_halt_playback_for_gate()  # freeze any leftover playback so the score can't tick
 
-	var parts: Dictionary    = UITheme.build_centered_modal("◆  CHECKPOINT REACHED  ◆", UITheme.AMBER, Vector2i(620, 320))
-	var modal: Control       = parts["modal"]
-	var vbox:  VBoxContainer = parts["vbox"]
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"◆  CHECKPOINT REACHED  ◆", UITheme.AMBER, Vector2i(620, 320)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
 	vbox.add_theme_constant_override("separation", 18)
 
 	var subtitle: Label = Label.new()
@@ -617,10 +632,11 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 	save_btn.text = "💾  SAVE & QUIT"
 	save_btn.custom_minimum_size = Vector2(200, 0)
 	UITheme.style_button(save_btn, UITheme.AMBER)
-	save_btn.pressed.connect(func() -> void:
-		modal.queue_free()
-		_is_overlay_open = false
-		_on_save_and_quit()
+	save_btn.pressed.connect(
+		func() -> void:
+			modal.queue_free()
+			_is_overlay_open = false
+			_on_save_and_quit()
 	)
 	btn_row.add_child(save_btn)
 
@@ -628,10 +644,11 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 	continue_btn.text = "▶  CONTINUE"
 	continue_btn.custom_minimum_size = Vector2(160, 0)
 	UITheme.style_button(continue_btn, UITheme.PURPLE_BRIGHT)
-	continue_btn.pressed.connect(func() -> void:
-		modal.queue_free()
-		_is_overlay_open = false
-		_start_round_after_gates(round)
+	continue_btn.pressed.connect(
+		func() -> void:
+			modal.queue_free()
+			_is_overlay_open = false
+			_start_round_after_gates(round)
 	)
 	btn_row.add_child(continue_btn)
 
@@ -641,6 +658,7 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 # ---------------------------------------------------------------------------
 # Boss rounds
 # ---------------------------------------------------------------------------
+
 
 # Freezes playback while a pre-round modal (boss intro / checkpoint banner) is up.
 # A round reached after a shop/storyboard/fork resumes the prior video+funscript
@@ -675,10 +693,14 @@ func _show_boss_intro(round: Dictionary) -> void:
 	var ps: StyleBoxFlat = StyleBoxFlat.new()
 	ps.bg_color = UITheme.PANEL_BG
 	ps.border_color = UITheme.DANGER
-	ps.border_width_left = 3; ps.border_width_right = 3
-	ps.border_width_top = 3; ps.border_width_bottom = 3
-	ps.content_margin_left = 48; ps.content_margin_right = 48
-	ps.content_margin_top = 36;  ps.content_margin_bottom = 36
+	ps.border_width_left = 3
+	ps.border_width_right = 3
+	ps.border_width_top = 3
+	ps.border_width_bottom = 3
+	ps.content_margin_left = 48
+	ps.content_margin_right = 48
+	ps.content_margin_top = 36
+	ps.content_margin_bottom = 36
 	panel.add_theme_stylebox_override("panel", ps)
 	center.add_child(panel)
 
@@ -700,7 +722,7 @@ func _show_boss_intro(round: Dictionary) -> void:
 			var tex: TextureRect = TextureRect.new()
 			tex.texture = ImageTexture.create_from_image(img)
 			tex.custom_minimum_size = Vector2(380, 240)
-			tex.expand_mode  = TextureRect.EXPAND_IGNORE_SIZE
+			tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 			col.add_child(tex)
 
@@ -734,10 +756,11 @@ func _show_boss_intro(round: Dictionary) -> void:
 	begin_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	UITheme.style_button(begin_btn, UITheme.DANGER, 32, 14)
 	col.add_child(begin_btn)
-	begin_btn.pressed.connect(func() -> void:
-		overlay.queue_free()
-		_is_overlay_open = false
-		_begin_round(round)
+	begin_btn.pressed.connect(
+		func() -> void:
+			overlay.queue_free()
+			_is_overlay_open = false
+			_begin_round(round)
 	)
 
 
@@ -768,7 +791,7 @@ func _enter_boss_mode(round: Dictionary) -> void:
 	_inv_btn.disabled = true
 
 	if _boss_frame != null:
-		_boss_frame.visible    = true
+		_boss_frame.visible = true
 		_boss_frame.modulate.a = 0.5
 
 
@@ -870,7 +893,9 @@ func _show_reveal_card(is_blessed: bool) -> void:
 		var name_lbl: Label = Label.new()
 		name_lbl.text = (fx.get("name", "") as String).to_upper()
 		name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		name_lbl.add_theme_color_override("font_color", UITheme.SUCCESS if fx.get("benefit", false) else UITheme.ERROR_SOFT)
+		name_lbl.add_theme_color_override(
+			"font_color", UITheme.SUCCESS if fx.get("benefit", false) else UITheme.ERROR_SOFT
+		)
 		name_lbl.add_theme_font_size_override("font_size", 20)
 		col.add_child(name_lbl)
 		var desc_lbl: Label = Label.new()
@@ -888,7 +913,9 @@ func _show_reveal_card(is_blessed: bool) -> void:
 	root.modulate.a = 0.0
 	var tin: Tween = create_tween().set_parallel(true)
 	tin.tween_property(root, "modulate:a", 1.0, 0.3)
-	tin.tween_property(panel, "scale", Vector2.ONE, 0.3).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tin.tween_property(panel, "scale", Vector2.ONE, 0.3).set_trans(Tween.TRANS_BACK).set_ease(
+		Tween.EASE_OUT
+	)
 	await tin.finished
 	await get_tree().create_timer(REVEAL_HOLD_SECS).timeout
 	if not is_inside_tree():
@@ -912,7 +939,7 @@ func _enter_cursed_mode() -> void:
 	if _ward_next_curse:
 		_ward_next_curse = false
 		_curse_cleansed = true  # counts as resolved → no endure reward
-		_reveal_effects = []     # nothing to reveal — no card
+		_reveal_effects = []  # nothing to reveal — no card
 		_show_curse_banner("WARDED — THE CURSE IS REPELLED")
 		return
 
@@ -936,8 +963,11 @@ func _enter_cursed_mode() -> void:
 
 	var to_apply: Array = []
 	if random_mode:
-		var pool: Array = (JourneyData.CURSE_CATALOG if selected.is_empty()
-			else _catalog_subset(JourneyData.CURSE_CATALOG, selected))
+		var pool: Array = (
+			JourneyData.CURSE_CATALOG
+			if selected.is_empty()
+			else _catalog_subset(JourneyData.CURSE_CATALOG, selected)
+		)
 		if sensory_in_pool:
 			pool = pool + JourneyData.SENSORY_CATALOG
 		to_apply = _roll_from(pool)
@@ -971,11 +1001,16 @@ func _enter_cursed_mode() -> void:
 func _build_reveal_effects(entries: Array, benefit: bool) -> Array:
 	var out: Array = []
 	for e: Dictionary in entries:
-		out.append({
-			"name":    str(e.get("name", "")),
-			"desc":    str(e.get("desc", "")),
-			"benefit": benefit,
-		})
+		(
+			out
+			. append(
+				{
+					"name": str(e.get("name", "")),
+					"desc": str(e.get("desc", "")),
+					"benefit": benefit,
+				}
+			)
+		)
 	return out
 
 
@@ -1006,13 +1041,22 @@ func _show_cleanse_button() -> void:
 	_remove_cleanse_button()
 	var btn: Button = Button.new()
 	var has_item: bool = InventoryService.OwnsItem("cleanse")
-	btn.text = "✦ CLEANSE  (use Cleanse item)" if has_item else "✦ CLEANSE  (♦ %d)" % _curse_cleanse_cost
-	btn.tooltip_text = "Lift the curse with a Cleanse item or %d coins — or endure it for the reward." % _curse_cleanse_cost
+	btn.text = (
+		"✦ CLEANSE  (use Cleanse item)" if has_item else "✦ CLEANSE  (♦ %d)" % _curse_cleanse_cost
+	)
+	btn.tooltip_text = (
+		"Lift the curse with a Cleanse item or %d coins — or endure it for the reward."
+		% _curse_cleanse_cost
+	)
 	UITheme.style_button(btn, Color(0.45, 0.95, 0.30))
-	btn.anchor_left = 0.5; btn.anchor_right = 0.5
-	btn.anchor_top = 1.0;  btn.anchor_bottom = 1.0
-	btn.offset_top = -96; btn.offset_bottom = -56
-	btn.offset_left = -110; btn.offset_right = 110
+	btn.anchor_left = 0.5
+	btn.anchor_right = 0.5
+	btn.anchor_top = 1.0
+	btn.anchor_bottom = 1.0
+	btn.offset_top = -96
+	btn.offset_bottom = -56
+	btn.offset_left = -110
+	btn.offset_right = 110
 	btn.pressed.connect(_on_cleanse_pressed)
 	add_child(btn)
 	_curse_cleanse_btn = btn
@@ -1086,11 +1130,11 @@ func _show_curse_banner(curse_name: String) -> void:
 	banner.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
 	banner.add_theme_font_size_override("font_size", 30)
 	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	banner.anchor_left   = 0.0
-	banner.anchor_right  = 1.0
-	banner.anchor_top    = 0.35
-	banner.mouse_filter  = Control.MOUSE_FILTER_IGNORE
-	banner.modulate.a    = 0.0
+	banner.anchor_left = 0.0
+	banner.anchor_right = 1.0
+	banner.anchor_top = 0.35
+	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.modulate.a = 0.0
 	add_child(banner)
 	var tw: Tween = create_tween()
 	tw.tween_property(banner, "modulate:a", 1.0, 0.3)
@@ -1130,7 +1174,7 @@ func _exit_boss_mode() -> void:
 func _make_boss_effect(mod: Dictionary) -> Dictionary:
 	var kind: String = mod.get("kind", "")
 	var effect: Dictionary = {
-		"id":   "boss_" + kind,
+		"id": "boss_" + kind,
 		"name": BOSS_EFFECT_NAMES.get(kind, kind.to_upper()),
 		"kind": kind,
 		"boss": true,
@@ -1148,13 +1192,13 @@ func _build_beat_bar() -> void:
 	if not SettingsService.get_beat_bar_enabled():
 		return
 	_beat_bar = BeatBarScript.new()
-	_beat_bar.anchor_left   = 0.0
-	_beat_bar.anchor_right  = 1.0
-	_beat_bar.anchor_top    = 1.0
+	_beat_bar.anchor_left = 0.0
+	_beat_bar.anchor_right = 1.0
+	_beat_bar.anchor_top = 1.0
 	_beat_bar.anchor_bottom = 1.0
-	_beat_bar.offset_left   = 0.0
-	_beat_bar.offset_right  = 0.0
-	_beat_bar.offset_top    = -120.0
+	_beat_bar.offset_left = 0.0
+	_beat_bar.offset_right = 0.0
+	_beat_bar.offset_top = -120.0
 	_beat_bar.offset_bottom = -56.0
 	add_child(_beat_bar)
 
@@ -1183,8 +1227,10 @@ func _build_boss_frame() -> void:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(0, 0, 0, 0)
 	s.border_color = UITheme.DANGER
-	s.border_width_left = 6; s.border_width_right  = 6
-	s.border_width_top  = 6; s.border_width_bottom = 6
+	s.border_width_left = 6
+	s.border_width_right = 6
+	s.border_width_top = 6
+	s.border_width_bottom = 6
 	_boss_frame.add_theme_stylebox_override("panel", s)
 	add_child(_boss_frame)
 	_send_frame_behind_hud(_boss_frame)
@@ -1224,8 +1270,10 @@ func _build_curse_overlay() -> void:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(0, 0, 0, 0)
 	s.border_color = Color(0.45, 0.95, 0.30)  # toxic green
-	s.border_width_left = 5; s.border_width_right  = 5
-	s.border_width_top  = 5; s.border_width_bottom = 5
+	s.border_width_left = 5
+	s.border_width_right = 5
+	s.border_width_top = 5
+	s.border_width_bottom = 5
 	_curse_frame.add_theme_stylebox_override("panel", s)
 	add_child(_curse_frame)
 	_send_frame_behind_hud(_curse_frame)
@@ -1245,8 +1293,10 @@ func _build_curse_overlay() -> void:
 	var gs: StyleBoxFlat = StyleBoxFlat.new()
 	gs.bg_color = Color(0, 0, 0, 0)
 	gs.border_color = Color(1.0, 0.84, 0.30)  # gold
-	gs.border_width_left = 5; gs.border_width_right  = 5
-	gs.border_width_top  = 5; gs.border_width_bottom = 5
+	gs.border_width_left = 5
+	gs.border_width_right = 5
+	gs.border_width_top = 5
+	gs.border_width_bottom = 5
 	_blessing_frame.add_theme_stylebox_override("panel", gs)
 	add_child(_blessing_frame)
 	_send_frame_behind_hud(_blessing_frame)
@@ -1367,7 +1417,9 @@ func _load_video(path: String) -> void:
 	# Install: https://github.com/EIRTeam/EIRTeam.FFmpeg/releases
 	# Drop the addons/ folder into the project root and reopen Godot.
 	if not ClassDB.class_exists("FFmpegVideoStream"):
-		push_warning("GameLoop: FFmpegVideoStream not found — install EIRTeam.FFmpeg for MP4 support. Running funscript-only.")
+		push_warning(
+			"GameLoop: FFmpegVideoStream not found — install EIRTeam.FFmpeg for MP4 support. Running funscript-only."
+		)
 		_start_no_video_fallback()
 		return
 
@@ -1407,18 +1459,21 @@ func _start_no_video_fallback() -> void:
 # Round / scene transitions
 # ---------------------------------------------------------------------------
 
+
 func _on_round_ended() -> void:
 	# Extract the name here in GDScript where Dictionary access is reliable,
 	# then pass it explicitly so C# never needs to look up the key itself.
 	var _cur: Dictionary = GameState.CurrentRound()
 	var _cur_name: String = _cur.get("name", "") as String
-	var _cur_ms: int      = _cur.get("length_ms", 0) as int
+	var _cur_ms: int = _cur.get("length_ms", 0) as int
 	GameState.LogRound(_cur, _cur_name, _cur_ms)
 
 	# Append to the GDScript-side round-name log (see _ready). EndScreen reads
 	# this directly, avoiding any potential C#→GDScript Dictionary marshalling
 	# quirks for the name string.
-	var _names: PackedStringArray = GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray
+	var _names: PackedStringArray = (
+		GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray
+	)
 	_names.append(_cur_name)
 	GameState.set_meta("_round_names", _names)
 	ScoreService.EndRound()
@@ -1430,8 +1485,10 @@ func _on_round_ended() -> void:
 	var penalty_factor: float = 1.0
 	for fx: Dictionary in InventoryService.GetActiveEffects():
 		match fx.get("kind", ""):
-			"coin_jackpot": jackpot_factor *= float(fx.get("factor", 1.0))
-			"coin_penalty": penalty_factor *= float(fx.get("factor", 1.0))
+			"coin_jackpot":
+				jackpot_factor *= float(fx.get("factor", 1.0))
+			"coin_penalty":
+				penalty_factor *= float(fx.get("factor", 1.0))
 	# Endure-payout: a cursed round carried to the end without cleansing pays its
 	# curse_reward bonus. Captured before _exit_boss_mode clears the cursed flag.
 	var endure_reward: int = 0
@@ -1458,9 +1515,10 @@ func _on_round_ended() -> void:
 	if GameState.IsLastRound():
 		_transition_to_end_screen()
 		return
-	await _transition_swap(func() -> void:
-		GameState.Advance()
-		_load_current_item()
+	await _transition_swap(
+		func() -> void:
+			GameState.Advance()
+			_load_current_item()
 	)
 
 
@@ -1472,7 +1530,9 @@ func _transition_swap(swap_action: Callable) -> void:
 	_transition.mouse_filter = Control.MOUSE_FILTER_STOP
 
 	var tween_in: Tween = create_tween()
-	tween_in.tween_property(_transition, "modulate:a", 1.0, TRANSITION_FADE_TIME).set_ease(Tween.EASE_IN)
+	tween_in.tween_property(_transition, "modulate:a", 1.0, TRANSITION_FADE_TIME).set_ease(
+		Tween.EASE_IN
+	)
 	await tween_in.finished
 
 	# Black now fully covers the screen — including any overlay we're leaving.
@@ -1494,7 +1554,9 @@ func _transition_swap(swap_action: Callable) -> void:
 	await _await_video_ready()
 
 	var tween_out: Tween = create_tween()
-	tween_out.tween_property(_transition, "modulate:a", 0.0, TRANSITION_FADE_TIME).set_ease(Tween.EASE_OUT)
+	tween_out.tween_property(_transition, "modulate:a", 0.0, TRANSITION_FADE_TIME).set_ease(
+		Tween.EASE_OUT
+	)
 	await tween_out.finished
 
 	_transition.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1534,6 +1596,7 @@ func _free_current_overlay() -> void:
 # journey (_map_enabled); a journey can hide it to keep its layout a surprise.
 # ---------------------------------------------------------------------------
 
+
 # Builds the persistent map (hidden) on its own CanvasLayer, plus the HUD map
 # button. Self-contained: reads the journey accent locally. Skipped entirely when
 # the author has disabled the map for this journey — _map_view stays null, so
@@ -1561,8 +1624,10 @@ func _build_map() -> void:
 	_map_view = GraphViewScene.instantiate()
 	_map_view.map_mode = true
 	_map_view.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_map_view.offset_top = 56; _map_view.offset_bottom = -16
-	_map_view.offset_left = 16; _map_view.offset_right = -16
+	_map_view.offset_top = 56
+	_map_view.offset_bottom = -16
+	_map_view.offset_left = 16
+	_map_view.offset_right = -16
 	_map_overlay.add_child(_map_view)
 	_map_view.set_marker_color(accent)
 	# Render the map from the journey GRAPH (the same DAG the runtime walks). Edges show the real
@@ -1576,7 +1641,7 @@ func _build_map() -> void:
 	}
 	for nid: String in map_graph["nodes"]:
 		if not (map_graph["nodes"][nid] as Dictionary).has("pos"):
-			GraphLayout.seed_positions(map_graph)   # any node missing a pos → seed the whole graph
+			GraphLayout.seed_positions(map_graph)  # any node missing a pos → seed the whole graph
 			break
 	_map_view.set_graph(map_graph)
 
@@ -1600,9 +1665,12 @@ func _build_map() -> void:
 	_map_close_btn.text = "✕ CLOSE"
 	_map_close_btn.focus_mode = Control.FOCUS_NONE
 	_style_button(_map_close_btn, UITheme.MAGENTA)
-	_map_close_btn.anchor_left = 1.0; _map_close_btn.anchor_right = 1.0
-	_map_close_btn.offset_left = -132; _map_close_btn.offset_right = -16
-	_map_close_btn.offset_top = 14;   _map_close_btn.offset_bottom = 48
+	_map_close_btn.anchor_left = 1.0
+	_map_close_btn.anchor_right = 1.0
+	_map_close_btn.offset_left = -132
+	_map_close_btn.offset_right = -16
+	_map_close_btn.offset_top = 14
+	_map_close_btn.offset_bottom = 48
 	_map_close_btn.pressed.connect(_close_map_viewer)
 	_map_overlay.add_child(_map_close_btn)
 
@@ -1720,12 +1788,18 @@ func _record_run(completed: bool) -> void:
 		return
 	var total: int = GameState.TotalRounds()
 	var reached: int = total if completed else clampi(GameState.RoundNumber, 0, total)
-	ScoreboardService.add_run(folder, {
-		"score": ScoreService.TotalScore,
-		"completed": completed,
-		"rounds_done": reached,
-		"rounds_total": total,
-	})
+	(
+		ScoreboardService
+		. add_run(
+			folder,
+			{
+				"score": ScoreService.TotalScore,
+				"completed": completed,
+				"rounds_done": reached,
+				"rounds_total": total,
+			}
+		)
+	)
 
 
 # Returns from a test play to the builder, reloading the same journey so the
@@ -1750,9 +1824,9 @@ func _show_test_banner() -> void:
 	banner.add_theme_color_override("font_color", UITheme.AMBER)
 	banner.add_theme_font_size_override("font_size", 16)
 	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	banner.anchor_left  = 0.0
+	banner.anchor_left = 0.0
 	banner.anchor_right = 1.0
-	banner.offset_top   = 12
+	banner.offset_top = 12
 	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(banner)
 
@@ -1760,6 +1834,7 @@ func _show_test_banner() -> void:
 # ---------------------------------------------------------------------------
 # Save / Resume
 # ---------------------------------------------------------------------------
+
 
 # Writes a save for the current journey at the start of the current round.
 # Used by both the checkpoint banner's "Save & Quit" button and the save_now
@@ -1784,16 +1859,16 @@ func _write_journey_save() -> bool:
 	# Inventory carries through; active effects do NOT (clean modifier slate
 	# on resume — see InventoryService.LoadFromSave for the rationale).
 	var game_state_data: Dictionary = GameState.CaptureSaveData()
-	var score_data: Dictionary       = ScoreService.CaptureSaveData()
+	var score_data: Dictionary = ScoreService.CaptureSaveData()
 	var payload: Dictionary = {
 		"sequence_index": game_state_data.get("sequence_index", 0),
-		"sequence":       game_state_data.get("sequence", []),
-		"fork_depth":     game_state_data.get("fork_depth", 0),
-		"coins":          CoinService.Balance,
-		"score":          score_data.get("score", 0),
-		"total_actions":  score_data.get("strokes", 0),
-		"inventory":      InventoryService.CaptureSaveData(),
-		"round_names":    (GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray),
+		"sequence": game_state_data.get("sequence", []),
+		"fork_depth": game_state_data.get("fork_depth", 0),
+		"coins": CoinService.Balance,
+		"score": score_data.get("score", 0),
+		"total_actions": score_data.get("strokes", 0),
+		"inventory": InventoryService.CaptureSaveData(),
+		"round_names": GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray,
 	}
 	return JourneySaveService.write_save(folder_name, payload)
 
@@ -1836,20 +1911,28 @@ func _on_save_item_used() -> void:
 func _show_save_toast(text: String) -> void:
 	var toast: PanelContainer = PanelContainer.new()
 	toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	toast.anchor_left  = 0.5; toast.anchor_right  = 0.5
-	toast.anchor_top   = 0.0; toast.anchor_bottom = 0.0
+	toast.anchor_left = 0.5
+	toast.anchor_right = 0.5
+	toast.anchor_top = 0.0
+	toast.anchor_bottom = 0.0
 	toast.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	toast.offset_top = 70    # below the device-warning banner
+	toast.offset_top = 70  # below the device-warning banner
 
 	var s: StyleBoxFlat = StyleBoxFlat.new()
-	s.bg_color              = Color(UITheme.AMBER.r, UITheme.AMBER.g, UITheme.AMBER.b, 0.92)
-	s.border_color          = UITheme.AMBER
-	s.border_width_left     = 2; s.border_width_right  = 2
-	s.border_width_top      = 2; s.border_width_bottom = 2
-	s.content_margin_left   = 20; s.content_margin_right  = 20
-	s.content_margin_top    = 8;  s.content_margin_bottom = 8
-	s.corner_radius_top_left    = 6; s.corner_radius_top_right    = 6
-	s.corner_radius_bottom_left = 6; s.corner_radius_bottom_right = 6
+	s.bg_color = Color(UITheme.AMBER.r, UITheme.AMBER.g, UITheme.AMBER.b, 0.92)
+	s.border_color = UITheme.AMBER
+	s.border_width_left = 2
+	s.border_width_right = 2
+	s.border_width_top = 2
+	s.border_width_bottom = 2
+	s.content_margin_left = 20
+	s.content_margin_right = 20
+	s.content_margin_top = 8
+	s.content_margin_bottom = 8
+	s.corner_radius_top_left = 6
+	s.corner_radius_top_right = 6
+	s.corner_radius_bottom_left = 6
+	s.corner_radius_bottom_right = 6
 	toast.add_theme_stylebox_override("panel", s)
 
 	var lbl: Label = Label.new()
@@ -1899,6 +1982,7 @@ func _on_options_closed() -> void:
 # ---------------------------------------------------------------------------
 # Pause / HUD
 # ---------------------------------------------------------------------------
+
 
 func _toggle_pause() -> void:
 	# A "Restless" curse forbids pausing this round.
@@ -1961,10 +2045,10 @@ func _on_session_settings_closed() -> void:
 # Input
 # ---------------------------------------------------------------------------
 
+
 func _input(event: InputEvent) -> void:
 	# Any activity shows the HUD.
-	if event is InputEventMouseMotion or event is InputEventMouseButton \
-			or event is InputEventKey:
+	if event is InputEventMouseMotion or event is InputEventMouseButton or event is InputEventKey:
 		_show_hud()
 
 	# Keyboard hotkeys — evaluated in order of specificity.
@@ -2040,10 +2124,10 @@ func _input(event: InputEvent) -> void:
 # value and flash a colour + scale pulse — green for a gain, red for a loss — so
 # rewards feel earned and the pause-penalty drain is actually visible.
 const COUNTER_DURATION: float = 0.45
-const PULSE_DURATION:   float = 0.35
+const PULSE_DURATION: float = 0.35
 
 var _score_shown: int = 0
-var _coin_shown:  int = 0
+var _coin_shown: int = 0
 # Per-label [count, scale, colour] tweens, killed/replaced on each change so
 # rapid score ticks chase the target instead of stacking.
 var _counter_tweens: Dictionary = {}
@@ -2057,7 +2141,9 @@ func _on_score_changed(total: int) -> void:
 # Rolls `lbl` from from_val→to_val with a count-up tween and a gain/loss pulse.
 # `fmt` is a printf format taking one int (e.g. "%d PTS"). `instant` snaps with
 # no animation (used for the initial fill so the HUD doesn't pulse on round start).
-func _animate_counter(lbl: Label, from_val: int, to_val: int, fmt: String, base_color: Color, instant: bool) -> void:
+func _animate_counter(
+	lbl: Label, from_val: int, to_val: int, fmt: String, base_color: Color, instant: bool
+) -> void:
 	for tw: Tween in _counter_tweens.get(lbl, []):
 		if tw != null and tw.is_running():
 			tw.kill()
@@ -2072,15 +2158,29 @@ func _animate_counter(lbl: Label, from_val: int, to_val: int, fmt: String, base_
 	var pulse_color: Color = UITheme.OK if to_val > from_val else UITheme.DANGER
 
 	var count_tw: Tween = create_tween()
-	count_tw.tween_method(_set_counter_text.bind(lbl, fmt), float(from_val), float(to_val), COUNTER_DURATION) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	(
+		count_tw
+		. tween_method(
+			_set_counter_text.bind(lbl, fmt), float(from_val), float(to_val), COUNTER_DURATION
+		)
+		. set_trans(Tween.TRANS_CUBIC)
+		. set_ease(Tween.EASE_OUT)
+	)
 
 	lbl.pivot_offset = lbl.size / 2.0
 	var scale_tw: Tween = create_tween()
-	scale_tw.tween_property(lbl, "scale", Vector2(1.12, 1.12), 0.10) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	scale_tw.tween_property(lbl, "scale", Vector2.ONE, PULSE_DURATION - 0.10) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	(
+		scale_tw
+		. tween_property(lbl, "scale", Vector2(1.12, 1.12), 0.10)
+		. set_trans(Tween.TRANS_BACK)
+		. set_ease(Tween.EASE_OUT)
+	)
+	(
+		scale_tw
+		. tween_property(lbl, "scale", Vector2.ONE, PULSE_DURATION - 0.10)
+		. set_trans(Tween.TRANS_CUBIC)
+		. set_ease(Tween.EASE_IN)
+	)
 
 	lbl.add_theme_color_override("font_color", pulse_color)
 	var color_tw: Tween = create_tween()
@@ -2122,11 +2222,13 @@ func _connect_signals() -> void:
 	# correct state via _refresh_device_warning(). DeviceAdded / DeviceRemoved
 	# matter independently of Connected/Disconnected: a device can drop
 	# (battery, Bluetooth, USB unplug) while Intiface itself stays running.
-	ButtplugService.connect("Connected",      _refresh_device_warning)
-	ButtplugService.connect("Disconnected",   _refresh_device_warning)
-	ButtplugService.connect("DeviceAdded",    func(_n: String, _i: int) -> void: _refresh_device_warning())
-	ButtplugService.connect("DeviceRemoved",  func(_i: int) -> void: _refresh_device_warning())
-	SerialDeviceService.connect("Connected",    _refresh_device_warning)
+	ButtplugService.connect("Connected", _refresh_device_warning)
+	ButtplugService.connect("Disconnected", _refresh_device_warning)
+	ButtplugService.connect(
+		"DeviceAdded", func(_n: String, _i: int) -> void: _refresh_device_warning()
+	)
+	ButtplugService.connect("DeviceRemoved", func(_i: int) -> void: _refresh_device_warning())
+	SerialDeviceService.connect("Connected", _refresh_device_warning)
 	SerialDeviceService.connect("Disconnected", _refresh_device_warning)
 	_refresh_device_warning()
 
@@ -2134,6 +2236,7 @@ func _connect_signals() -> void:
 # ---------------------------------------------------------------------------
 # Device connection state
 # ---------------------------------------------------------------------------
+
 
 # Updates the disconnect banner to reflect the currently selected output mode
 # and the relevant connection state. Called from connect/disconnect/device
@@ -2161,25 +2264,29 @@ func _refresh_device_warning() -> void:
 	var label_text: String = ""
 	if mode == "serial":
 		disconnected = not SerialDeviceService.SerialConnected
-		label_text   = "●  SERIAL DEVICE DISCONNECTED  —  RECONNECT IN OPTIONS"
+		label_text = "●  SERIAL DEVICE DISCONNECTED  —  RECONNECT IN OPTIONS"
 	else:
 		if not ButtplugService.BpConnected:
 			disconnected = true
-			label_text   = "●  INTIFACE DISCONNECTED  —  RECONNECT IN OPTIONS"
+			label_text = "●  INTIFACE DISCONNECTED  —  RECONNECT IN OPTIONS"
 		else:
 			var selected_name: String = SettingsService.get_selected_device()
-			var active_name: String   = ButtplugService.GetActiveDeviceName()
+			var active_name: String = ButtplugService.GetActiveDeviceName()
 			if active_name == "":
 				disconnected = true
-				label_text   = "●  NO DEVICE CONNECTED  —  POWER ON OR RE-PAIR YOUR DEVICE"
+				label_text = "●  NO DEVICE CONNECTED  —  POWER ON OR RE-PAIR YOUR DEVICE"
 			elif selected_name != "" and selected_name != active_name:
 				# User has an explicit preference that isn't currently present.
 				# Playback still works via the fallback to active_name; the
 				# banner just tells the user it's not the device they picked.
 				disconnected = true
-				label_text   = "●  \"%s\" UNAVAILABLE  —  USING \"%s\" INSTEAD  (CHANGE IN OPTIONS)" % [
-					selected_name.to_upper(), active_name.to_upper(),
-				]
+				label_text = (
+					'●  "%s" UNAVAILABLE  —  USING "%s" INSTEAD  (CHANGE IN OPTIONS)'
+					% [
+						selected_name.to_upper(),
+						active_name.to_upper(),
+					]
+				)
 	if disconnected:
 		_device_warning_label.text = label_text
 	_device_warning_banner.visible = disconnected
@@ -2188,6 +2295,7 @@ func _refresh_device_warning() -> void:
 # ---------------------------------------------------------------------------
 # Inventory / coins / effect chips
 # ---------------------------------------------------------------------------
+
 
 func _on_inventory_pressed() -> void:
 	if is_instance_valid(_inventory_panel):
@@ -2239,15 +2347,15 @@ func _make_chip(effect: Dictionary) -> Control:
 		accent = UITheme.AMBER
 	var chip: PanelContainer = PanelContainer.new()
 	var s: StyleBoxFlat = StyleBoxFlat.new()
-	s.bg_color            = Color(accent.r, accent.g, accent.b, 0.12)
-	s.border_color        = accent
-	s.border_width_left   = 1
-	s.border_width_right  = 1
-	s.border_width_top    = 1
+	s.bg_color = Color(accent.r, accent.g, accent.b, 0.12)
+	s.border_color = accent
+	s.border_width_left = 1
+	s.border_width_right = 1
+	s.border_width_top = 1
 	s.border_width_bottom = 1
-	s.content_margin_left   = 10
-	s.content_margin_right  = 10
-	s.content_margin_top    = 4
+	s.content_margin_left = 10
+	s.content_margin_right = 10
+	s.content_margin_top = 4
 	s.content_margin_bottom = 4
 	chip.add_theme_stylebox_override("panel", s)
 
@@ -2287,59 +2395,60 @@ func _update_chip_countdowns() -> void:
 # Layout
 # ---------------------------------------------------------------------------
 
+
 func _apply_layout() -> void:
-	anchor_right  = 1.0
+	anchor_right = 1.0
 	anchor_bottom = 1.0
 
-	_bg.anchor_right  = 1.0
+	_bg.anchor_right = 1.0
 	_bg.anchor_bottom = 1.0
-	_bg.offset_left   = 0
-	_bg.offset_top    = 0
-	_bg.offset_right  = 0
+	_bg.offset_left = 0
+	_bg.offset_top = 0
+	_bg.offset_right = 0
 	_bg.offset_bottom = 0
 
-	_video.anchor_left   = 0.0
-	_video.anchor_top    = 0.0
-	_video.anchor_right  = 0.0
+	_video.anchor_left = 0.0
+	_video.anchor_top = 0.0
+	_video.anchor_right = 0.0
 	_video.anchor_bottom = 0.0
-	_video.offset_left   = 0
-	_video.offset_top    = 0
-	_video.offset_right  = 0
+	_video.offset_left = 0
+	_video.offset_top = 0
+	_video.offset_right = 0
 	_video.offset_bottom = 0
-	_video.position      = Vector2.ZERO
-	_video.size          = get_viewport_rect().size
+	_video.position = Vector2.ZERO
+	_video.size = get_viewport_rect().size
 
-	_hud.anchor_right  = 1.0
+	_hud.anchor_right = 1.0
 	_hud.anchor_bottom = 1.0
 
-	_hud_bar.anchor_left   = 0.0
-	_hud_bar.anchor_right  = 1.0
-	_hud_bar.anchor_top    = 1.0
+	_hud_bar.anchor_left = 0.0
+	_hud_bar.anchor_right = 1.0
+	_hud_bar.anchor_top = 1.0
 	_hud_bar.anchor_bottom = 1.0
-	_hud_bar.offset_top    = -HUD_BAR_HEIGHT
+	_hud_bar.offset_top = -HUD_BAR_HEIGHT
 	_hud_bar.offset_bottom = 0
 
 	_hud_layout.add_theme_constant_override("separation", 16)
 	_round_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
 	# Progress bar — centered thin strip at the very bottom of the screen
-	_progress.anchor_left   = 0.1
-	_progress.anchor_right  = 0.9
-	_progress.anchor_top    = 1.0
+	_progress.anchor_left = 0.1
+	_progress.anchor_right = 0.9
+	_progress.anchor_top = 1.0
 	_progress.anchor_bottom = 1.0
-	_progress.offset_left   = 0
-	_progress.offset_right  = 0
-	_progress.offset_top    = -7
+	_progress.offset_left = 0
+	_progress.offset_right = 0
+	_progress.offset_top = -7
 	_progress.offset_bottom = -1
 
 	# Effect chips — row pinned just above the progress bar, centred.
-	_chips_row.anchor_left   = 0.0
-	_chips_row.anchor_right  = 1.0
-	_chips_row.anchor_top    = 1.0
+	_chips_row.anchor_left = 0.0
+	_chips_row.anchor_right = 1.0
+	_chips_row.anchor_top = 1.0
 	_chips_row.anchor_bottom = 1.0
-	_chips_row.offset_top    = -42
+	_chips_row.offset_top = -42
 	_chips_row.offset_bottom = -12
-	_chips_row.alignment     = BoxContainer.ALIGNMENT_CENTER
+	_chips_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	_chips_row.add_theme_constant_override("separation", 8)
 	_chips_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
@@ -2347,25 +2456,33 @@ func _apply_layout() -> void:
 	# centred horizontally, hidden by default. Lives outside _hud so the
 	# auto-hide timer doesn't fade it away.
 	_device_warning_banner = PanelContainer.new()
-	_device_warning_banner.anchor_left   = 0.5
-	_device_warning_banner.anchor_right  = 0.5
-	_device_warning_banner.anchor_top    = 0.0
+	_device_warning_banner.anchor_left = 0.5
+	_device_warning_banner.anchor_right = 0.5
+	_device_warning_banner.anchor_top = 0.0
 	_device_warning_banner.anchor_bottom = 0.0
 	_device_warning_banner.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_device_warning_banner.offset_top    = 12
-	_device_warning_banner.mouse_filter  = Control.MOUSE_FILTER_IGNORE
-	_device_warning_banner.visible       = false
+	_device_warning_banner.offset_top = 12
+	_device_warning_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_device_warning_banner.visible = false
 	add_child(_device_warning_banner)
 
 	var banner_style: StyleBoxFlat = StyleBoxFlat.new()
-	banner_style.bg_color              = Color(UITheme.ERROR_SOFT.r, UITheme.ERROR_SOFT.g, UITheme.ERROR_SOFT.b, 0.92)
-	banner_style.border_color          = UITheme.ERROR_SOFT
-	banner_style.border_width_left     = 2; banner_style.border_width_right  = 2
-	banner_style.border_width_top      = 2; banner_style.border_width_bottom = 2
-	banner_style.content_margin_left   = 18; banner_style.content_margin_right  = 18
-	banner_style.content_margin_top    = 8;  banner_style.content_margin_bottom = 8
-	banner_style.corner_radius_top_left     = 6; banner_style.corner_radius_top_right    = 6
-	banner_style.corner_radius_bottom_left  = 6; banner_style.corner_radius_bottom_right = 6
+	banner_style.bg_color = Color(
+		UITheme.ERROR_SOFT.r, UITheme.ERROR_SOFT.g, UITheme.ERROR_SOFT.b, 0.92
+	)
+	banner_style.border_color = UITheme.ERROR_SOFT
+	banner_style.border_width_left = 2
+	banner_style.border_width_right = 2
+	banner_style.border_width_top = 2
+	banner_style.border_width_bottom = 2
+	banner_style.content_margin_left = 18
+	banner_style.content_margin_right = 18
+	banner_style.content_margin_top = 8
+	banner_style.content_margin_bottom = 8
+	banner_style.corner_radius_top_left = 6
+	banner_style.corner_radius_top_right = 6
+	banner_style.corner_radius_bottom_left = 6
+	banner_style.corner_radius_bottom_right = 6
 	_device_warning_banner.add_theme_stylebox_override("panel", banner_style)
 
 	_device_warning_label = Label.new()
@@ -2380,35 +2497,36 @@ func _apply_layout() -> void:
 # Theme
 # ---------------------------------------------------------------------------
 
+
 func _apply_theme() -> void:
 	_bg.color = UITheme.BG
 
 	var bar_style: StyleBoxFlat = StyleBoxFlat.new()
-	bar_style.bg_color            = UITheme.PANEL_BG_GAME
-	bar_style.border_color        = UITheme.PURPLE_BRIGHT
-	bar_style.border_width_top    = 1
-	bar_style.content_margin_left  = 20
+	bar_style.bg_color = UITheme.PANEL_BG_GAME
+	bar_style.border_color = UITheme.PURPLE_BRIGHT
+	bar_style.border_width_top = 1
+	bar_style.content_margin_left = 20
 	bar_style.content_margin_right = 20
-	bar_style.content_margin_top   = 14
+	bar_style.content_margin_top = 14
 	bar_style.content_margin_bottom = 14
 	_hud_bar.add_theme_stylebox_override("panel", bar_style)
 
-	_round_lbl.add_theme_color_override("font_color",    UITheme.WHITE_SOFT)
+	_round_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	_round_lbl.add_theme_font_size_override("font_size", 13)
 	_round_lbl.uppercase = true
 
-	_score_lbl.add_theme_color_override("font_color",    UITheme.MAGENTA)
+	_score_lbl.add_theme_color_override("font_color", UITheme.MAGENTA)
 	_score_lbl.add_theme_font_size_override("font_size", 13)
 	_score_lbl.uppercase = true
 
-	_coin_lbl.add_theme_color_override("font_color",    UITheme.AMBER)
+	_coin_lbl.add_theme_color_override("font_color", UITheme.AMBER)
 	_coin_lbl.add_theme_font_size_override("font_size", 13)
 	_coin_lbl.uppercase = true
 
 	_style_progress()
-	_style_button(_pause_btn,   UITheme.PURPLE_BRIGHT)
-	_style_button(_inv_btn,     UITheme.AMBER)
-	_style_button(_menu_btn,    UITheme.MAGENTA)
+	_style_button(_pause_btn, UITheme.PURPLE_BRIGHT)
+	_style_button(_inv_btn, UITheme.AMBER)
+	_style_button(_menu_btn, UITheme.MAGENTA)
 	_style_button(_options_btn, UITheme.PURPLE_MID)
 
 
@@ -2419,21 +2537,21 @@ func _style_button(btn: Button, accent: Color) -> void:
 
 func _style_progress() -> void:
 	var bg: StyleBoxFlat = StyleBoxFlat.new()
-	bg.bg_color                  = Color(0.08, 0.0, 0.12, 0.8)
-	bg.corner_radius_top_left    = 4
-	bg.corner_radius_top_right   = 4
+	bg.bg_color = Color(0.08, 0.0, 0.12, 0.8)
+	bg.corner_radius_top_left = 4
+	bg.corner_radius_top_right = 4
 	bg.corner_radius_bottom_left = 4
 	bg.corner_radius_bottom_right = 4
 
 	var fill: StyleBoxFlat = StyleBoxFlat.new()
-	fill.bg_color                  = UITheme.PURPLE_BRIGHT
-	fill.corner_radius_top_left    = 4
-	fill.corner_radius_top_right   = 4
+	fill.bg_color = UITheme.PURPLE_BRIGHT
+	fill.corner_radius_top_left = 4
+	fill.corner_radius_top_right = 4
 	fill.corner_radius_bottom_left = 4
 	fill.corner_radius_bottom_right = 4
 
 	_progress.add_theme_stylebox_override("background", bg)
 	_progress.add_theme_stylebox_override("fill", fill)
-	_progress.min_value      = 0.0
-	_progress.max_value      = 1.0
+	_progress.min_value = 0.0
+	_progress.max_value = 1.0
 	_progress.show_percentage = false

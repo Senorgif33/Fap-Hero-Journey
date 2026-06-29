@@ -18,22 +18,22 @@ extends Node
 # reload_settings() after the Options toggle changes them.
 # ---------------------------------------------------------------------------
 
-const MIX_RATE: int  = 44100
-const POOL_SIZE: int = 6      # concurrent one-shots before the pool round-robins
-const PITCH_SCALE: float = 1.0      # 1.0 plays samples at natural pitch; <1 pitches every blip down
-const PITCH_VARIATION: float = 0.08 # ±fraction of random pitch jitter per play, so repeats don't sound identical
+const MIX_RATE: int = 44100
+const POOL_SIZE: int = 6  # concurrent one-shots before the pool round-robins
+const PITCH_SCALE: float = 1.0  # 1.0 plays samples at natural pitch; <1 pitches every blip down
+const PITCH_VARIATION: float = 0.08  # ±fraction of random pitch jitter per play, so repeats don't sound identical
 
 # Real UI click sample. Loaded if present; otherwise the synth tick is used.
 const CLICK_OGG_PATH: String = "res://assets/sfx/click.ogg"
 # Storyboard dialogue-advance sample. Falls back to the click sound if missing.
 const STORYBOARD_WAV_PATH: String = "res://assets/sfx/storyboard click.wav"
 # Event samples (silent if a file is missing — they're all imported normally).
-const ITEM_USE_WAV_PATH:      String = "res://assets/sfx/item use.wav"
-const JOURNEY_WAV_PATH:       String = "res://assets/sfx/journey click.wav"
+const ITEM_USE_WAV_PATH: String = "res://assets/sfx/item use.wav"
+const JOURNEY_WAV_PATH: String = "res://assets/sfx/journey click.wav"
 const START_JOURNEY_WAV_PATH: String = "res://assets/sfx/start journey click.wav"
 const GAME_COMPLETE_WAV_PATH: String = "res://assets/sfx/game complete.wav"
 
-var _streams: Dictionary               = {}    # kind -> AudioStreamWAV
+var _streams: Dictionary = {}  # kind -> AudioStreamWAV
 var _players: Array[AudioStreamPlayer] = []
 var _next_player: int = 0
 
@@ -41,8 +41,8 @@ var _next_player: int = 0
 # double-connected. Cleared per-button on tree_exited.
 var _wired: Dictionary = {}
 
-var _enabled: bool      = true
-var _volume_db: float   = 0.0
+var _enabled: bool = true
+var _volume_db: float = 0.0
 
 
 func _ready() -> void:
@@ -66,22 +66,51 @@ func _ready() -> void:
 
 # Re-read the enabled / volume settings (call after the Options control changes).
 func reload_settings() -> void:
-	_enabled   = SettingsService.get_ui_sound_enabled()
+	_enabled = SettingsService.get_ui_sound_enabled()
 	_volume_db = linear_to_db(clampf(SettingsService.get_ui_sound_volume(), 0.0001, 1.0))
 
 
 # ── Public play API ──────────────────────────────────────────────────────────
 
-func click() -> void:         _play("click")
-func storyboard() -> void:    _play("storyboard")
-func item_use() -> void:      _play("item_use")
-func journey() -> void:       _play("journey")
-func start_journey() -> void: _play("start_journey")
-func game_complete() -> void: _play("game_complete")
-func hover() -> void:         _play("hover")
-func confirm() -> void:       _play("confirm")
-func back() -> void:          _play("back")
-func error() -> void:         _play("error")
+
+func click() -> void:
+	_play("click")
+
+
+func storyboard() -> void:
+	_play("storyboard")
+
+
+func item_use() -> void:
+	_play("item_use")
+
+
+func journey() -> void:
+	_play("journey")
+
+
+func start_journey() -> void:
+	_play("start_journey")
+
+
+func game_complete() -> void:
+	_play("game_complete")
+
+
+func hover() -> void:
+	_play("hover")
+
+
+func confirm() -> void:
+	_play("confirm")
+
+
+func back() -> void:
+	_play("back")
+
+
+func error() -> void:
+	_play("error")
 
 
 func _play(kind: String) -> void:
@@ -92,13 +121,14 @@ func _play(kind: String) -> void:
 		return
 	var p: AudioStreamPlayer = _players[_next_player]
 	_next_player = (_next_player + 1) % _players.size()
-	p.stream       = stream
-	p.volume_db    = _volume_db
-	p.pitch_scale  = PITCH_SCALE * randf_range(1.0 - PITCH_VARIATION, 1.0 + PITCH_VARIATION)
+	p.stream = stream
+	p.volume_db = _volume_db
+	p.pitch_scale = PITCH_SCALE * randf_range(1.0 - PITCH_VARIATION, 1.0 + PITCH_VARIATION)
 	p.play()
 
 
 # ── Global button wiring ──────────────────────────────────────────────────────
+
 
 func _on_node_added(node: Node) -> void:
 	if node is BaseButton:
@@ -148,11 +178,12 @@ func _load_stream(path: String) -> AudioStream:
 
 # ── Synthesis ─────────────────────────────────────────────────────────────────
 
+
 func _build_streams() -> void:
 	# Each blip is a short tone (or note sequence) with a quick attack + decay.
 	# Frequencies are musical so they read as intentional, not beeps. Hover is
 	# quiet so a mouse sweep across a button row stays unobtrusive.
-	_streams["hover"]   = _make_blip([1046.5],                   0.045, 0.14, "sine")
+	_streams["hover"] = _make_blip([1046.5], 0.045, 0.14, "sine")
 	# Click: prefer the real sample at CLICK_OGG_PATH; fall back to the synth noise
 	# tick when it's missing or not yet imported (so the app always has UI sound).
 	var click_sample: AudioStream = _load_stream(CLICK_OGG_PATH)
@@ -166,13 +197,13 @@ func _build_streams() -> void:
 	_streams["storyboard"] = story_sample if story_sample != null else _streams["click"]
 
 	# Event samples (no fallback — a missing one is simply silent).
-	_streams["item_use"]      = _load_stream(ITEM_USE_WAV_PATH)
-	_streams["journey"]       = _load_stream(JOURNEY_WAV_PATH)
+	_streams["item_use"] = _load_stream(ITEM_USE_WAV_PATH)
+	_streams["journey"] = _load_stream(JOURNEY_WAV_PATH)
 	_streams["start_journey"] = _load_stream(START_JOURNEY_WAV_PATH)
 	_streams["game_complete"] = _load_stream(GAME_COMPLETE_WAV_PATH)
-	_streams["confirm"] = _make_blip([659.3, 987.8, 1318.5],     0.16,  0.30, "sine")
-	_streams["back"]    = _make_blip([659.3, 440.0],             0.12,  0.28, "sine")
-	_streams["error"]   = _make_blip([196.0, 185.0],             0.20,  0.30, "square")
+	_streams["confirm"] = _make_blip([659.3, 987.8, 1318.5], 0.16, 0.30, "sine")
+	_streams["back"] = _make_blip([659.3, 440.0], 0.12, 0.28, "sine")
+	_streams["error"] = _make_blip([196.0, 185.0], 0.20, 0.30, "square")
 
 
 # Renders `notes` (played in equal time slices) into a mono 16-bit AudioStreamWAV.
@@ -183,27 +214,30 @@ func _make_blip(notes: Array, duration: float, amp: float, wave: String) -> Audi
 	var data: PackedByteArray = PackedByteArray()
 	data.resize(n * 2)
 
-	var phase: float  = 0.0
-	var lp: float     = 0.0   # one-pole lowpass state (used by the "noise" wave)
-	var seg: int      = maxi(notes.size(), 1)
+	var phase: float = 0.0
+	var lp: float = 0.0  # one-pole lowpass state (used by the "noise" wave)
+	var seg: int = maxi(notes.size(), 1)
 	const ATTACK: float = 0.003
 
 	for i in n:
 		var note_idx: int = clampi(int((float(i) / float(n)) * seg), 0, seg - 1)
-		var freq: float   = float(notes[note_idx])
+		var freq: float = float(notes[note_idx])
 		phase += TAU * freq / float(MIX_RATE)
 
 		var s: float = 0.0
 		match wave:
-			"square": s = 1.0 if sin(phase) >= 0.0 else -1.0
-			"saw":    s = fmod(phase / TAU, 1.0) * 2.0 - 1.0
+			"square":
+				s = 1.0 if sin(phase) >= 0.0 else -1.0
+			"saw":
+				s = fmod(phase / TAU, 1.0) * 2.0 - 1.0
 			"noise":
 				# Neutral tick: white noise through a one-pole lowpass. For this
 				# wave the "note" is the cutoff in Hz — lower = duller/softer.
 				var alpha: float = clampf(1.0 - exp(-TAU * freq / float(MIX_RATE)), 0.0, 1.0)
 				lp += alpha * (randf_range(-1.0, 1.0) - lp)
 				s = lp
-			_:        s = sin(phase)
+			_:
+				s = sin(phase)
 
 		var tt: float = float(i) / float(MIX_RATE)
 		var env: float
@@ -213,12 +247,12 @@ func _make_blip(notes: Array, duration: float, amp: float, wave: String) -> Audi
 			env = exp(-3.5 * (tt - ATTACK) / maxf(duration - ATTACK, 0.0001))
 
 		var v: int = int(round(clampf(s * env * amp, -1.0, 1.0) * 32767.0))
-		data[i * 2]     = v & 0xFF
+		data[i * 2] = v & 0xFF
 		data[i * 2 + 1] = (v >> 8) & 0xFF
 
 	var stream: AudioStreamWAV = AudioStreamWAV.new()
-	stream.format   = AudioStreamWAV.FORMAT_16_BITS
+	stream.format = AudioStreamWAV.FORMAT_16_BITS
 	stream.mix_rate = MIX_RATE
-	stream.stereo   = false
-	stream.data     = data
+	stream.stereo = false
+	stream.data = data
 	return stream

@@ -5,24 +5,24 @@ signal map_requested  # player tapped the header "◇ MAP" button (GameLoop owns
 
 const DEFAULT_COUNT: int = 3
 
-@onready var _backdrop:   ColorRect      = $Backdrop
-@onready var _panel:      PanelContainer = $Panel
-@onready var _vbox:       VBoxContainer  = $Panel/VBox
-@onready var _header:     HBoxContainer  = $Panel/VBox/HeaderRow
-@onready var _title:      Label          = $Panel/VBox/HeaderRow/Title
+@onready var _backdrop: ColorRect = $Backdrop
+@onready var _panel: PanelContainer = $Panel
+@onready var _vbox: VBoxContainer = $Panel/VBox
+@onready var _header: HBoxContainer = $Panel/VBox/HeaderRow
+@onready var _title: Label = $Panel/VBox/HeaderRow/Title
 @onready var _coin_badge: PanelContainer = $Panel/VBox/HeaderRow/CoinBadge
-@onready var _coin_lbl:   Label          = $Panel/VBox/HeaderRow/CoinBadge/CoinLabel
-@onready var _subtitle:   Label          = $Panel/VBox/Subtitle
-@onready var _cards_row:  HBoxContainer  = $Panel/VBox/CardsRow
-@onready var _continue:   Button         = $Panel/VBox/FooterRow/ContinueButton
+@onready var _coin_lbl: Label = $Panel/VBox/HeaderRow/CoinBadge/CoinLabel
+@onready var _subtitle: Label = $Panel/VBox/Subtitle
+@onready var _cards_row: HBoxContainer = $Panel/VBox/CardsRow
+@onready var _continue: Button = $Panel/VBox/FooterRow/ContinueButton
 
 var _offered_ids: Array = []
-var _purchased:   Dictionary = {}  # id -> true
-var _price_mult:  float = 1.0      # per-shop price multiplier from journey config
+var _purchased: Dictionary = {}  # id -> true
+var _price_mult: float = 1.0  # per-shop price multiplier from journey config
 
 # Wrapping grid that replaces the scene's fixed 3-wide CardsRow at runtime so a
 # shop can offer any number of items (built in _apply_layout).
-var _cards_flow:  HFlowContainer = null
+var _cards_flow: HFlowContainer = null
 
 var show_map_button: bool = true  # GameLoop clears this when the journey hides the map
 
@@ -56,17 +56,18 @@ func _add_map_button() -> void:
 
 func _animate_in() -> void:
 	_backdrop.modulate.a = 0.0
-	_panel.modulate.a    = 0.0
-	_panel.scale         = Vector2(0.88, 0.88)
+	_panel.modulate.a = 0.0
+	_panel.scale = Vector2(0.88, 0.88)
 	# Wait one frame so the panel has a real size before we set pivot_offset.
 	await get_tree().process_frame
 	_panel.pivot_offset = _panel.size / 2.0
 
 	var tween: Tween = create_tween().set_parallel(true)
 	tween.tween_property(_backdrop, "modulate:a", 1.0, 0.20).set_ease(Tween.EASE_OUT)
-	tween.tween_property(_panel,    "modulate:a", 1.0, 0.22).set_ease(Tween.EASE_OUT)
-	tween.tween_property(_panel,    "scale",      Vector2.ONE, 0.32) \
-		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+	tween.tween_property(_panel, "modulate:a", 1.0, 0.22).set_ease(Tween.EASE_OUT)
+	tween.tween_property(_panel, "scale", Vector2.ONE, 0.32).set_ease(Tween.EASE_OUT).set_trans(
+		Tween.TRANS_BACK
+	)
 
 
 # Called by GameLoop after add_child. The shop_data dict comes from
@@ -104,8 +105,13 @@ func _animate_card_in(card: Control, delay: float) -> void:
 	card.scale = Vector2(0.92, 0.92)
 	var tween: Tween = create_tween().set_parallel(true)
 	tween.tween_property(card, "modulate:a", 1.0, 0.22).set_delay(delay)
-	tween.tween_property(card, "scale", Vector2.ONE, 0.30) \
-		.set_delay(delay).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+	(
+		tween
+		. tween_property(card, "scale", Vector2.ONE, 0.30)
+		. set_delay(delay)
+		. set_ease(Tween.EASE_OUT)
+		. set_trans(Tween.TRANS_BACK)
+	)
 
 
 # Quick scale "pop" used as purchase feedback.
@@ -113,8 +119,9 @@ func _pulse_card(card: Control) -> void:
 	card.pivot_offset = card.size / 2.0
 	var tween: Tween = create_tween()
 	tween.tween_property(card, "scale", Vector2(1.06, 1.06), 0.10).set_ease(Tween.EASE_OUT)
-	tween.tween_property(card, "scale", Vector2.ONE, 0.16) \
-		.set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_CUBIC)
+	tween.tween_property(card, "scale", Vector2.ONE, 0.16).set_ease(Tween.EASE_IN_OUT).set_trans(
+		Tween.TRANS_CUBIC
+	)
 
 
 # Brief scale tick on the coin badge whenever the balance changes.
@@ -122,8 +129,12 @@ func _pulse_coin_badge() -> void:
 	_coin_badge.pivot_offset = _coin_badge.size / 2.0
 	var tween: Tween = create_tween()
 	tween.tween_property(_coin_badge, "scale", Vector2(1.12, 1.12), 0.09).set_ease(Tween.EASE_OUT)
-	tween.tween_property(_coin_badge, "scale", Vector2.ONE, 0.14) \
-		.set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_CUBIC)
+	(
+		tween
+		. tween_property(_coin_badge, "scale", Vector2.ONE, 0.14)
+		. set_ease(Tween.EASE_IN_OUT)
+		. set_trans(Tween.TRANS_CUBIC)
+	)
 
 
 # Resolves which item ids to display from the shop's authored config.
@@ -153,6 +164,7 @@ func _price_of(data: Dictionary) -> int:
 # Item cards
 # --------------------------------------------------------------------------
 
+
 func _make_card(id: String, data: Dictionary) -> Control:
 	# Fixed card size — the HFlowContainer wraps cards into rows at this size.
 	var card: PanelContainer = PanelContainer.new()
@@ -160,9 +172,9 @@ func _make_card(id: String, data: Dictionary) -> Control:
 	card.add_theme_stylebox_override("panel", _card_stylebox(false))
 
 	var inner: MarginContainer = MarginContainer.new()
-	inner.add_theme_constant_override("margin_left",   16)
-	inner.add_theme_constant_override("margin_right",  16)
-	inner.add_theme_constant_override("margin_top",    14)
+	inner.add_theme_constant_override("margin_left", 16)
+	inner.add_theme_constant_override("margin_right", 16)
+	inner.add_theme_constant_override("margin_top", 14)
 	inner.add_theme_constant_override("margin_bottom", 14)
 	card.add_child(inner)
 
@@ -307,27 +319,26 @@ func _on_continue_pressed() -> void:
 	# is opaque (don't fade the backdrop out or self-free, or the play area
 	# behind would flash before the fade covers it).
 	var tween: Tween = create_tween().set_parallel(true)
-	tween.tween_property(_panel, "scale",      Vector2(0.92, 0.92), 0.16).set_ease(Tween.EASE_IN)
+	tween.tween_property(_panel, "scale", Vector2(0.92, 0.92), 0.16).set_ease(Tween.EASE_IN)
 	tween.tween_property(_panel, "modulate:a", 0.0, 0.16).set_ease(Tween.EASE_IN)
-	tween.chain().tween_callback(func() -> void:
-		emit_signal("closed")
-	)
+	tween.chain().tween_callback(func() -> void: emit_signal("closed"))
 
 
 # --------------------------------------------------------------------------
 # Layout
 # --------------------------------------------------------------------------
 
+
 func _apply_layout() -> void:
-	anchor_right  = 1.0
+	anchor_right = 1.0
 	anchor_bottom = 1.0
 
-	_backdrop.anchor_right  = 1.0
+	_backdrop.anchor_right = 1.0
 	_backdrop.anchor_bottom = 1.0
 
-	_panel.anchor_left   = 0.07
-	_panel.anchor_right  = 0.93
-	_panel.anchor_top    = 0.08
+	_panel.anchor_left = 0.07
+	_panel.anchor_right = 0.93
+	_panel.anchor_top = 0.08
 	_panel.anchor_bottom = 0.92
 
 	_vbox.add_theme_constant_override("separation", 18)
@@ -337,8 +348,8 @@ func _apply_layout() -> void:
 	# wrapping grid so the shop can present any number of item cards.
 	var cards_scroll: ScrollContainer = ScrollContainer.new()
 	cards_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	cards_scroll.size_flags_horizontal  = Control.SIZE_EXPAND_FILL
-	cards_scroll.size_flags_vertical    = Control.SIZE_EXPAND_FILL
+	cards_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cards_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	_cards_flow = HFlowContainer.new()
 	_cards_flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -357,20 +368,21 @@ func _apply_layout() -> void:
 # Theme
 # --------------------------------------------------------------------------
 
+
 func _apply_theme() -> void:
 	# Panel: cyberpunk-rundown — magenta border with amber accent edges.
 	var panel_style: StyleBoxFlat = StyleBoxFlat.new()
 	panel_style.bg_color = UITheme.PANEL_BG_SHOP
-	panel_style.border_color        = UITheme.MAGENTA
-	panel_style.border_width_left   = 1
-	panel_style.border_width_right  = 1
-	panel_style.border_width_top    = 3
+	panel_style.border_color = UITheme.MAGENTA
+	panel_style.border_width_left = 1
+	panel_style.border_width_right = 1
+	panel_style.border_width_top = 3
 	panel_style.border_width_bottom = 3
 	panel_style.shadow_color = Color(UITheme.MAGENTA.r, UITheme.MAGENTA.g, UITheme.MAGENTA.b, 0.45)
-	panel_style.shadow_size  = 24
-	panel_style.content_margin_left   = 28
-	panel_style.content_margin_right  = 28
-	panel_style.content_margin_top    = 22
+	panel_style.shadow_size = 24
+	panel_style.content_margin_left = 28
+	panel_style.content_margin_right = 28
+	panel_style.content_margin_top = 22
 	panel_style.content_margin_bottom = 22
 	_panel.add_theme_stylebox_override("panel", panel_style)
 
@@ -380,15 +392,15 @@ func _apply_theme() -> void:
 
 	# Coin badge
 	var coin_style: StyleBoxFlat = StyleBoxFlat.new()
-	coin_style.bg_color            = Color(UITheme.AMBER.r, UITheme.AMBER.g, UITheme.AMBER.b, 0.10)
-	coin_style.border_color        = UITheme.AMBER
-	coin_style.border_width_left   = 1
-	coin_style.border_width_right  = 1
-	coin_style.border_width_top    = 1
+	coin_style.bg_color = Color(UITheme.AMBER.r, UITheme.AMBER.g, UITheme.AMBER.b, 0.10)
+	coin_style.border_color = UITheme.AMBER
+	coin_style.border_width_left = 1
+	coin_style.border_width_right = 1
+	coin_style.border_width_top = 1
 	coin_style.border_width_bottom = 1
-	coin_style.content_margin_left   = 14
-	coin_style.content_margin_right  = 14
-	coin_style.content_margin_top    = 6
+	coin_style.content_margin_left = 14
+	coin_style.content_margin_right = 14
+	coin_style.content_margin_top = 6
 	coin_style.content_margin_bottom = 6
 	_coin_badge.add_theme_stylebox_override("panel", coin_style)
 	_coin_lbl.add_theme_color_override("font_color", UITheme.AMBER)
@@ -404,14 +416,14 @@ func _apply_theme() -> void:
 func _card_stylebox(owned: bool) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = UITheme.CARD_BG_DIM if owned else UITheme.CARD_BG
-	s.border_color        = UITheme.TOXIC_GREEN if owned else UITheme.PURPLE_MID
-	s.border_width_left   = 1
-	s.border_width_right  = 1
-	s.border_width_top    = 1
+	s.border_color = UITheme.TOXIC_GREEN if owned else UITheme.PURPLE_MID
+	s.border_width_left = 1
+	s.border_width_right = 1
+	s.border_width_top = 1
 	s.border_width_bottom = 2
-	s.content_margin_left   = 0
-	s.content_margin_right  = 0
-	s.content_margin_top    = 0
+	s.content_margin_left = 0
+	s.content_margin_right = 0
+	s.content_margin_top = 0
 	s.content_margin_bottom = 0
 	return s
 

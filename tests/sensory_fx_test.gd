@@ -24,8 +24,11 @@ func test_ival_inverted_range() -> void:
 	var roll := {"imin": 160.0, "imax": 30.0}  # pixelate: fewer blocks = stronger
 	assert_float(fx._ival(roll, 0.0)).is_equal_approx(160.0, EPS)
 	assert_float(fx._ival(roll, 1.0)).is_equal_approx(30.0, EPS)
-	assert_bool(fx._ival(roll, 1.0) < fx._ival(roll, 0.0)) \
-		.override_failure_message("higher intensity should map to lower value").is_true()
+	(
+		assert_bool(fx._ival(roll, 1.0) < fx._ival(roll, 0.0))
+		. override_failure_message("higher intensity should map to lower value")
+		. is_true()
+	)
 
 
 # Intensity is clamped to 0–1 before mapping.
@@ -45,13 +48,25 @@ func test_ival_missing_fields() -> void:
 # intensity_for: author override on the round wins; otherwise the catalog default.
 func test_intensity_for_override_and_default() -> void:
 	var entry := {"name": "Bleary", "idef": 0.3}
-	assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Bleary": 0.8}}, entry)).is_equal_approx(0.8, EPS)
+	(
+		assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Bleary": 0.8}}, entry))
+		. is_equal_approx(0.8, EPS)
+	)
 	assert_float(SensoryFX.intensity_for({}, entry)).is_equal_approx(0.3, EPS)
-	assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Other": 0.9}}, entry)).is_equal_approx(0.3, EPS)
+	(
+		assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Other": 0.9}}, entry))
+		. is_equal_approx(0.3, EPS)
+	)
 
 
 # A stored override outside 0–1 is clamped.
 func test_intensity_for_clamps_override() -> void:
 	var entry := {"name": "Murk", "idef": 0.5}
-	assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Murk": 5.0}}, entry)).is_equal_approx(1.0, EPS)
-	assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Murk": -2.0}}, entry)).is_equal_approx(0.0, EPS)
+	(
+		assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Murk": 5.0}}, entry))
+		. is_equal_approx(1.0, EPS)
+	)
+	(
+		assert_float(SensoryFX.intensity_for({"sensory_intensity": {"Murk": -2.0}}, entry))
+		. is_equal_approx(0.0, EPS)
+	)

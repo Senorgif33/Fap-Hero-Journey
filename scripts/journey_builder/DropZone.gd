@@ -10,8 +10,8 @@ extends PanelContainer
 signal file_dropped(path: String)
 
 var accepted_extensions: Array = []
-var picker_title:        String = "Select File"
-var picker_filters:      Array  = ["*.* ; All Files"]
+var picker_title: String = "Select File"
+var picker_filters: Array = ["*.* ; All Files"]
 
 var _placeholder: String = "Drop here or browse"
 var _current_path: String = ""
@@ -21,7 +21,7 @@ var _browse_btn: Button
 
 func _ready() -> void:
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	mouse_filter          = Control.MOUSE_FILTER_STOP
+	mouse_filter = Control.MOUSE_FILTER_STOP
 
 	var hbox: HBoxContainer = HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 6)
@@ -29,7 +29,7 @@ func _ready() -> void:
 
 	_label = Label.new()
 	_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_label.clip_text             = true
+	_label.clip_text = true
 	_label.add_theme_font_size_override("font_size", 11)
 	_label.text = _current_path.get_file() if _current_path != "" else _placeholder
 	hbox.add_child(_label)
@@ -57,23 +57,25 @@ func _exit_tree() -> void:
 
 # --- Drag & drop (Godot internal + some OS DnD paths) ---
 
+
 func _can_drop_data(_pos: Vector2, data: Variant) -> bool:
 	if typeof(data) != TYPE_DICTIONARY or data.get("type") != "files":
 		return false
-	for f: String in (data.get("files", PackedStringArray()) as PackedStringArray):
+	for f: String in data.get("files", PackedStringArray()) as PackedStringArray:
 		if f.get_extension().to_lower() in accepted_extensions:
 			return true
 	return false
 
 
 func _drop_data(_pos: Vector2, data: Variant) -> void:
-	for f: String in (data.get("files", PackedStringArray()) as PackedStringArray):
+	for f: String in data.get("files", PackedStringArray()) as PackedStringArray:
 		if f.get_extension().to_lower() in accepted_extensions:
 			set_file(f)
 			return
 
 
 # --- OS DnD fallback via viewport ---
+
 
 func _on_viewport_files_dropped(files: PackedStringArray) -> void:
 	if not is_visible_in_tree():
@@ -87,6 +89,7 @@ func _on_viewport_files_dropped(files: PackedStringArray) -> void:
 
 
 # --- Public API ---
+
 
 # Sets the displayed file. `emit` should be false when only redisplaying an
 # already-stored path on a panel rebuild — otherwise the file_dropped handler
@@ -110,61 +113,65 @@ func clear() -> void:
 
 # --- Browse button ---
 
+
 func _on_browse_pressed() -> void:
 	var dialog: FileDialog = FileDialog.new()
-	dialog.access    = FileDialog.ACCESS_FILESYSTEM
+	dialog.access = FileDialog.ACCESS_FILESYSTEM
 	dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-	dialog.filters   = picker_filters
-	dialog.title     = picker_title
+	dialog.filters = picker_filters
+	dialog.title = picker_title
 	get_tree().root.add_child(dialog)
 	dialog.popup_centered(Vector2i(900, 600))
-	dialog.file_selected.connect(func(path: String) -> void:
-		set_file(path)
-		dialog.queue_free()
+	dialog.file_selected.connect(
+		func(path: String) -> void:
+			set_file(path)
+			dialog.queue_free()
 	)
 	dialog.canceled.connect(func() -> void: dialog.queue_free())
 
 
 # --- Style ---
 
+
 func _update_style() -> void:
 	var filled: bool = _current_path != ""
 
-	var s: StyleBoxFlat   = StyleBoxFlat.new()
-	s.bg_color            = UITheme.PURPLE_DARK if filled else UITheme.PANEL_BG
-	s.border_color        = UITheme.PURPLE_BRIGHT if filled else UITheme.PURPLE_MID
-	s.border_width_left   = 2
-	s.border_width_right  = 2
-	s.border_width_top    = 2
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color = UITheme.PURPLE_DARK if filled else UITheme.PANEL_BG
+	s.border_color = UITheme.PURPLE_BRIGHT if filled else UITheme.PURPLE_MID
+	s.border_width_left = 2
+	s.border_width_right = 2
+	s.border_width_top = 2
 	s.border_width_bottom = 2
-	s.content_margin_left   = 8
-	s.content_margin_right  = 6
-	s.content_margin_top    = 6
+	s.content_margin_left = 8
+	s.content_margin_right = 6
+	s.content_margin_top = 6
 	s.content_margin_bottom = 6
 	add_theme_stylebox_override("panel", s)
 
 	if _label:
-		_label.add_theme_color_override("font_color",
-			UITheme.WHITE_SOFT if filled else UITheme.PURPLE_MID)
+		_label.add_theme_color_override(
+			"font_color", UITheme.WHITE_SOFT if filled else UITheme.PURPLE_MID
+		)
 
 	if _browse_btn:
-		var bs: StyleBoxFlat   = StyleBoxFlat.new()
-		bs.bg_color            = UITheme.PURPLE_DARK
-		bs.border_color        = UITheme.PURPLE_MID
-		bs.border_width_left   = 1
-		bs.border_width_right  = 1
-		bs.border_width_top    = 1
+		var bs: StyleBoxFlat = StyleBoxFlat.new()
+		bs.bg_color = UITheme.PURPLE_DARK
+		bs.border_color = UITheme.PURPLE_MID
+		bs.border_width_left = 1
+		bs.border_width_right = 1
+		bs.border_width_top = 1
 		bs.border_width_bottom = 1
-		bs.content_margin_left   = 4
-		bs.content_margin_right  = 4
-		bs.content_margin_top    = 2
+		bs.content_margin_left = 4
+		bs.content_margin_right = 4
+		bs.content_margin_top = 2
 		bs.content_margin_bottom = 2
 		bs.set_corner_radius_all(UITheme.CORNER_RADIUS)
-		_browse_btn.add_theme_stylebox_override("normal",   bs)
-		_browse_btn.add_theme_stylebox_override("focus",    StyleBoxEmpty.new())
+		_browse_btn.add_theme_stylebox_override("normal", bs)
+		_browse_btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 		var bs_h: StyleBoxFlat = bs.duplicate()
 		bs_h.border_color = UITheme.PURPLE_BRIGHT
-		_browse_btn.add_theme_stylebox_override("hover",    bs_h)
-		_browse_btn.add_theme_stylebox_override("pressed",  bs_h)
-		_browse_btn.add_theme_color_override("font_color",       UITheme.PURPLE_BRIGHT)
+		_browse_btn.add_theme_stylebox_override("hover", bs_h)
+		_browse_btn.add_theme_stylebox_override("pressed", bs_h)
+		_browse_btn.add_theme_color_override("font_color", UITheme.PURPLE_BRIGHT)
 		_browse_btn.add_theme_color_override("font_hover_color", UITheme.WHITE_SOFT)

@@ -10,9 +10,9 @@ var lo: float = 0.0
 ## Current high-end clamp value (0–100).
 var hi: float = 100.0
 
-const HANDLE_R:  float = 8.0   # handle circle radius
-const TRACK_H:   float = 5.0   # track rect height
-const LABEL_GAP: int   = 4     # px gap between handle bottom and value label
+const HANDLE_R: float = 8.0  # handle circle radius
+const TRACK_H: float = 5.0  # track rect height
+const LABEL_GAP: int = 4  # px gap between handle bottom and value label
 
 var _drag: int = -1  # 0 = lo handle, 1 = hi handle
 var _lo_lbl: Label = null
@@ -46,18 +46,32 @@ func set_range_values(new_lo: float, new_hi: float) -> void:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-func _track_start() -> float: return HANDLE_R
-func _track_end()   -> float: return size.x - HANDLE_R
-func _track_len()   -> float: return _track_end() - _track_start()
-func _cy()          -> float: return HANDLE_R
+
+func _track_start() -> float:
+	return HANDLE_R
+
+
+func _track_end() -> float:
+	return size.x - HANDLE_R
+
+
+func _track_len() -> float:
+	return _track_end() - _track_start()
+
+
+func _cy() -> float:
+	return HANDLE_R
+
 
 func _val_to_x(v: float) -> float:
 	return _track_start() + v / 100.0 * _track_len()
+
 
 func _x_to_val(x: float) -> float:
 	if _track_len() <= 0.0:
 		return 0.0
 	return clampf((x - _track_start()) / _track_len() * 100.0, 0.0, 100.0)
+
 
 func _update() -> void:
 	if _lo_lbl == null:
@@ -70,10 +84,10 @@ func _update() -> void:
 func _draw() -> void:
 	if size.x <= 0:
 		return
-	var cy: float     = _cy()
-	var ty: float     = cy - TRACK_H * 0.5
-	var lx: float     = _val_to_x(lo)
-	var hx: float     = _val_to_x(hi)
+	var cy: float = _cy()
+	var ty: float = cy - TRACK_H * 0.5
+	var lx: float = _val_to_x(lo)
+	var hx: float = _val_to_x(hi)
 	var label_y: float = cy + HANDLE_R + LABEL_GAP
 
 	# Full background track

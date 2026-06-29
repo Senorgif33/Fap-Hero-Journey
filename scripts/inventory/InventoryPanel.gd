@@ -2,19 +2,19 @@ extends Control
 
 signal closed
 
-const PANEL_WIDTH: int   = 300
-const SLIDE_TIME:  float = 0.18
+const PANEL_WIDTH: int = 300
+const SLIDE_TIME: float = 0.18
 
-@onready var _backdrop:    ColorRect      = $Backdrop
-@onready var _panel:       PanelContainer = $Panel
-@onready var _vbox:        VBoxContainer  = $Panel/VBox
-@onready var _header:      HBoxContainer  = $Panel/VBox/HeaderRow
-@onready var _title:       Label          = $Panel/VBox/HeaderRow/Title
-@onready var _close_btn:   Button         = $Panel/VBox/HeaderRow/CloseButton
-@onready var _subtitle:    Label          = $Panel/VBox/Subtitle
-@onready var _empty_lbl:   Label          = $Panel/VBox/EmptyLabel
-@onready var _scroll:      ScrollContainer = $Panel/VBox/Scroll
-@onready var _item_list:   VBoxContainer  = $Panel/VBox/Scroll/ItemList
+@onready var _backdrop: ColorRect = $Backdrop
+@onready var _panel: PanelContainer = $Panel
+@onready var _vbox: VBoxContainer = $Panel/VBox
+@onready var _header: HBoxContainer = $Panel/VBox/HeaderRow
+@onready var _title: Label = $Panel/VBox/HeaderRow/Title
+@onready var _close_btn: Button = $Panel/VBox/HeaderRow/CloseButton
+@onready var _subtitle: Label = $Panel/VBox/Subtitle
+@onready var _empty_lbl: Label = $Panel/VBox/EmptyLabel
+@onready var _scroll: ScrollContainer = $Panel/VBox/Scroll
+@onready var _item_list: VBoxContainer = $Panel/VBox/Scroll/ItemList
 
 # True while an activation animation is playing — blocks further card clicks
 # until the inventory list rebuilds (cleared in _refresh).
@@ -59,6 +59,7 @@ func _slide_in() -> void:
 # Item list
 # --------------------------------------------------------------------------
 
+
 func _refresh() -> void:
 	_activating = false
 	for child in _item_list.get_children():
@@ -66,7 +67,7 @@ func _refresh() -> void:
 
 	var items: Array = InventoryService.GetItems()
 	_empty_lbl.visible = items.is_empty()
-	_scroll.visible    = not items.is_empty()
+	_scroll.visible = not items.is_empty()
 
 	for i in items.size():
 		var data: Dictionary = items[i]
@@ -81,9 +82,9 @@ func _make_item_row(slot_idx: int, data: Dictionary) -> Control:
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
 	var margin: MarginContainer = MarginContainer.new()
-	margin.add_theme_constant_override("margin_left",   14)
-	margin.add_theme_constant_override("margin_right",  14)
-	margin.add_theme_constant_override("margin_top",    10)
+	margin.add_theme_constant_override("margin_left", 14)
+	margin.add_theme_constant_override("margin_right", 14)
+	margin.add_theme_constant_override("margin_top", 10)
 	margin.add_theme_constant_override("margin_bottom", 10)
 	card.add_child(margin)
 
@@ -140,11 +141,11 @@ func _make_item_row(slot_idx: int, data: Dictionary) -> Control:
 func _class_info(kind: String) -> Dictionary:
 	match kind:
 		"score_multiplier", "coin_jackpot":
-			return {"label": "BUFF",     "color": UITheme.TOXIC_GREEN, "glyph": "▲"}
+			return {"label": "BUFF", "color": UITheme.TOXIC_GREEN, "glyph": "▲"}
 		"block", "blackout":
-			return {"label": "DEBUFF",   "color": UITheme.ERROR_SOFT,  "glyph": "▼"}
+			return {"label": "DEBUFF", "color": UITheme.ERROR_SOFT, "glyph": "▼"}
 		_:
-			return {"label": "MODIFIER", "color": UITheme.AMBER,       "glyph": "◆"}
+			return {"label": "MODIFIER", "color": UITheme.AMBER, "glyph": "◆"}
 
 
 func _set_mouse_filter_recursive(node: Node, filter: int) -> void:
@@ -178,8 +179,13 @@ func _activate_card(card: Control, use_lbl: Label, slot_idx: int) -> void:
 	tw.tween_property(card, "modulate", Color(1.8, 1.8, 1.8, 1.0), 0.09)
 	# Slide right + fade out together.
 	tw.tween_property(card, "modulate:a", 0.0, 0.24).set_ease(Tween.EASE_IN)
-	tw.parallel().tween_property(card, "position:x", card.position.x + 90.0, 0.24) \
-		.set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_CUBIC)
+	(
+		tw
+		. parallel()
+		. tween_property(card, "position:x", card.position.x + 90.0, 0.24)
+		. set_ease(Tween.EASE_IN)
+		. set_trans(Tween.TRANS_CUBIC)
+	)
 	# Activate once the card has visually left — InventoryChanged → _refresh().
 	tw.tween_callback(func() -> void: InventoryService.ActivateItem(slot_idx))
 
@@ -188,21 +194,22 @@ func _activate_card(card: Control, use_lbl: Label, slot_idx: int) -> void:
 # Layout / theme
 # --------------------------------------------------------------------------
 
+
 func _apply_layout() -> void:
-	anchor_right  = 1.0
+	anchor_right = 1.0
 	anchor_bottom = 1.0
 
-	_backdrop.anchor_right  = 1.0
+	_backdrop.anchor_right = 1.0
 	_backdrop.anchor_bottom = 1.0
 
 	# Panel: anchored to the right edge, full height.
-	_panel.anchor_left   = 1.0
-	_panel.anchor_top    = 0.0
-	_panel.anchor_right  = 1.0
+	_panel.anchor_left = 1.0
+	_panel.anchor_top = 0.0
+	_panel.anchor_right = 1.0
 	_panel.anchor_bottom = 1.0
-	_panel.offset_left   = -PANEL_WIDTH
-	_panel.offset_right  = 0
-	_panel.offset_top    = 0
+	_panel.offset_left = -PANEL_WIDTH
+	_panel.offset_right = 0
+	_panel.offset_top = 0
 	_panel.offset_bottom = 0
 	_panel.custom_minimum_size = Vector2(PANEL_WIDTH, 0)
 
@@ -214,11 +221,11 @@ func _apply_layout() -> void:
 func _apply_theme() -> void:
 	var panel_style: StyleBoxFlat = StyleBoxFlat.new()
 	panel_style.bg_color = UITheme.PANEL_BG_DEEP
-	panel_style.border_color        = UITheme.PURPLE_BRIGHT
-	panel_style.border_width_left   = 3
-	panel_style.content_margin_left   = 18
-	panel_style.content_margin_right  = 18
-	panel_style.content_margin_top    = 18
+	panel_style.border_color = UITheme.PURPLE_BRIGHT
+	panel_style.border_width_left = 3
+	panel_style.content_margin_left = 18
+	panel_style.content_margin_right = 18
+	panel_style.content_margin_top = 18
 	panel_style.content_margin_bottom = 18
 	_panel.add_theme_stylebox_override("panel", panel_style)
 
@@ -242,14 +249,14 @@ func _apply_theme() -> void:
 func _row_stylebox(accent: Color) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = UITheme.CARD_BG
-	s.border_color        = accent
-	s.border_width_left   = 4
-	s.border_width_right  = 1
-	s.border_width_top    = 1
+	s.border_color = accent
+	s.border_width_left = 4
+	s.border_width_right = 1
+	s.border_width_top = 1
 	s.border_width_bottom = 1
-	s.corner_radius_top_left     = 4
-	s.corner_radius_top_right    = 4
-	s.corner_radius_bottom_left  = 4
+	s.corner_radius_top_left = 4
+	s.corner_radius_top_right = 4
+	s.corner_radius_bottom_left = 4
 	s.corner_radius_bottom_right = 4
 	return s
 

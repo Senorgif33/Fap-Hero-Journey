@@ -31,7 +31,9 @@ static func weighted_pick(weights: Array, r: int) -> int:
 #   metric "score"/"coins" → highest threshold `value` meets wins (ties → earliest), else default.
 # `value` is the score or coin balance (caller picks which by metric). `is_owned`
 # is a Callable(String) -> bool. `default_path` is clamped into range.
-static func conditional_path(paths: Array, metric: String, default_path: int, value: int, is_owned: Callable) -> int:
+static func conditional_path(
+	paths: Array, metric: String, default_path: int, value: int, is_owned: Callable
+) -> int:
 	if paths.is_empty():
 		return 0
 	var default_idx: int = clampi(default_path, 0, paths.size() - 1)
@@ -64,7 +66,9 @@ static func conditional_path(paths: Array, metric: String, default_path: int, va
 # Sacrifice gating: can the player afford this path? Affordable when its coin cost
 # is met (cost <= 0 or coins >= cost) AND its required item is owned (or none).
 # `is_owned` is a Callable(String) -> bool.
-static func path_affordable(cost: int, required_item: String, coins: int, is_owned: Callable) -> bool:
+static func path_affordable(
+	cost: int, required_item: String, coins: int, is_owned: Callable
+) -> bool:
 	if cost > 0 and coins < cost:
 		return false
 	if required_item != "" and not is_owned.call(required_item):

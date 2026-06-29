@@ -7,13 +7,13 @@ extends Control
 
 signal closed
 
-const PANEL_WIDTH: int   = 320
-const SLIDE_TIME:  float = 0.18
+const PANEL_WIDTH: int = 320
+const SLIDE_TIME: float = 0.18
 
-var _panel:           PanelContainer = null
-var _range_slider:    RangeSlider    = null
-var _delay_slider:    HSlider        = null
-var _delay_value_lbl: Label          = null
+var _panel: PanelContainer = null
+var _range_slider: RangeSlider = null
+var _delay_slider: HSlider = null
+var _delay_value_lbl: Label = null
 
 
 func _ready() -> void:
@@ -98,7 +98,14 @@ func _build() -> void:
 	_delay_value_lbl.add_theme_font_size_override("font_size", 11)
 	vb.add_child(_delay_value_lbl)
 
-	vb.add_child(_hint_label("Shifts the funscript relative to the video for device/Bluetooth lag. Positive = device acts earlier."))
+	(
+		vb
+		. add_child(
+			_hint_label(
+				"Shifts the funscript relative to the video for device/Bluetooth lag. Positive = device acts earlier."
+			)
+		)
+	)
 
 
 func _section_label(text: String) -> Label:
@@ -120,6 +127,7 @@ func _hint_label(text: String) -> Label:
 
 # ── Apply (persist + push to the player live; same settings as Options) ────────
 
+
 func _on_range_changed(lo: float, hi: float) -> void:
 	SettingsService.set_range_min(int(lo))
 	SettingsService.set_range_max(int(hi))
@@ -138,20 +146,23 @@ func _on_delay_changed(v: float) -> void:
 func nudge_range(d_min: int, d_max: int) -> void:
 	var lo: int = clampi(int(_range_slider.lo) + d_min, 0, 99)
 	var hi: int = clampi(int(_range_slider.hi) + d_max, lo + 1, 100)
-	_range_slider.set_range_values(lo, hi)   # moves handles without re-emitting
+	_range_slider.set_range_values(lo, hi)  # moves handles without re-emitting
 	_on_range_changed(lo, hi)
 
 
 # Re-read the sliders from settings (e.g. after the full Options screen changed them while this is open).
 func resync() -> void:
 	if _range_slider != null:
-		_range_slider.set_range_values(SettingsService.get_range_min(), SettingsService.get_range_max())
+		_range_slider.set_range_values(
+			SettingsService.get_range_min(), SettingsService.get_range_max()
+		)
 	if _delay_slider != null:
 		_delay_slider.set_value_no_signal(SettingsService.get_latency_offset_ms())
 		_delay_value_lbl.text = "%d ms" % SettingsService.get_latency_offset_ms()
 
 
 # ── Slide animation (mirrors InventoryPanel) ───────────────────────────────────
+
 
 func close() -> void:
 	emit_signal("closed")

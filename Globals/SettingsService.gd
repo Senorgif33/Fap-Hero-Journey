@@ -20,37 +20,37 @@ extends Node
 const SETTINGS_PATH: String = "user://settings.cfg"
 
 # ── Canonical defaults ──────────────────────────────────────────────────────
-const DEFAULT_MASTER_VOLUME:     float  = 1.0
-const DEFAULT_MUSIC_VOLUME:      float  = 0.5
-const DEFAULT_FULLSCREEN:        bool   = false
-const DEFAULT_RESOLUTION_INDEX:  int    = 1
-const DEFAULT_INTIFACE_ADDRESS:  String = "ws://localhost:12345"
-const DEFAULT_INTIFACE_AUTO:     bool   = true
-const DEFAULT_SELECTED_DEVICE:   String = ""
-const DEFAULT_OUTPUT_MODE:       String = "buttplug"
-const DEFAULT_SERIAL_PORT:       String = ""
-const DEFAULT_SERIAL_BAUD:       int    = 115200
-const DEFAULT_SERIAL_AUTO:       bool   = false
-const DEFAULT_RANGE_MIN:         int    = 0
-const DEFAULT_RANGE_MAX:         int    = 100
-const DEFAULT_HOME_POSITION:     int    = 50
-const DEFAULT_HOME_EASE_MS:      int    = 2000
-const DEFAULT_LATENCY_OFFSET_MS: int    = 0
-const DEFAULT_VIBE_INTENSITY:    int    = 100
-const DEFAULT_MAX_STROKE_SPEED:  int    = 0     # 0 = unlimited (units/sec)
-const DEFAULT_HUD_HIDE_DELAY:    float  = 3.0   # seconds
-const DEFAULT_UI_SCALE:          float  = 1.0   # Window.content_scale_factor multiplier
-const DEFAULT_BEAT_BAR_ENABLED:  bool   = false
-const DEFAULT_FILLER_ENABLED:    bool   = false
-const DEFAULT_FILLER_HALF_CYCLE: int    = 2000
-const DEFAULT_FILLER_LO:         int    = 0
-const DEFAULT_FILLER_HI:         int    = 100
-const DEFAULT_JOURNEYS_DIR:      String = "user://journeys"
-const DEFAULT_FFMPEG_DIR:        String = ""    # "" = bundled binary / PATH
-const DEFAULT_AUTO_TRANSCODE:    bool   = true
-const DEFAULT_UPDATE_CHECK:      bool   = true   # check GitHub for a newer build on launch
-const DEFAULT_UI_SOUND_ENABLED:  bool   = true   # click/hover feedback blips
-const DEFAULT_UI_SOUND_VOLUME:   float  = 0.6    # linear, 0–1
+const DEFAULT_MASTER_VOLUME: float = 1.0
+const DEFAULT_MUSIC_VOLUME: float = 0.5
+const DEFAULT_FULLSCREEN: bool = false
+const DEFAULT_RESOLUTION_INDEX: int = 1
+const DEFAULT_INTIFACE_ADDRESS: String = "ws://localhost:12345"
+const DEFAULT_INTIFACE_AUTO: bool = true
+const DEFAULT_SELECTED_DEVICE: String = ""
+const DEFAULT_OUTPUT_MODE: String = "buttplug"
+const DEFAULT_SERIAL_PORT: String = ""
+const DEFAULT_SERIAL_BAUD: int = 115200
+const DEFAULT_SERIAL_AUTO: bool = false
+const DEFAULT_RANGE_MIN: int = 0
+const DEFAULT_RANGE_MAX: int = 100
+const DEFAULT_HOME_POSITION: int = 50
+const DEFAULT_HOME_EASE_MS: int = 2000
+const DEFAULT_LATENCY_OFFSET_MS: int = 0
+const DEFAULT_VIBE_INTENSITY: int = 100
+const DEFAULT_MAX_STROKE_SPEED: int = 0  # 0 = unlimited (units/sec)
+const DEFAULT_HUD_HIDE_DELAY: float = 3.0  # seconds
+const DEFAULT_UI_SCALE: float = 1.0  # Window.content_scale_factor multiplier
+const DEFAULT_BEAT_BAR_ENABLED: bool = false
+const DEFAULT_FILLER_ENABLED: bool = false
+const DEFAULT_FILLER_HALF_CYCLE: int = 2000
+const DEFAULT_FILLER_LO: int = 0
+const DEFAULT_FILLER_HI: int = 100
+const DEFAULT_JOURNEYS_DIR: String = "user://journeys"
+const DEFAULT_FFMPEG_DIR: String = ""  # "" = bundled binary / PATH
+const DEFAULT_AUTO_TRANSCODE: bool = true
+const DEFAULT_UPDATE_CHECK: bool = true  # check GitHub for a newer build on launch
+const DEFAULT_UI_SOUND_ENABLED: bool = true  # click/hover feedback blips
+const DEFAULT_UI_SOUND_VOLUME: float = 0.6  # linear, 0–1
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -61,8 +61,11 @@ func _ready() -> void:
 
 	# Apply boot-time audio / display settings.
 	AudioServer.set_bus_volume_db(0, linear_to_db(get_master_volume()))
-	var mode: DisplayServer.WindowMode = DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN \
-		if get_fullscreen() else DisplayServer.WINDOW_MODE_WINDOWED
+	var mode: DisplayServer.WindowMode = (
+		DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN
+		if get_fullscreen()
+		else DisplayServer.WINDOW_MODE_WINDOWED
+	)
 	DisplayServer.window_set_mode(mode)
 
 	apply_ui_scale()
@@ -70,88 +73,116 @@ func _ready() -> void:
 
 # ── Getters ─────────────────────────────────────────────────────────────────
 
+
 func get_master_volume() -> float:
 	return float(_config.get_value("audio", "master_volume", DEFAULT_MASTER_VOLUME))
+
 
 func get_music_volume() -> float:
 	return float(_config.get_value("audio", "music_volume", DEFAULT_MUSIC_VOLUME))
 
+
 func get_fullscreen() -> bool:
 	return bool(_config.get_value("display", "fullscreen", DEFAULT_FULLSCREEN))
+
 
 func get_resolution_index() -> int:
 	return int(_config.get_value("display", "resolution_index", DEFAULT_RESOLUTION_INDEX))
 
+
 func get_intiface_address() -> String:
 	return str(_config.get_value("intiface", "address", DEFAULT_INTIFACE_ADDRESS))
+
 
 func get_intiface_auto_connect() -> bool:
 	return bool(_config.get_value("intiface", "auto_connect", DEFAULT_INTIFACE_AUTO))
 
+
 func get_selected_device() -> String:
 	return str(_config.get_value("intiface", "selected_device", DEFAULT_SELECTED_DEVICE))
+
 
 func get_output_mode() -> String:
 	return str(_config.get_value("output", "mode", DEFAULT_OUTPUT_MODE))
 
+
 func get_serial_port() -> String:
 	return str(_config.get_value("serial", "port", DEFAULT_SERIAL_PORT))
+
 
 func get_serial_baud() -> int:
 	return int(_config.get_value("serial", "baud_rate", DEFAULT_SERIAL_BAUD))
 
+
 func get_serial_auto_connect() -> bool:
 	return bool(_config.get_value("serial", "auto_connect", DEFAULT_SERIAL_AUTO))
+
 
 func get_range_min() -> int:
 	return int(_config.get_value("device", "range_min", DEFAULT_RANGE_MIN))
 
+
 func get_range_max() -> int:
 	return int(_config.get_value("device", "range_max", DEFAULT_RANGE_MAX))
+
 
 # Per-axis range for the secondary positional axes (T-code L1/L2/R0/R1/R2). Each
 # axis has its own [min,max] travel window; the stroke axis uses range_min/range_max.
 func get_axis_range_min(axis: String) -> int:
 	return int(_config.get_value("device", "axis_%s_range_min" % axis, DEFAULT_RANGE_MIN))
 
+
 func get_axis_range_max(axis: String) -> int:
 	return int(_config.get_value("device", "axis_%s_range_max" % axis, DEFAULT_RANGE_MAX))
+
 
 func get_home_position() -> int:
 	return int(_config.get_value("device", "home_position", DEFAULT_HOME_POSITION))
 
+
 func get_home_ease_ms() -> int:
 	return int(_config.get_value("device", "home_ease_ms", DEFAULT_HOME_EASE_MS))
+
 
 func get_latency_offset_ms() -> int:
 	return int(_config.get_value("device", "latency_offset_ms", DEFAULT_LATENCY_OFFSET_MS))
 
+
 func get_vibe_intensity() -> int:
 	return int(_config.get_value("device", "vibe_intensity", DEFAULT_VIBE_INTENSITY))
+
 
 func get_max_stroke_speed() -> int:
 	return int(_config.get_value("device", "max_stroke_speed", DEFAULT_MAX_STROKE_SPEED))
 
+
 func get_hud_hide_delay() -> float:
 	return float(_config.get_value("display", "hud_hide_delay", DEFAULT_HUD_HIDE_DELAY))
+
 
 func get_ui_scale() -> float:
 	return float(_config.get_value("display", "ui_scale", DEFAULT_UI_SCALE))
 
+
 func get_beat_bar_enabled() -> bool:
 	return bool(_config.get_value("display", "beat_bar_enabled", DEFAULT_BEAT_BAR_ENABLED))
+
 
 func get_filler_enabled() -> bool:
 	return bool(_config.get_value("storyboard_filler", "enabled", DEFAULT_FILLER_ENABLED))
 
+
 func get_filler_half_cycle_ms() -> int:
 	return int(_config.get_value("storyboard_filler", "half_cycle_ms", DEFAULT_FILLER_HALF_CYCLE))
+
 
 func get_filler_lo() -> int:
 	return int(_config.get_value("storyboard_filler", "lo", DEFAULT_FILLER_LO))
 
+
 func get_filler_hi() -> int:
 	return int(_config.get_value("storyboard_filler", "hi", DEFAULT_FILLER_HI))
+
 
 # Root folder for journey content. Either the default Godot user-data path
 # (`user://journeys`) or an OS-absolute path the user picked via Options →
@@ -160,11 +191,13 @@ func get_filler_hi() -> int:
 func get_journeys_dir() -> String:
 	return str(_config.get_value("storage", "journeys_dir", DEFAULT_JOURNEYS_DIR))
 
+
 # Optional folder holding ffmpeg + ffprobe. Empty = use the bundled binaries (or
 # the system PATH). Lets users on Wine / unusual setups point at a working
 # ffmpeg when the bundled one can't run.
 func get_ffmpeg_dir() -> String:
 	return str(_config.get_value("transcode", "ffmpeg_dir", DEFAULT_FFMPEG_DIR))
+
 
 # Resolves an ffmpeg tool ("ffmpeg" / "ffprobe") to a runnable path: custom
 # folder → bundled (res:// in the editor, user:// or next-to-app in exports) →
@@ -194,6 +227,7 @@ func resolve_ffmpeg_binary(name: String) -> String:
 			return next_to_app
 	return name  # last resort: PATH lookup
 
+
 # When true (default), the builder automatically converts videos on save so they
 # play: non-H.264 codecs are transcoded, and H.264 in a pixel format the runtime
 # decoder can't handle (10-bit, 4:2:2/4:4:4) is re-encoded to 8-bit 4:2:0. When
@@ -202,14 +236,17 @@ func resolve_ffmpeg_binary(name: String) -> String:
 func get_auto_transcode() -> bool:
 	return bool(_config.get_value("transcode", "auto_transcode", DEFAULT_AUTO_TRANSCODE))
 
+
 # When true (default), the main menu pings GitHub once per launch to see if a
 # newer release exists and shows an update banner. Off = no network call, no
 # banner — for players who'd rather the app never phone home.
 func get_update_check_enabled() -> bool:
 	return bool(_config.get_value("updates", "check_on_launch", DEFAULT_UPDATE_CHECK))
 
+
 func get_ui_sound_enabled() -> bool:
 	return bool(_config.get_value("audio", "ui_sound_enabled", DEFAULT_UI_SOUND_ENABLED))
+
 
 func get_ui_sound_volume() -> float:
 	return float(_config.get_value("audio", "ui_sound_volume", DEFAULT_UI_SOUND_VOLUME))
@@ -218,68 +255,90 @@ func get_ui_sound_volume() -> float:
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
 
+
 func set_master_volume(value: float) -> void:
 	_config.set_value("audio", "master_volume", value)
+
 
 func set_music_volume(value: float) -> void:
 	_config.set_value("audio", "music_volume", value)
 
+
 func set_fullscreen(value: bool) -> void:
 	_config.set_value("display", "fullscreen", value)
+
 
 func set_resolution_index(value: int) -> void:
 	_config.set_value("display", "resolution_index", value)
 
+
 func set_intiface_address(value: String) -> void:
 	_config.set_value("intiface", "address", value)
+
 
 func set_intiface_auto_connect(value: bool) -> void:
 	_config.set_value("intiface", "auto_connect", value)
 
+
 func set_selected_device(value: String) -> void:
 	_config.set_value("intiface", "selected_device", value)
+
 
 func set_output_mode(value: String) -> void:
 	_config.set_value("output", "mode", value)
 
+
 func set_serial_port(value: String) -> void:
 	_config.set_value("serial", "port", value)
+
 
 func set_serial_baud(value: int) -> void:
 	_config.set_value("serial", "baud_rate", value)
 
+
 func set_serial_auto_connect(value: bool) -> void:
 	_config.set_value("serial", "auto_connect", value)
+
 
 func set_range_min(value: int) -> void:
 	_config.set_value("device", "range_min", value)
 
+
 func set_range_max(value: int) -> void:
 	_config.set_value("device", "range_max", value)
+
 
 func set_axis_range_min(axis: String, value: int) -> void:
 	_config.set_value("device", "axis_%s_range_min" % axis, value)
 
+
 func set_axis_range_max(axis: String, value: int) -> void:
 	_config.set_value("device", "axis_%s_range_max" % axis, value)
+
 
 func set_home_position(value: int) -> void:
 	_config.set_value("device", "home_position", value)
 
+
 func set_home_ease_ms(value: int) -> void:
 	_config.set_value("device", "home_ease_ms", value)
+
 
 func set_latency_offset_ms(value: int) -> void:
 	_config.set_value("device", "latency_offset_ms", value)
 
+
 func set_vibe_intensity(value: int) -> void:
 	_config.set_value("device", "vibe_intensity", value)
+
 
 func set_max_stroke_speed(value: int) -> void:
 	_config.set_value("device", "max_stroke_speed", value)
 
+
 func set_hud_hide_delay(value: float) -> void:
 	_config.set_value("display", "hud_hide_delay", value)
+
 
 func set_ui_scale(value: float) -> void:
 	_config.set_value("display", "ui_scale", value)
@@ -294,41 +353,53 @@ func apply_ui_scale() -> void:
 	if w != null:
 		w.content_scale_factor = get_ui_scale()
 
+
 func set_beat_bar_enabled(value: bool) -> void:
 	_config.set_value("display", "beat_bar_enabled", value)
+
 
 func set_filler_enabled(value: bool) -> void:
 	_config.set_value("storyboard_filler", "enabled", value)
 
+
 func set_filler_half_cycle_ms(value: int) -> void:
 	_config.set_value("storyboard_filler", "half_cycle_ms", value)
+
 
 func set_filler_lo(value: int) -> void:
 	_config.set_value("storyboard_filler", "lo", value)
 
+
 func set_filler_hi(value: int) -> void:
 	_config.set_value("storyboard_filler", "hi", value)
+
 
 func set_journeys_dir(value: String) -> void:
 	_config.set_value("storage", "journeys_dir", value)
 
+
 func set_ffmpeg_dir(value: String) -> void:
 	_config.set_value("transcode", "ffmpeg_dir", value)
+
 
 func set_auto_transcode(value: bool) -> void:
 	_config.set_value("transcode", "auto_transcode", value)
 
+
 func set_update_check_enabled(value: bool) -> void:
 	_config.set_value("updates", "check_on_launch", value)
 
+
 func set_ui_sound_enabled(value: bool) -> void:
 	_config.set_value("audio", "ui_sound_enabled", value)
+
 
 func set_ui_sound_volume(value: float) -> void:
 	_config.set_value("audio", "ui_sound_volume", value)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
+
 
 func save() -> void:
 	_config.save(SETTINGS_PATH)

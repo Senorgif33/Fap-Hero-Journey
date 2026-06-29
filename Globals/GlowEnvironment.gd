@@ -20,10 +20,10 @@ extends WorldEnvironment
 #   • Want a punchier sign-on-black look? Switch the blend mode to ADDITIVE.
 # ---------------------------------------------------------------------------
 
-const GLOW_INTENSITY: float = 0.9     # overall bloom strength
-const GLOW_BLOOM:     float = 0.05    # small constant bloom added everywhere
-const GLOW_STRENGTH:  float = 1.1     # per-sample blur strength
-const GLOW_THRESHOLD: float = 0.85    # pixels brighter than this glow (neon sits ~0.88–1.0)
+const GLOW_INTENSITY: float = 0.9  # overall bloom strength
+const GLOW_BLOOM: float = 0.05  # small constant bloom added everywhere
+const GLOW_STRENGTH: float = 1.1  # per-sample blur strength
+const GLOW_THRESHOLD: float = 0.85  # pixels brighter than this glow (neon sits ~0.88–1.0)
 
 
 func _ready() -> void:
@@ -37,12 +37,12 @@ func _build_environment() -> Environment:
 	# (2D glow does nothing unless background mode is Canvas.)
 	env.background_mode = Environment.BG_CANVAS
 
-	env.glow_enabled       = true
-	env.glow_normalized    = true   # steadier intensity regardless of resolution
-	env.glow_intensity     = GLOW_INTENSITY
-	env.glow_bloom         = GLOW_BLOOM
-	env.glow_strength      = GLOW_STRENGTH
-	env.glow_blend_mode    = Environment.GLOW_BLEND_MODE_SCREEN  # gentler than ADDITIVE over video
+	env.glow_enabled = true
+	env.glow_normalized = true  # steadier intensity regardless of resolution
+	env.glow_intensity = GLOW_INTENSITY
+	env.glow_bloom = GLOW_BLOOM
+	env.glow_strength = GLOW_STRENGTH
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN  # gentler than ADDITIVE over video
 	env.glow_hdr_threshold = GLOW_THRESHOLD
 
 	# Spread the blur across a few mip levels for a soft, sign-like halo rather
