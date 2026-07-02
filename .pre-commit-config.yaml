@@ -1,0 +1,17 @@
+# Auto-format GDScript with gdformat on commit.
+#
+# One-time setup:  pip install pre-commit  &&  pre-commit install
+# Bump version:    pre-commit autoupdate   (then commit the changed rev)
+#
+# IMPORTANT: `rev` pins the gdtoolkit version. gdformat output can differ between versions,
+# so anyone working a fork/branch should use the SAME rev — otherwise we reformat each
+# other's code and every merge churns. Keep this in sync with the fork maintainer.
+repos:
+  - repo: https://github.com/Scony/godot-gdscript-toolkit
+    rev: "4.3.4"
+    hooks:
+      - id: gdformat
+        exclude: '^addons/'        # never reformat vendored code (gdUnit4, etc.)
+      # Optional linter (naming, line length, …) — noisier; add a .gdlintrc first, then enable:
+      # - id: gdlint
+      #   exclude: '^addons/'

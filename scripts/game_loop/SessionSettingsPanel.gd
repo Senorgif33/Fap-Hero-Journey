@@ -7,13 +7,15 @@ extends Control
 
 signal closed
 
-const PANEL_WIDTH: int   = 320
-const SLIDE_TIME:  float = 0.18
+const PANEL_WIDTH: int = 320
+const SLIDE_TIME: float = 0.18
 
-var _panel:           PanelContainer = null
-var _range_slider:    RangeSlider    = null
-var _delay_slider:    HSlider        = null
-var _delay_value_lbl: Label          = null
+var _panel: PanelContainer = null
+var _range_slider: RangeSlider = null
+var _intiface_delay_slider: HSlider = null
+var _intiface_delay_lbl: Label = null
+var _serial_delay_slider: HSlider = null
+var _serial_delay_lbl: Label = null
 
 
 func _ready() -> void:
@@ -80,25 +82,29 @@ func _build() -> void:
 
 	vb.add_child(_hint_label("How much of the stroke the device uses.  ↑/↓ max · ←/→ min."))
 
-	# ── Delay ─────────────────────────────────────────────────────────────────
-	vb.add_child(_section_label("DELAY"))
+	# ── Delays (per backend) ────────────────────────────────────────────────────
+	var d_intiface: Dictionary = _add_delay(vb, "INTIFACE DELAY")
+	_intiface_delay_slider = d_intiface["slider"]
+	_intiface_delay_lbl = d_intiface["value"]
+	_intiface_delay_slider.set_value_no_signal(SettingsService.get_intiface_delay_ms())
+	_intiface_delay_lbl.text = "%d ms" % SettingsService.get_intiface_delay_ms()
+	_intiface_delay_slider.value_changed.connect(_on_intiface_delay_changed)
 
-	_delay_slider = HSlider.new()
-	_delay_slider.min_value = -500
-	_delay_slider.max_value = 500
-	_delay_slider.step = 10
-	_delay_slider.value = SettingsService.get_latency_offset_ms()
-	_delay_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_delay_slider.value_changed.connect(_on_delay_changed)
-	vb.add_child(_delay_slider)
+	var d_serial: Dictionary = _add_delay(vb, "SERIAL DELAY")
+	_serial_delay_slider = d_serial["slider"]
+	_serial_delay_lbl = d_serial["value"]
+	_serial_delay_slider.set_value_no_signal(SettingsService.get_serial_delay_ms())
+	_serial_delay_lbl.text = "%d ms" % SettingsService.get_serial_delay_ms()
+	_serial_delay_slider.value_changed.connect(_on_serial_delay_changed)
 
-	_delay_value_lbl = Label.new()
-	_delay_value_lbl.text = "%d ms" % SettingsService.get_latency_offset_ms()
-	_delay_value_lbl.add_theme_color_override("font_color", UITheme.PURPLE_MID)
-	_delay_value_lbl.add_theme_font_size_override("font_size", 11)
-	vb.add_child(_delay_value_lbl)
-
-	vb.add_child(_hint_label("Shifts the funscript relative to the video for device/Bluetooth lag. Positive = device acts earlier."))
+	(
+		vb
+		. add_child(
+			_hint_label(
+				"Shifts each backend's output for device / Bluetooth / serial lag. Positive = acts earlier."
+			)
+		)
+	)
 
 
 func _section_label(text: String) -> Label:
@@ -118,7 +124,25 @@ func _hint_label(text: String) -> Label:
 	return lbl
 
 
+# Builds a labelled delay slider (−500..500 ms) + its value label; returns { slider, value }. The
+# caller seeds the value and connects value_changed so setup doesn't fire the apply.
+func _add_delay(vb: VBoxContainer, title: String) -> Dictionary:
+	vb.add_child(_section_label(title))
+	var slider: HSlider = HSlider.new()
+	slider.min_value = -500
+	slider.max_value = 500
+	slider.step = 10
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vb.add_child(slider)
+	var value_lbl: Label = Label.new()
+	value_lbl.add_theme_color_override("font_color", UITheme.PURPLE_MID)
+	value_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(value_lbl)
+	return {"slider": slider, "value": value_lbl}
+
+
 # ── Apply (persist + push to the player live; same settings as Options) ────────
+
 
 func _on_range_changed(lo: float, hi: float) -> void:
 	SettingsService.set_range_min(int(lo))
@@ -127,31 +151,44 @@ func _on_range_changed(lo: float, hi: float) -> void:
 	FunscriptPlayer.SetRangeClamp(int(lo), int(hi))
 
 
-func _on_delay_changed(v: float) -> void:
-	_delay_value_lbl.text = "%d ms" % int(v)
-	SettingsService.set_latency_offset_ms(int(v))
+func _on_intiface_delay_changed(v: float) -> void:
+	_intiface_delay_lbl.text = "%d ms" % int(v)
+	SettingsService.set_intiface_delay_ms(int(v))
 	SettingsService.save()
-	FunscriptPlayer.SetLatencyOffset(int(v))
+	FunscriptPlayer.SetIntifaceDelay(int(v))
+
+
+func _on_serial_delay_changed(v: float) -> void:
+	_serial_delay_lbl.text = "%d ms" % int(v)
+	SettingsService.set_serial_delay_ms(int(v))
+	SettingsService.save()
+	FunscriptPlayer.SetSerialDelay(int(v))
 
 
 # Nudge the stroke range from GameLoop's arrow-key hotkeys (active only while this panel is open).
 func nudge_range(d_min: int, d_max: int) -> void:
 	var lo: int = clampi(int(_range_slider.lo) + d_min, 0, 99)
 	var hi: int = clampi(int(_range_slider.hi) + d_max, lo + 1, 100)
-	_range_slider.set_range_values(lo, hi)   # moves handles without re-emitting
+	_range_slider.set_range_values(lo, hi)  # moves handles without re-emitting
 	_on_range_changed(lo, hi)
 
 
 # Re-read the sliders from settings (e.g. after the full Options screen changed them while this is open).
 func resync() -> void:
 	if _range_slider != null:
-		_range_slider.set_range_values(SettingsService.get_range_min(), SettingsService.get_range_max())
-	if _delay_slider != null:
-		_delay_slider.set_value_no_signal(SettingsService.get_latency_offset_ms())
-		_delay_value_lbl.text = "%d ms" % SettingsService.get_latency_offset_ms()
+		_range_slider.set_range_values(
+			SettingsService.get_range_min(), SettingsService.get_range_max()
+		)
+	if _intiface_delay_slider != null:
+		_intiface_delay_slider.set_value_no_signal(SettingsService.get_intiface_delay_ms())
+		_intiface_delay_lbl.text = "%d ms" % SettingsService.get_intiface_delay_ms()
+	if _serial_delay_slider != null:
+		_serial_delay_slider.set_value_no_signal(SettingsService.get_serial_delay_ms())
+		_serial_delay_lbl.text = "%d ms" % SettingsService.get_serial_delay_ms()
 
 
 # ── Slide animation (mirrors InventoryPanel) ───────────────────────────────────
+
 
 func close() -> void:
 	emit_signal("closed")

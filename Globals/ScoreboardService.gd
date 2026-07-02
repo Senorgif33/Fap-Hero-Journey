@@ -65,8 +65,10 @@ func read_runs(journey_folder_name: String) -> Array:
 		printerr("ScoreboardService: unsupported version in %s" % path)
 		return []
 	var runs: Array = data.get("runs", [])
-	runs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return int(a.get("score", 0)) > int(b.get("score", 0)))
+	runs.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return int(a.get("score", 0)) > int(b.get("score", 0))
+	)
 	return runs
 
 
@@ -84,8 +86,10 @@ func add_run(journey_folder_name: String, entry: Dictionary) -> void:
 	var record: Dictionary = entry.duplicate()
 	record["date"] = Time.get_datetime_string_from_system()
 	runs.append(record)
-	runs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return int(a.get("score", 0)) > int(b.get("score", 0)))
+	runs.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return int(a.get("score", 0)) > int(b.get("score", 0))
+	)
 	if runs.size() > MAX_RUNS:
 		runs = runs.slice(0, MAX_RUNS)
 

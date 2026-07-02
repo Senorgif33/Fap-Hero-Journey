@@ -1,0 +1,20 @@
+name: Format check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gdformat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pre-commit
+      # Runs the pinned gdformat hook over all files (addons excluded via .pre-commit-config.yaml),
+      # so CI and local commits use the exact same version + rules. Fails (with a diff) on anything
+      # that isn't formatted.
+      - run: pre-commit run --all-files --show-diff-on-failure

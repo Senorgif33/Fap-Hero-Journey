@@ -12,6 +12,7 @@ func _owns(items: Array) -> Callable:
 
 # ── weighted_pick ────────────────────────────────────────────────────────────
 
+
 # r lands in the cumulative bracket of its index. weights [1,2,1] → [1,3,4):
 # r 0 → idx0, r 1-2 → idx1, r 3 → idx2.
 func test_weighted_pick_brackets() -> void:
@@ -34,6 +35,7 @@ func test_weighted_pick_skips_zero_weights() -> void:
 
 
 # ── conditional_path: score / coins thresholds ──────────────────────────────
+
 
 func test_conditional_highest_met_threshold_wins() -> void:
 	var paths := [{"threshold": 0}, {"threshold": 100}, {"threshold": 200}]
@@ -59,10 +61,13 @@ func test_conditional_no_match_uses_default() -> void:
 
 # ── conditional_path: item ownership ────────────────────────────────────────
 
+
 func test_conditional_item_picks_first_owned() -> void:
 	var paths := [{"required_item": ""}, {"required_item": "key"}, {"required_item": "gem"}]
 	assert_int(ForkResolver.conditional_path(paths, "item", 0, 0, _owns(["gem"]))).is_equal(2)
-	assert_int(ForkResolver.conditional_path(paths, "item", 0, 0, _owns(["key", "gem"]))).is_equal(1)
+	assert_int(ForkResolver.conditional_path(paths, "item", 0, 0, _owns(["key", "gem"]))).is_equal(
+		1
+	)
 	assert_int(ForkResolver.conditional_path(paths, "item", 0, 0, _owns([]))).is_equal(0)  # default
 
 
@@ -72,13 +77,14 @@ func test_conditional_empty_paths() -> void:
 
 # ── path_affordable (Sacrifice gating) ──────────────────────────────────────
 
+
 func test_affordable_free_path() -> void:
 	assert_bool(ForkResolver.path_affordable(0, "", 0, _owns([]))).is_true()
 
 
 func test_affordable_coin_cost() -> void:
 	assert_bool(ForkResolver.path_affordable(50, "", 100, _owns([]))).is_true()
-	assert_bool(ForkResolver.path_affordable(50, "", 50, _owns([]))).is_true()   # exact
+	assert_bool(ForkResolver.path_affordable(50, "", 50, _owns([]))).is_true()  # exact
 	assert_bool(ForkResolver.path_affordable(50, "", 30, _owns([]))).is_false()  # short
 
 
@@ -90,5 +96,5 @@ func test_affordable_required_item() -> void:
 # Both gates must pass.
 func test_affordable_coins_and_item() -> void:
 	assert_bool(ForkResolver.path_affordable(50, "key", 100, _owns(["key"]))).is_true()
-	assert_bool(ForkResolver.path_affordable(50, "key", 100, _owns([]))).is_false()      # has coins, no item
+	assert_bool(ForkResolver.path_affordable(50, "key", 100, _owns([]))).is_false()  # has coins, no item
 	assert_bool(ForkResolver.path_affordable(50, "key", 30, _owns(["key"]))).is_false()  # has item, no coins

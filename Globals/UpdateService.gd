@@ -7,20 +7,20 @@ extends Node
 # ---------------------------------------------------------------------------
 
 signal update_available(latest_version: String, release: Dictionary)
-signal up_to_date()
+signal up_to_date
 signal check_failed(reason: String)
 
-signal download_started()
+signal download_started
 signal download_progress(downloaded: int, total: int)  # total is -1 when unknown
-signal download_ready(folder: String)                  # extracted build dir (absolute)
+signal download_ready(folder: String)  # extracted build dir (absolute)
 signal download_failed(reason: String)
 
 const REPO: String = "SaekoM/Fap-Hero-Journey"
 const LATEST_URL: String = "https://api.github.com/repos/SaekoM/Fap-Hero-Journey/releases/latest"
 const UA_HEADER: String = "User-Agent: FapHeroJourney-Updater"
 
-var _http: HTTPRequest = null   # version check (signal-driven)
-var _dl: HTTPRequest = null     # downloads (await-driven, no persistent connection)
+var _http: HTTPRequest = null  # version check (signal-driven)
+var _dl: HTTPRequest = null  # downloads (await-driven, no persistent connection)
 var _downloading: bool = false
 var _latest_release: Dictionary = {}
 
@@ -77,7 +77,9 @@ func check_for_update() -> void:
 		check_failed.emit("request error %d" % err)
 
 
-func _on_check_completed(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+func _on_check_completed(
+	result: int, code: int, _headers: PackedStringArray, body: PackedByteArray
+) -> void:
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
 		check_failed.emit("HTTP %d (result %d)" % [code, result])
 		return
@@ -144,6 +146,7 @@ func _is_newer(a: String, b: String) -> bool:
 
 # ── Phase 2: download → verify → extract beside the install → reveal ─────────
 
+
 # Orchestrates the whole flow. Emits download_progress along the way, then exactly
 # one of download_ready(folder) / download_failed(reason). The running app is
 # never touched — the new build lands in a sibling folder the user launches.
@@ -155,7 +158,9 @@ func download_and_stage() -> void:
 	var fname: String = str(asset.get("name", "update.zip"))
 	download_started.emit()
 
-	var zip_path: String = await _download_to_file(str(asset.get("browser_download_url", "")), fname)
+	var zip_path: String = await _download_to_file(
+		str(asset.get("browser_download_url", "")), fname
+	)
 	if zip_path == "":
 		download_failed.emit("Download failed (network or server error).")
 		return
@@ -266,7 +271,10 @@ func _extract_beside(zip_path: String, fname: String) -> String:
 	if reader.open(ProjectSettings.globalize_path(zip_path)) != OK:
 		return ""
 	var target: String = _install_base_dir().path_join(fname.get_basename())
-	if DirAccess.make_dir_recursive_absolute(target) != OK and not DirAccess.dir_exists_absolute(target):
+	if (
+		DirAccess.make_dir_recursive_absolute(target) != OK
+		and not DirAccess.dir_exists_absolute(target)
+	):
 		reader.close()
 		return ""
 	for entry: String in reader.get_files():

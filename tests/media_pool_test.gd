@@ -16,17 +16,19 @@ func after() -> void:
 # pooled_media_rel composes the journey-root-relative pool path.
 func test_pooled_media_rel_shape() -> void:
 	assert_str(JourneyData.pooled_media_rel("abc123", "mp4")).is_equal("content/m_abc123.mp4")
-	assert_str(JourneyData.pooled_media_rel("def456", "funscript")).is_equal("content/m_def456.funscript")
+	assert_str(JourneyData.pooled_media_rel("def456", "funscript")).is_equal(
+		"content/m_def456.funscript"
+	)
 
 
 # plan_media_pool: the first sighting of a (fingerprint,ext) pool path is a copy;
 # every repeat references the same rel and is skipped.
 func test_plan_media_pool_dedups_repeats() -> void:
 	var sources := [
-		{"fingerprint": "aaa", "ext": "mp4"},        # round 1 video
+		{"fingerprint": "aaa", "ext": "mp4"},  # round 1 video
 		{"fingerprint": "bbb", "ext": "funscript"},  # round 1 script
-		{"fingerprint": "aaa", "ext": "mp4"},        # round 2 reuses the SAME video
-		{"fingerprint": "ccc", "ext": "mp4"},        # round 2 distinct video
+		{"fingerprint": "aaa", "ext": "mp4"},  # round 2 reuses the SAME video
+		{"fingerprint": "ccc", "ext": "mp4"},  # round 2 distinct video
 		{"fingerprint": "bbb", "ext": "funscript"},  # round 2 reuses round 1's script
 	]
 	var plan := JourneyData.plan_media_pool(sources)
@@ -72,7 +74,7 @@ func test_media_fingerprint_stability() -> void:
 	f.close()
 	var fp1 := JourneyData.media_fingerprint(path)
 	var fp2 := JourneyData.media_fingerprint(path)
-	assert_str(fp1).is_equal(fp2)          # same file → same fingerprint
+	assert_str(fp1).is_equal(fp2)  # same file → same fingerprint
 	assert_int(fp1.length()).is_equal(16)  # short hex, not a full sha256
 
 	# Rewrite with a different size → different fingerprint.

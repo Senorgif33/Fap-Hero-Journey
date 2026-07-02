@@ -121,23 +121,23 @@ void fragment() {
 
 var _video: VideoStreamPlayer = null
 
-var _murk:      ColorRect   = null  # "Murk" — dims the screen
-var _tunnel:    TextureRect = null  # "Tunnel" — closing vignette
-var _tunnel_grad: Gradient  = null  # Tunnel gradient (mid ramp point moves with intensity)
-var _bloodshot: ColorRect   = null  # "Bloodshot" — pulsing red haze
-var _static:    ColorRect   = null  # "Interference" — animated TV static
-var _flicker:   ColorRect   = null  # "Flicker" — erratic brightness dips
-var _strobe:    ColorRect   = null  # "Strobe" — flickering black overlay
-var _fx_mat:    ShaderMaterial = null  # composable per-pixel video effects
+var _murk: ColorRect = null  # "Murk" — dims the screen
+var _tunnel: TextureRect = null  # "Tunnel" — closing vignette
+var _tunnel_grad: Gradient = null  # Tunnel gradient (mid ramp point moves with intensity)
+var _bloodshot: ColorRect = null  # "Bloodshot" — pulsing red haze
+var _static: ColorRect = null  # "Interference" — animated TV static
+var _flicker: ColorRect = null  # "Flicker" — erratic brightness dips
+var _strobe: ColorRect = null  # "Strobe" — flickering black overlay
+var _fx_mat: ShaderMaterial = null  # composable per-pixel video effects
 
-var _strobe_tween:    Tween = null
+var _strobe_tween: Tween = null
 var _bloodshot_tween: Tween = null
-var _flicker_tween:   Tween = null
+var _flicker_tween: Tween = null
 var _volwobble_tween: Tween = null
 
-var _tremor:     bool  = false  # "Tremor" — shakes the video each frame
-var _tremor_amp: float = 9.0    # shake amplitude (set from intensity)
-var _muted:      bool  = false  # a "Silence" hex muted the video
+var _tremor: bool = false  # "Tremor" — shakes the video each frame
+var _tremor_amp: float = 9.0  # shake amplitude (set from intensity)
+var _muted: bool = false  # a "Silence" hex muted the video
 var _pre_mute_volume_db: float = 0.0  # restored when a "Silence" hex ends
 
 
@@ -158,10 +158,10 @@ func setup(video: VideoStreamPlayer, overlay_parent: Control) -> void:
 	_tunnel_grad.set_color(1, Color(0, 0, 0, 0.99))
 	_tunnel_grad.add_point(0.45, Color(0, 0, 0, 0.40))
 	var gtex: GradientTexture2D = GradientTexture2D.new()
-	gtex.gradient  = _tunnel_grad
-	gtex.fill      = GradientTexture2D.FILL_RADIAL
+	gtex.gradient = _tunnel_grad
+	gtex.fill = GradientTexture2D.FILL_RADIAL
 	gtex.fill_from = Vector2(0.5, 0.5)
-	gtex.fill_to   = Vector2(0.5, 1.0)
+	gtex.fill_to = Vector2(0.5, 1.0)
 	_tunnel = TextureRect.new()
 	_tunnel.texture = gtex
 	_tunnel.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -225,6 +225,7 @@ func _exit_tree() -> void:
 # Intensity
 # ---------------------------------------------------------------------------
 
+
 # This round's intensity (0–1) for a sensory modifier: the author's per-round
 # override if set, else the catalog default. Used by cursed and boss rounds.
 static func intensity_for(round: Dictionary, entry: Dictionary) -> float:
@@ -238,12 +239,15 @@ static func intensity_for(round: Dictionary, entry: Dictionary) -> float:
 # The real effect value for a sensory hex at the given intensity (0–1), mapped
 # through the catalog entry's imin/imax. imin may exceed imax (inverted effects).
 func _ival(roll: Dictionary, intensity: float) -> float:
-	return lerpf(float(roll.get("imin", 0.0)), float(roll.get("imax", 1.0)), clampf(intensity, 0.0, 1.0))
+	return lerpf(
+		float(roll.get("imin", 0.0)), float(roll.get("imax", 1.0)), clampf(intensity, 0.0, 1.0)
+	)
 
 
 # ---------------------------------------------------------------------------
 # Apply / clear
 # ---------------------------------------------------------------------------
+
 
 # Applies one sensory hex. Returns true when the kind belongs to this component;
 # false means it's a gameplay hex the caller (GameLoop) must handle itself.
@@ -287,7 +291,9 @@ func apply(roll: Dictionary, intensity: float = 1.0) -> bool:
 			_start_bloodshot(_ival(roll, intensity))
 		"static":
 			if _static.material != null:
-				(_static.material as ShaderMaterial).set_shader_parameter("strength", _ival(roll, intensity))
+				(_static.material as ShaderMaterial).set_shader_parameter(
+					"strength", _ival(roll, intensity)
+				)
 			_static.visible = true
 		"flicker":
 			_flicker.visible = true
@@ -302,7 +308,7 @@ func apply(roll: Dictionary, intensity: float = 1.0) -> bool:
 			_add_audio_effect(lp)
 		"reverb":
 			var rv: AudioEffectReverb = AudioEffectReverb.new()
-			rv.wet = _ival(roll, intensity)            # imin/imax = wet range
+			rv.wet = _ival(roll, intensity)  # imin/imax = wet range
 			rv.room_size = lerpf(0.6, 0.95, clampf(intensity, 0.0, 1.0))
 			rv.dry = 0.5
 			_add_audio_effect(rv)
@@ -325,8 +331,8 @@ func clear_all() -> void:
 	if _muted:
 		_muted = false
 		_video.volume_db = _pre_mute_volume_db
-	_reset_video_fx()      # undo every per-pixel video hex (Drained/Bleary/…)
-	_clear_audio_effects() # undo low-pass / reverb / distortion + restore bus level
+	_reset_video_fx()  # undo every per-pixel video hex (Drained/Bleary/…)
+	_clear_audio_effects()  # undo low-pass / reverb / distortion + restore bus level
 	_stop_strobe()
 	_stop_bloodshot()
 	_stop_flicker()
@@ -344,15 +350,16 @@ func tremor_offset() -> Vector2:
 	if not _tremor:
 		return Vector2.ZERO
 	var ts: float = Time.get_ticks_msec() / 1000.0
-	return Vector2(
-		sin(ts * 97.0) + sin(ts * 61.0),
-		cos(ts * 89.0) + sin(ts * 53.0)
-	) * (_tremor_amp * 0.5)
+	return (
+		Vector2(sin(ts * 97.0) + sin(ts * 61.0), cos(ts * 89.0) + sin(ts * 53.0))
+		* (_tremor_amp * 0.5)
+	)
 
 
 # ---------------------------------------------------------------------------
 # Video shader
 # ---------------------------------------------------------------------------
+
 
 # Turns one per-pixel video effect on (lazily assigning the shared shader to the
 # video). Several may be active at once — each is an independent uniform.
@@ -395,6 +402,7 @@ func _set_tunnel_intensity(mid_offset: float) -> void:
 # Audio bus
 # ---------------------------------------------------------------------------
 
+
 # Routes the video's audio through a dedicated bus (→ Master) so audio hexes
 # (low-pass / reverb / distortion / volume wobble) affect only the video, never
 # any other sound. Idempotent — the bus survives scene reloads, so reuse it.
@@ -431,6 +439,7 @@ func _clear_audio_effects() -> void:
 # ---------------------------------------------------------------------------
 # Animated overlays (tween drivers)
 # ---------------------------------------------------------------------------
+
 
 func _start_strobe(clear_secs: float = 3.0) -> void:
 	_stop_strobe()

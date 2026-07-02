@@ -17,8 +17,8 @@ func set_edges(e: Array) -> void:
 func _draw() -> void:
 	for e in edges:
 		var points: PackedVector2Array = e["points"]
-		var color:  Color = e["color"]
-		var dashed: bool  = e.get("dashed", false)
+		var color: Color = e["color"]
+		var dashed: bool = e.get("dashed", false)
 		# The route is pre-computed by GraphView (orthogonal, entering the target on whichever face
 		# points back toward the source). Draw each segment, then an arrowhead along the entry heading.
 		for i in range(points.size() - 1):

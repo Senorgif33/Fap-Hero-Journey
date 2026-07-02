@@ -10,9 +10,34 @@ extends RefCounted
 # detect_funscript_axis / detect_vib_channel — used to strip the suffix so "scene1", "scene1_L1",
 # "scene1.vib1" all share a round key during bulk import.
 const SCRIPT_SUFFIXES: Array[String] = [
-	"_l1", ".l1", "_l2", ".l2", "_r0", ".r0", "_r1", ".r1", "_r2", ".r2",
-	"_surge", ".surge", "_sway", ".sway", "_twist", ".twist", "_roll", ".roll", "_pitch", ".pitch",
-	".vib1", "_vib1", ".vibe1", "_vibe1", ".vib2", "_vib2", ".vibe2", "_vibe2",
+	"_l1",
+	".l1",
+	"_l2",
+	".l2",
+	"_r0",
+	".r0",
+	"_r1",
+	".r1",
+	"_r2",
+	".r2",
+	"_surge",
+	".surge",
+	"_sway",
+	".sway",
+	"_twist",
+	".twist",
+	"_roll",
+	".roll",
+	"_pitch",
+	".pitch",
+	".vib1",
+	"_vib1",
+	".vibe1",
+	"_vibe1",
+	".vib2",
+	"_vib2",
+	".vibe2",
+	"_vibe2",
 ]
 
 
@@ -21,21 +46,31 @@ const SCRIPT_SUFFIXES: Array[String] = [
 static func detect_funscript_axis(path: String) -> String:
 	var stem: String = path.get_file().get_basename().to_lower()
 	var axis_codes: Dictionary = {
-		"_l1": "L1", ".l1": "L1",
-		"_l2": "L2", ".l2": "L2",
-		"_r0": "R0", ".r0": "R0",
-		"_r1": "R1", ".r1": "R1",
-		"_r2": "R2", ".r2": "R2",
+		"_l1": "L1",
+		".l1": "L1",
+		"_l2": "L2",
+		".l2": "L2",
+		"_r0": "R0",
+		".r0": "R0",
+		"_r1": "R1",
+		".r1": "R1",
+		"_r2": "R2",
+		".r2": "R2",
 	}
 	for suffix: String in axis_codes:
 		if stem.ends_with(suffix):
 			return axis_codes[suffix]
 	var name_codes: Dictionary = {
-		"_surge": "L1", ".surge": "L1",
-		"_sway":  "L2", ".sway":  "L2",
-		"_twist": "R0", ".twist": "R0",
-		"_roll":  "R1", ".roll":  "R1",
-		"_pitch": "R2", ".pitch": "R2",
+		"_surge": "L1",
+		".surge": "L1",
+		"_sway": "L2",
+		".sway": "L2",
+		"_twist": "R0",
+		".twist": "R0",
+		"_roll": "R1",
+		".roll": "R1",
+		"_pitch": "R2",
+		".pitch": "R2",
 	}
 	for suffix: String in name_codes:
 		if stem.ends_with(suffix):
@@ -60,7 +95,7 @@ static func detect_vib_channel(path: String) -> String:
 # groups with its main round during bulk import. Preserves the original casing of the stem.
 static func strip_script_suffix(path: String) -> String:
 	var stem: String = path.get_file().get_basename()
-	var low:  String = stem.to_lower()
+	var low: String = stem.to_lower()
 	for s: String in SCRIPT_SUFFIXES:
 		if low.ends_with(s):
 			return stem.substr(0, stem.length() - s.length())
@@ -140,7 +175,10 @@ static func find_sibling_scripts(dir: String, base: String) -> Dictionary:
 	d.list_dir_begin()
 	var fname: String = d.get_next()
 	while fname != "":
-		if not d.current_is_dir() and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS:
+		if (
+			not d.current_is_dir()
+			and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS
+		):
 			var full: String = "%s/%s" % [dir, fname]
 			if strip_script_suffix(full).to_lower() == base_low:
 				var vib_ch: String = detect_vib_channel(full)
@@ -172,7 +210,7 @@ static func find_sibling_video(dir: String, base: String) -> String:
 # same-named files sitting next to `anchor_path` on disk. Never overwrites a slot the author already
 # set. Returns true if anything was filled. Used by the bulk importer and the single-round drop.
 static func autofill_round_siblings(round_data: Dictionary, anchor_path: String) -> bool:
-	var dir:  String = anchor_path.get_base_dir()
+	var dir: String = anchor_path.get_base_dir()
 	var base: String = strip_script_suffix(anchor_path)
 	var changed: bool = false
 
@@ -209,8 +247,8 @@ static func autofill_round_siblings(round_data: Dictionary, anchor_path: String)
 # from disk. A group needs a video to become a round; funscript-only groups are counted in
 # skipped_no_video. Returns { "rounds": Array[Dictionary], "skipped_no_video": int } in first-seen order.
 static func build_rounds(files: PackedStringArray) -> Dictionary:
-	var groups: Dictionary = {}   # round_key -> {video, funscript, axis:{}, vib:{}, name}
-	var order:  Array      = []   # round_keys in first-seen order
+	var groups: Dictionary = {}  # round_key -> {video, funscript, axis:{}, vib:{}, name}
+	var order: Array = []  # round_keys in first-seen order
 	for f: String in files:
 		var ext: String = f.get_extension().to_lower()
 		var key: String = round_group_key(f)
@@ -238,7 +276,9 @@ static func build_rounds(files: PackedStringArray) -> Dictionary:
 	for key: String in order:
 		var g: Dictionary = groups[key]
 		var data: Dictionary = JourneyData.new_item("round").duplicate(true)
-		data.erase("type"); data.erase("node_id"); data.erase("paths")
+		data.erase("type")
+		data.erase("node_id")
+		data.erase("paths")
 		data["name"] = (g["name"] as String) if (g["name"] as String) != "" else key
 		data["funscript_path"] = g["funscript"]
 		data["video_path"] = g["video"]

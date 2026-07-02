@@ -23,14 +23,22 @@ func after() -> void:
 # A builder round item with every authored field at a non-default value.
 func _authored_item() -> Dictionary:
 	return {
-		"type": "round", "name": "R",
-		"round_type": "cursed", "coins": 25, "is_checkpoint": true,
-		"curse_reward": 60, "cleanse_cost": 35, "curse_random": false,
+		"type": "round",
+		"name": "R",
+		"round_type": "cursed",
+		"coins": 25,
+		"is_checkpoint": true,
+		"curse_reward": 60,
+		"cleanse_cost": 35,
+		"curse_random": false,
 		"curses": ["Choked", "Pauper"],
-		"boon_random": false, "boons": ["Fervor"], "gift_item": "key",
+		"boon_random": false,
+		"boons": ["Fervor"],
+		"gift_item": "key",
 		"boss_tagline": "rawr",
 		"boss_modifiers": [{"kind": "clamp", "min": 10, "max": 40}],
-		"sensory": ["Strobe", "Cavern"], "sensory_in_pool": true,
+		"sensory": ["Strobe", "Cavern"],
+		"sensory_in_pool": true,
 		"sensory_intensity": {"Strobe": 0.6},
 		"show_reveal": false,
 	}
@@ -48,7 +56,9 @@ func _roundtrip(item: Dictionary) -> Dictionary:
 	round_json["ActionCount"] = 5
 	round_json["LengthMs"] = 1000
 
-	var journey := {"Name": "J", "Rounds": [round_json], "Forks": [], "Shops": [], "Storyboards": []}
+	var journey := {
+		"Name": "J", "Rounds": [round_json], "Forks": [], "Shops": [], "Storyboards": []
+	}
 	var jdir := TEST_DIR + "/" + JOURNEY
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(jdir))
 	var f := FileAccess.open(jdir + "/journey.json", FileAccess.WRITE)
@@ -61,12 +71,12 @@ func _roundtrip(item: Dictionary) -> Dictionary:
 # (pure, no scanner) — pinpoints a builder-side key fault directly.
 func test_round_to_json_shape() -> void:
 	var j := JourneyData.round_to_json(_authored_item())
-	assert_str(j["RoundType"]).is_equal("Cursed")          # internal "cursed" → label
+	assert_str(j["RoundType"]).is_equal("Cursed")  # internal "cursed" → label
 	assert_int(j["CoinsAwarded"]).is_equal(25)
 	assert_bool(j["ShowReveal"]).is_false()
 	assert_array(j["Sensory"]).contains_exactly(["Strobe", "Cavern"])
 	assert_dict(j["SensoryIntensity"]).is_equal({"Strobe": 0.6})
-	var bm: Array = j["BossModifiers"]                     # {kind,min,max} → {Kind,Min,Max}
+	var bm: Array = j["BossModifiers"]  # {kind,min,max} → {Kind,Min,Max}
 	assert_str(bm[0]["Kind"]).is_equal("clamp")
 	assert_int(bm[0]["Min"]).is_equal(10)
 	assert_int(bm[0]["Max"]).is_equal(40)

@@ -20,7 +20,7 @@ extends RefCounted
 const TAGS_PATH: String = "res://data/tags.json"
 const FALLBACK_COLOR: Color = Color(0.7, 0.7, 0.7)
 
-static var _tags: Array = []      # Array[Dictionary] {id, label, color}
+static var _tags: Array = []  # Array[Dictionary] {id, label, color}
 static var _loaded: bool = false
 
 
@@ -88,8 +88,13 @@ static func _ensure_loaded() -> void:
 		var id: String = entry.get("id", "")
 		if id == "":
 			continue
-		_tags.append({
-			"id":    id,
-			"label": entry.get("label", id.capitalize()),
-			"color": Color.html(entry.get("color", "#b3b3b3")),
-		})
+		(
+			_tags
+			. append(
+				{
+					"id": id,
+					"label": entry.get("label", id.capitalize()),
+					"color": Color.html(entry.get("color", "#b3b3b3")),
+				}
+			)
+		)

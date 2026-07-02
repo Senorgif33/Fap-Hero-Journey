@@ -112,8 +112,8 @@ func write_save(journey_folder_name: String, payload: Dictionary) -> bool:
 		DirAccess.make_dir_recursive_absolute(dir_abs)
 
 	var record: Dictionary = payload.duplicate()
-	record["version"]        = SCHEMA_VERSION
-	record["saved_at"]       = Time.get_datetime_string_from_system()
+	record["version"] = SCHEMA_VERSION
+	record["saved_at"] = Time.get_datetime_string_from_system()
 	record["journey_folder"] = journey_folder_name
 
 	var path: String = _save_path_for(journey_folder_name)

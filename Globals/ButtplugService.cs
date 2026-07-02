@@ -205,6 +205,65 @@ public partial class ButtplugService : Node
         return "";
     }
 
+    // BP-local stable id for a device: "<name>#<occurrence>" (occurrence = 0-based ordinal among
+    // identically-named devices, in enumeration order). Matches the ids the routing config and the
+    // DeviceRouting resolver use.
+    private static string MakeDeviceId(string name, int occurrence)
+    {
+        return $"{name}#{occurrence}";
+    }
+
+    // Connected Buttplug devices with the capability info the route resolver + Options mapping UI need.
+    // Each entry matches DeviceRouting's catalog contract plus the live `index` (used by dispatch):
+    //   { id, index, name, linear, vibrate_channels, constrict_channels }
+    // Empty when not connected.
+    public Godot.Collections.Array GetDeviceCatalog()
+    {
+        var result = new Godot.Collections.Array();
+        if (_client == null || !_client.Connected)
+            return result;
+
+        var nameCounts = new System.Collections.Generic.Dictionary<string, int>();
+        foreach (var device in _client.Devices)
+        {
+            int occurrence = nameCounts.TryGetValue(device.Name, out int seen) ? seen : 0;
+            nameCounts[device.Name] = occurrence + 1;
+            int deviceIndex = (int)device.Index;
+
+            result.Add(new Godot.Collections.Dictionary
+            {
+                ["id"] = MakeDeviceId(device.Name, occurrence),
+                ["index"] = deviceIndex,
+                ["name"] = device.Name,
+                ["linear"] = DeviceSupportsLinear(deviceIndex),
+                ["vibrate_channels"] = GetVibrationChannelCount(deviceIndex),
+                ["constrict_channels"] = GetConstrictChannelCount(deviceIndex),
+            });
+        }
+        return result;
+    }
+
+    // Resolve a BP-local device id ("<name>#<occurrence>", or a bare "<name>" = occurrence 0) to its
+    // live device index, or -1 if not currently connected. A leading "bp:" prefix is tolerated so the
+    // routing layer can pass a namespaced id straight through.
+    public int GetDeviceIndexById(string deviceId)
+    {
+        if (_client == null || !_client.Connected || string.IsNullOrEmpty(deviceId))
+            return -1;
+        if (deviceId.StartsWith("bp:"))
+            deviceId = deviceId.Substring(3);
+
+        var nameCounts = new System.Collections.Generic.Dictionary<string, int>();
+        foreach (var device in _client.Devices)
+        {
+            int occurrence = nameCounts.TryGetValue(device.Name, out int seen) ? seen : 0;
+            nameCounts[device.Name] = occurrence + 1;
+            if (MakeDeviceId(device.Name, occurrence) == deviceId || (occurrence == 0 && device.Name == deviceId))
+                return (int)device.Index;
+        }
+        return -1;
+    }
+
     // Treats a device as "linear" (a stroker) if it advertises either of the two
     // linear output types in Buttplug.Core.Messages.OutputType:
     //   • HwPositionWithDuration — the classic LinearCmd (target + duration).
@@ -241,6 +300,43 @@ public partial class ButtplugService : Node
         {
             return 1;
         }
+    }
+
+    // Number of independent constrict (pneumatic squeeze) actuators on the device.
+    // 0 for devices without a constrict feature (the common case).
+    public int GetConstrictChannelCount(int deviceIndex)
+    {
+        var device = GetDeviceAt(deviceIndex);
+        if (device == null)
+            return 0;
+
+        try
+        {
+            return device.GetFeaturesWithOutput(OutputType.Constrict).Count();
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    // Inclusive maximum step a constrict feature accepts. Callers drive discrete levels
+    // (0/1/2); this caps an unsupported level before it reaches the device.
+    public int GetConstrictMaxStep(int deviceIndex, int channelIndex)
+    {
+        var device = GetDeviceAt(deviceIndex);
+        if (device == null)
+            return 0;
+
+        try
+        {
+            var feature = device.GetFeaturesWithOutput(OutputType.Constrict).ElementAtOrDefault(channelIndex);
+            if (feature != null && feature.TryGetOutputRange(OutputType.Constrict, out int min, out int max))
+                return Math.Max(min, max);
+        }
+        catch { }
+
+        return 0;
     }
 
     // Send a vibration command to a specific actuator channel by its index.
@@ -288,6 +384,34 @@ public partial class ButtplugService : Node
         }
     }
 
+    // Set a constrict (pneumatic squeeze) actuator to a discrete level. Unlike vibration this is
+    // state-based — it receives transitions, not a per-keyframe stream. The level is clamped to the
+    // feature's reported range. Channel 0 = primary constrict actuator.
+    public async void SendConstrictLevel(int deviceIndex, int channelIndex, int level)
+    {
+        var device = GetDeviceAt(deviceIndex);
+        if (device == null)
+            return;
+
+        try
+        {
+            var feature = device.GetFeaturesWithOutput(OutputType.Constrict).ElementAtOrDefault(channelIndex);
+            if (feature == null)
+                return;
+
+            if (feature.TryGetOutputRange(OutputType.Constrict, out int min, out int max))
+                level = Math.Clamp(level, min, max);
+            else
+                level = Math.Max(0, level);
+
+            await feature.RunOutputAsync(DeviceOutput.Constrict.Steps(level), default);
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"ButtplugService: SendConstrictLevel failed: {e.Message}");
+        }
+    }
+
     public async void SendLinear(int deviceIndex, uint durationMs, double position)
     {
         var device = GetDeviceAt(deviceIndex);
@@ -296,7 +420,15 @@ public partial class ButtplugService : Node
 
         try
         {
-            await device.RunOutputAsync(DeviceOutput.PositionWithDuration.Percent(position, durationMs));
+            // Pick the command from what the device actually supports. Some devices advertise Position
+            // but reject PositionWithDuration (OutputCmd MessageNotSupported), so sending the wrong one
+            // throws — prefer the classic LinearCmd, fall back to immediate Position.
+            if (device.HasOutput(OutputType.HwPositionWithDuration))
+                await device.RunOutputAsync(DeviceOutput.PositionWithDuration.Percent(position, durationMs));
+            else if (device.HasOutput(OutputType.Position))
+                await device.RunOutputAsync(DeviceOutput.Position.Percent(position));
+            else
+                await device.RunOutputAsync(DeviceOutput.PositionWithDuration.Percent(position, durationMs));
         }
         catch (Exception e)
         {

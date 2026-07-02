@@ -16,19 +16,28 @@ func test_sensory_intensity_fields() -> void:
 		var kind: String = String(e.get("kind", ""))
 		var nm: String = String(e.get("name", "?"))
 		if kind in BINARY_SENSORY:
-			assert_bool(e.has("idef")) \
-				.override_failure_message("%s is binary, should have no idef" % nm).is_false()
+			(
+				assert_bool(e.has("idef"))
+				. override_failure_message("%s is binary, should have no idef" % nm)
+				. is_false()
+			)
 		else:
-			assert_bool(e.has("imin") and e.has("imax") and e.has("idef")) \
-				.override_failure_message("%s missing imin/imax/idef" % nm).is_true()
+			(
+				assert_bool(e.has("imin") and e.has("imax") and e.has("idef"))
+				. override_failure_message("%s missing imin/imax/idef" % nm)
+				. is_true()
+			)
 
 
 # Default intensity must be a normalized 0–1 value (it drives the % slider).
 func test_idef_normalized() -> void:
 	for e: Dictionary in JD.SENSORY_CATALOG:
 		if e.has("idef"):
-			assert_float(float(e["idef"])) \
-				.override_failure_message("%s idef out of 0–1" % e.get("name", "?")).is_between(0.0, 1.0)
+			(
+				assert_float(float(e["idef"]))
+				. override_failure_message("%s idef out of 0–1" % e.get("name", "?"))
+				. is_between(0.0, 1.0)
+			)
 
 
 # Every kind flagged as audio must actually exist in the sensory catalog.
@@ -37,8 +46,11 @@ func test_audio_kinds_subset() -> void:
 	for e: Dictionary in JD.SENSORY_CATALOG:
 		kinds[String(e.get("kind", ""))] = true
 	for k: String in JD.AUDIO_SENSORY_KINDS:
-		assert_bool(kinds.has(k)) \
-			.override_failure_message("audio kind '%s' not in SENSORY_CATALOG" % k).is_true()
+		(
+			assert_bool(kinds.has(k))
+			. override_failure_message("audio kind '%s' not in SENSORY_CATALOG" % k)
+			. is_true()
+		)
 
 
 # Effect names are the saved ids selected from curses[]/sensory[]/boons[] and
@@ -48,8 +60,11 @@ func test_names_unique_across_catalogs() -> void:
 	for cat in [JD.CURSE_CATALOG, JD.SENSORY_CATALOG, JD.BLESSING_CATALOG]:
 		for e: Dictionary in cat:
 			var nm: String = String(e.get("name", ""))
-			assert_bool(seen.has(nm)) \
-				.override_failure_message("duplicate effect name '%s'" % nm).is_false()
+			(
+				assert_bool(seen.has(nm))
+				. override_failure_message("duplicate effect name '%s'" % nm)
+				. is_false()
+			)
 			seen[nm] = true
 
 

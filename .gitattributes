@@ -1,2 +1,15 @@
 # Normalize EOL for all files that Git considers text files.
 * text=auto eol=lf
+
+# Mark media/binaries explicitly so they're never treated as text or EOL-normalized.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.mp4  binary
+*.mkv  binary
+*.webm binary
+*.ogg  binary
+*.wav  binary
+*.ttf  binary
+*.otf  binary

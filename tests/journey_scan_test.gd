@@ -36,58 +36,127 @@ func _parse(data: Dictionary) -> Dictionary:
 # conditional fork whose path holds a cursed round and a nested fork.
 func _full_journey() -> Dictionary:
 	return {
-		"Name": "Test Journey", "Author": "Tester", "Difficulty": "Hard",
-		"Description": "a description", "Tags": [],
-		"Rounds": [
+		"Name": "Test Journey",
+		"Author": "Tester",
+		"Difficulty": "Hard",
+		"Description": "a description",
+		"Tags": [],
+		"Rounds":
+		[
 			{
-				"Name": "Cursed One", "FolderName": "r001",
-				"FunscriptPath": "r001/script.funscript", "VideoPath": "r001/video.mp4",
-				"ActionCount": 42, "LengthMs": 120000,
-				"RoundType": "Cursed", "IsCheckpoint": true,
-				"CurseReward": 75, "CleanseCost": 30, "CurseRandom": false,
+				"Name": "Cursed One",
+				"FolderName": "r001",
+				"FunscriptPath": "r001/script.funscript",
+				"VideoPath": "r001/video.mp4",
+				"ActionCount": 42,
+				"LengthMs": 120000,
+				"RoundType": "Cursed",
+				"IsCheckpoint": true,
+				"CurseReward": 75,
+				"CleanseCost": 30,
+				"CurseRandom": false,
 				"Curses": ["Shrunken", "Greed"],
-				"BoonRandom": true, "Boons": [], "GiftItem": "",
-				"BossTagline": "", "BossModifiers": [],
-				"Sensory": ["Murk", "Muffled"], "SensoryInPool": true,
+				"BoonRandom": true,
+				"Boons": [],
+				"GiftItem": "",
+				"BossTagline": "",
+				"BossModifiers": [],
+				"Sensory": ["Murk", "Muffled"],
+				"SensoryInPool": true,
 				"SensoryIntensity": {"Murk": 0.8},
-				"ShowReveal": false, "CoinsAwarded": 10, "Order": 0,
+				"ShowReveal": false,
+				"CoinsAwarded": 10,
+				"Order": 0,
 			},
 			{
-				"Name": "Boss One", "FolderName": "r002",
-				"FunscriptPath": "r002/script.funscript", "ActionCount": 10, "LengthMs": 5000,
-				"RoundType": "Boss", "BossTagline": "Face me",
-				"BossModifiers": [{"Kind": "scale", "Factor": 1.2}, {"Kind": "clamp", "Min": 0, "Max": 50}],
-				"Sensory": ["Tremor"], "CoinsAwarded": 0, "Order": 1,
+				"Name": "Boss One",
+				"FolderName": "r002",
+				"FunscriptPath": "r002/script.funscript",
+				"ActionCount": 10,
+				"LengthMs": 5000,
+				"RoundType": "Boss",
+				"BossTagline": "Face me",
+				"BossModifiers":
+				[{"Kind": "scale", "Factor": 1.2}, {"Kind": "clamp", "Min": 0, "Max": 50}],
+				"Sensory": ["Tremor"],
+				"CoinsAwarded": 0,
+				"Order": 1,
 			},
 		],
-		"Shops": [
-			{"AfterOrder": 0, "Title": "The Shop", "Mode": "fixed", "Count": 2,
-			 "Items": ["key", "cleanse"], "PriceMultiplier": 1.5},
-		],
-		"Storyboards": [
-			{"Order": 0, "CoinsAwarded": 5, "Item": "key",
-			 "Lines": [{"Speaker": "A", "Text": "hi"}]},
-		],
-		"Forks": [
+		"Shops":
+		[
 			{
-				"AfterOrder": 1, "Title": "The Fork", "Description": "choose",
-				"Resolution": "conditional", "CondMetric": "coins", "DefaultPath": 1,
-				"Paths": [
+				"AfterOrder": 0,
+				"Title": "The Shop",
+				"Mode": "fixed",
+				"Count": 2,
+				"Items": ["key", "cleanse"],
+				"PriceMultiplier": 1.5
+			},
+		],
+		"Storyboards":
+		[
+			{
+				"Order": 0,
+				"CoinsAwarded": 5,
+				"Item": "key",
+				"Lines": [{"Speaker": "A", "Text": "hi"}]
+			},
+		],
+		"Forks":
+		[
+			{
+				"AfterOrder": 1,
+				"Title": "The Fork",
+				"Description": "choose",
+				"Resolution": "conditional",
+				"CondMetric": "coins",
+				"DefaultPath": 1,
+				"Paths":
+				[
 					{
-						"Name": "Left", "Description": "go left",
-						"Weight": 3, "Threshold": 100, "RequiredItem": "key", "Cost": 20,
-						"Rounds": [
-							{"Name": "Path Round", "FolderName": "fork0_p0_r001",
-							 "FunscriptPath": "fork0_p0_r001/script.funscript", "VideoPath": "fork0_p0_r001/video.mp4",
-							 "ActionCount": 7, "LengthMs": 3000,
-							 "RoundType": "cursed", "Curses": ["Inverted"],
-							 "Sensory": ["Bleary"], "SensoryIntensity": {"Bleary": 0.5},
-							 "ShowReveal": false, "Order": 0},
+						"Name": "Left",
+						"Description": "go left",
+						"Weight": 3,
+						"Threshold": 100,
+						"RequiredItem": "key",
+						"Cost": 20,
+						"Rounds":
+						[
+							{
+								"Name": "Path Round",
+								"FolderName": "fork0_p0_r001",
+								"FunscriptPath": "fork0_p0_r001/script.funscript",
+								"VideoPath": "fork0_p0_r001/video.mp4",
+								"ActionCount": 7,
+								"LengthMs": 3000,
+								"RoundType": "cursed",
+								"Curses": ["Inverted"],
+								"Sensory": ["Bleary"],
+								"SensoryIntensity": {"Bleary": 0.5},
+								"ShowReveal": false,
+								"Order": 0
+							},
 						],
-						"Shops": [], "Storyboards": [],
-						"Forks": [
-							{"AfterOrder": 0, "Title": "Nested", "Resolution": "choice",
-							 "Paths": [{"Name": "NestLeft", "Rounds": [], "Shops": [], "Storyboards": [], "Forks": []}]},
+						"Shops": [],
+						"Storyboards": [],
+						"Forks":
+						[
+							{
+								"AfterOrder": 0,
+								"Title": "Nested",
+								"Resolution": "choice",
+								"Paths":
+								[
+									{
+										"Name": "NestLeft",
+										"Rounds": [],
+										"Shops": [],
+										"Storyboards": [],
+										"Forks": []
+									}
+								]
+							},
 						],
 					},
 					{"Name": "Right", "Rounds": [], "Shops": [], "Storyboards": [], "Forks": []},
@@ -104,7 +173,7 @@ func test_top_level_fields() -> void:
 	assert_str(j.difficulty).is_equal("Hard")
 	assert_str(j.description).is_equal("a description")
 	assert_int(j.total_rounds).is_equal(3)  # 2 top-level + 1 in the longest fork path
-	assert_bool(j.map_enabled).is_true()    # omitted MapEnabled → default true (back-compat)
+	assert_bool(j.map_enabled).is_true()  # omitted MapEnabled → default true (back-compat)
 
 
 # The journey-level map switch round-trips. Authors set MapEnabled:false to hide

@@ -2,3 +2,19 @@ root = true
 
 [*]
 charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# GDScript — tabs (Godot style guide; matches gdformat output).
+[*.gd]
+indent_style = tab
+
+# C# — 4 spaces (run `dotnet format` to apply; gdformat does not touch .cs).
+[*.cs]
+indent_style = space
+indent_size = 4
+
+# Godot-generated files — leave them as Godot writes them.
+[*.{tscn,tres,godot,import}]
+trim_trailing_whitespace = false

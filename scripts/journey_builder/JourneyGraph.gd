@@ -40,9 +40,15 @@ static func build_graph(journey: Dictionary) -> Dictionary:
 	var nodes: Dictionary = {}
 	var counter: Array = [0]  # boxed int for the id allocator
 	var start: String = _flatten_level(
-		journey.get("rounds", []), journey.get("shops", []),
-		journey.get("storyboards", []), journey.get("forks", []),
-		"", nodes, counter, 0)
+		journey.get("rounds", []),
+		journey.get("shops", []),
+		journey.get("storyboards", []),
+		journey.get("forks", []),
+		"",
+		nodes,
+		counter,
+		0
+	)
 	return {"start": start, "nodes": nodes}
 
 
@@ -52,8 +58,16 @@ static func build_graph(journey: Dictionary) -> Dictionary:
 # for a fork path, or "" / end at the top level). Forks become fork nodes whose edges
 # flatten each path with `continue_to` = the node after the fork. Returns the id of the
 # first node, or `continue_to` when the level is empty (an empty path goes straight on).
-static func _flatten_level(rounds: Array, shops: Array, storyboards: Array, forks: Array,
-		continue_to: String, nodes: Dictionary, counter: Array, depth: int) -> String:
+static func _flatten_level(
+	rounds: Array,
+	shops: Array,
+	storyboards: Array,
+	forks: Array,
+	continue_to: String,
+	nodes: Dictionary,
+	counter: Array,
+	depth: int
+) -> String:
 	var ordered: Array = _interleave(rounds, shops, storyboards, forks)
 	if ordered.is_empty():
 		return continue_to
@@ -84,7 +98,7 @@ static func _flatten_level(rounds: Array, shops: Array, storyboards: Array, fork
 			nodes[id] = {
 				"type": item["type"],
 				"data": item["data"],
-				"out":  ([] if next_id == "" else [{"to": next_id}]),
+				"out": [] if next_id == "" else [{"to": next_id}],
 				"depth": depth,
 			}
 	return ids[0]
@@ -93,35 +107,49 @@ static func _flatten_level(rounds: Array, shops: Array, storyboards: Array, fork
 # Builds a fork node from a scanned fork dict. Each path's content is flattened into
 # its own chain (rejoining at `rejoin`), and the path's choice/presentation config
 # becomes the edge to that chain's first node (or straight to `rejoin` if empty).
-static func _build_fork(fork: Dictionary, rejoin: String, nodes: Dictionary, counter: Array, depth: int) -> Dictionary:
+static func _build_fork(
+	fork: Dictionary, rejoin: String, nodes: Dictionary, counter: Array, depth: int
+) -> Dictionary:
 	var edges: Array = []
 	for p: Dictionary in fork.get("paths", []):
 		var first: String = _flatten_level(
-			p.get("rounds", []), p.get("shops", []),
-			p.get("storyboards", []), p.get("forks", []),
-			rejoin, nodes, counter, depth + 1)
-		edges.append({
-			"to":            first,
-			"name":          p.get("name", ""),
-			"description":   p.get("description", ""),
-			"image_path":    p.get("image_path", ""),
-			"weight":        int(p.get("weight", 1)),
-			"threshold":     int(p.get("threshold", 0)),
-			"required_item": str(p.get("required_item", "")),
-			"cost":          int(p.get("cost", 0)),
-		})
+			p.get("rounds", []),
+			p.get("shops", []),
+			p.get("storyboards", []),
+			p.get("forks", []),
+			rejoin,
+			nodes,
+			counter,
+			depth + 1
+		)
+		(
+			edges
+			. append(
+				{
+					"to": first,
+					"name": p.get("name", ""),
+					"description": p.get("description", ""),
+					"image_path": p.get("image_path", ""),
+					"weight": int(p.get("weight", 1)),
+					"threshold": int(p.get("threshold", 0)),
+					"required_item": str(p.get("required_item", "")),
+					"cost": int(p.get("cost", 0)),
+				}
+			)
+		)
 	return {
 		"type": FORK_TYPE,
-		"data": {
-			"title":        fork.get("title", ""),
-			"description":  fork.get("description", ""),
-			"resolution":   str(fork.get("resolution", "choice")),
-			"cond_metric":  str(fork.get("cond_metric", "score")),
+		"data":
+		{
+			"title": fork.get("title", ""),
+			"description": fork.get("description", ""),
+			"resolution": str(fork.get("resolution", "choice")),
+			"cond_metric": str(fork.get("cond_metric", "score")),
 			"default_path": int(fork.get("default_path", 0)),
 			# Kept so the runtime journey-map marker can key a fork node by after_order
 			# (the map still renders the legacy nested model in Phase 2; the graph map in
 			# Phase 3 re-keys by node id and this can go).
-			"after_order":  int(fork.get("after_order", 0)),
+			"after_order": int(fork.get("after_order", 0)),
 		},
 		"out": edges,
 		"depth": depth,
@@ -136,15 +164,20 @@ static func _interleave(rounds: Array, shops: Array, storyboards: Array, forks: 
 	var keyed: Array = []  # [[key, append_idx, {type, data}], ...]
 	var ai: int = 0
 	for r: Dictionary in rounds:
-		keyed.append([int(r.get("order", 0)) * 3, ai, {"type": "round", "data": r}]);            ai += 1
+		keyed.append([int(r.get("order", 0)) * 3, ai, {"type": "round", "data": r}])
+		ai += 1
 	for sb: Dictionary in storyboards:
-		keyed.append([int(sb.get("order", 0)) * 3, ai, {"type": "storyboard", "data": sb}]);     ai += 1
+		keyed.append([int(sb.get("order", 0)) * 3, ai, {"type": "storyboard", "data": sb}])
+		ai += 1
 	for sh: Dictionary in shops:
-		keyed.append([int(sh.get("after_order", 0)) * 3 + 1, ai, {"type": "shop", "data": sh}]); ai += 1
+		keyed.append([int(sh.get("after_order", 0)) * 3 + 1, ai, {"type": "shop", "data": sh}])
+		ai += 1
 	for f: Dictionary in forks:
-		keyed.append([int(f.get("after_order", 0)) * 3 + 2, ai, {"type": "fork", "data": f}]);   ai += 1
-	keyed.sort_custom(func(a: Array, b: Array) -> bool:
-		return a[0] < b[0] if a[0] != b[0] else a[1] < b[1])
+		keyed.append([int(f.get("after_order", 0)) * 3 + 2, ai, {"type": "fork", "data": f}])
+		ai += 1
+	keyed.sort_custom(
+		func(a: Array, b: Array) -> bool: return a[0] < b[0] if a[0] != b[0] else a[1] < b[1]
+	)
 	var result: Array = []
 	for e in keyed:
 		result.append(e[2])
@@ -159,15 +192,19 @@ static func _next_id(counter: Array) -> String:
 
 # ── Queries ─────────────────────────────────────────────────────────────────
 
+
 # The node dict for `id`, or {} for "" / a missing id (treated as an end).
 static func node(graph: Dictionary, id: String) -> Dictionary:
 	return (graph.get("nodes", {}) as Dictionary).get(id, {})
 
+
 static func out_edges(graph: Dictionary, id: String) -> Array:
 	return (node(graph, id) as Dictionary).get("out", [])
 
+
 static func is_fork(graph: Dictionary, id: String) -> bool:
 	return (node(graph, id) as Dictionary).get("type", "") == FORK_TYPE
+
 
 # A node ends the journey when it has no outgoing edges (or it's the "" sentinel).
 static func is_end(graph: Dictionary, id: String) -> bool:
@@ -211,6 +248,7 @@ static func apply_redirects(graph: Dictionary, redirects: Dictionary) -> void:
 
 # ── Validation (free-form authoring) ─────────────────────────────────────────
 
+
 # Checks a graph for the invariants the runtime assumes: a real start, every edge resolving to a
 # node, acyclicity (the runtime walks the DAG and would loop forever on a back-edge), and which
 # nodes are reachable. Returns a list of issues [{kind, id, to?}] — pure (no UI strings), so it's
@@ -223,7 +261,7 @@ static func validate_graph(graph: Dictionary) -> Array:
 	var issues: Array = []
 	var nodes: Dictionary = graph.get("nodes", {})
 	if nodes.is_empty():
-		return issues   # "no rounds" is handled separately; nothing structural to check
+		return issues  # "no rounds" is handled separately; nothing structural to check
 	var start: String = str(graph.get("start", ""))
 	var start_ok: bool = start != "" and nodes.has(start)
 	if not start_ok:
@@ -249,7 +287,7 @@ static func validate_graph(graph: Dictionary) -> Array:
 # The set of node ids that a back-edge closes onto — i.e. nodes that participate in a cycle.
 # Standard DFS three-colouring (gray = on the current DFS stack). Empty for a DAG.
 static func _find_cycle_nodes(graph: Dictionary) -> Dictionary:
-	var color: Dictionary = {}   # id -> 1 gray (on stack) · 2 black (finished)
+	var color: Dictionary = {}  # id -> 1 gray (on stack) · 2 black (finished)
 	var found: Dictionary = {}
 	for id: String in graph.get("nodes", {}):
 		if not color.has(id):
@@ -264,7 +302,7 @@ static func _cycle_dfs(graph: Dictionary, id: String, color: Dictionary, found: 
 		if to == "" or not (graph.get("nodes", {}) as Dictionary).has(to):
 			continue
 		if color.get(to, 0) == 1:
-			found[to] = true              # back-edge onto a node still on the stack → cycle
+			found[to] = true  # back-edge onto a node still on the stack → cycle
 		elif not color.has(to):
 			_cycle_dfs(graph, to, color, found)
 	color[id] = 2
@@ -279,7 +317,9 @@ static func longest_round_path(graph: Dictionary, from_id: String) -> int:
 
 # `memo` caches results; `seen` guards against a malformed (non-DAG) input so a stray
 # back-edge can't spin forever. Both are owned by the public entry point above.
-static func _longest_round_path(graph: Dictionary, from_id: String, memo: Dictionary, seen: Dictionary) -> int:
+static func _longest_round_path(
+	graph: Dictionary, from_id: String, memo: Dictionary, seen: Dictionary
+) -> int:
 	if from_id == "" or seen.has(from_id):
 		return 0
 	if memo.has(from_id):
@@ -308,6 +348,7 @@ static func _longest_round_path(graph: Dictionary, from_id: String, memo: Dictio
 
 const FORMAT_GRAPH := 2  # journey.json "Format" marker for the graph (post-tree) schema.
 
+
 # Serializes the graph into the journey.json node block ({Format, Start, Nodes}). The
 # caller merges journey-level meta (Name/Author/Tags/MapEnabled/…) around it.
 static func to_json(graph: Dictionary) -> Dictionary:
@@ -315,10 +356,10 @@ static func to_json(graph: Dictionary) -> Dictionary:
 	for id: String in graph.get("nodes", {}):
 		var n: Dictionary = graph["nodes"][id]
 		var entry: Dictionary = {
-			"id":   id,
+			"id": id,
 			"type": n.get("type", ""),
 			"data": n.get("data", {}),
-			"out":  n.get("out", []),
+			"out": n.get("out", []),
 		}
 		# Editor canvas position (graph builder), stored as [x, y]. Absent for a graph that
 		# was never laid out (e.g. a freshly migrated runtime graph the builder hasn't seeded).
@@ -337,7 +378,7 @@ static func from_json(data: Dictionary) -> Dictionary:
 		var node: Dictionary = {
 			"type": str(raw.get("type", "")),
 			"data": raw.get("data", {}),
-			"out":  raw.get("out", []),
+			"out": raw.get("out", []),
 		}
 		# Restore editor canvas position when present (see to_json).
 		if raw.has("pos"):
@@ -371,8 +412,8 @@ static func resolve_paths(graph: Dictionary, base: String) -> void:
 
 static func _resolve_round_paths(d: Dictionary, base: String) -> void:
 	d["funscript_path"] = _abs(str(d.get("funscript_path", "")), base)
-	d["video_path"]     = _abs(str(d.get("video_path", "")), base)
-	d["boss_image"]     = _abs(str(d.get("boss_image", "")), base)
+	d["video_path"] = _abs(str(d.get("video_path", "")), base)
+	d["boss_image"] = _abs(str(d.get("boss_image", "")), base)
 	var ax: Dictionary = d.get("axis_scripts", {})
 	for k: String in ax:
 		ax[k] = _abs(str(ax[k]), base)

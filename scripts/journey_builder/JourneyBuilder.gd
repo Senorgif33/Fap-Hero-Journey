@@ -11,7 +11,7 @@ extends Control
 # All shared colors and style helpers live in `UITheme` (autoload). See
 # Globals/UITheme.gd. Local references use UITheme.<COLOR_NAME> / UITheme.style_*.
 
-const TOP_BAR_HEIGHT:  int = 64
+const TOP_BAR_HEIGHT: int = 64
 
 # Journeys root is configurable via Options → Journey Storage Location.
 # Always read via SettingsService.get_journeys_dir() so a path change takes
@@ -30,36 +30,36 @@ const TRANSCODE_PROGRESS_FILE: String = "user://transcode_progress.txt"
 # its `reason` field. Centralised as constants so typos surface at parse time
 # (string-literal mismatches in match statements silently fall through to the
 # default arm otherwise) and the full taxonomy is easy to grep.
-const CAUSE_BAD_NAME:           String = "bad_name"
-const CAUSE_NAME_COLLISION:     String = "name_collision"
-const CAUSE_MISSING_SOURCE:     String = "missing_source"
-const CAUSE_NO_ROUNDS:          String = "no_rounds"
-const CAUSE_FORK_UNDERFILLED:   String = "fork_underfilled"
-const CAUSE_FFMPEG_MISSING:     String = "ffmpeg_missing"
-const CAUSE_CANCELLED:          String = "cancelled"
-const CAUSE_SRC_UNREADABLE:     String = "src_unreadable"
-const CAUSE_DST_UNWRITABLE:     String = "dst_unwritable"
-const CAUSE_TRANSCODE_FAILED:   String = "transcode_failed"
+const CAUSE_BAD_NAME: String = "bad_name"
+const CAUSE_NAME_COLLISION: String = "name_collision"
+const CAUSE_MISSING_SOURCE: String = "missing_source"
+const CAUSE_NO_ROUNDS: String = "no_rounds"
+const CAUSE_FORK_UNDERFILLED: String = "fork_underfilled"
+const CAUSE_FFMPEG_MISSING: String = "ffmpeg_missing"
+const CAUSE_CANCELLED: String = "cancelled"
+const CAUSE_SRC_UNREADABLE: String = "src_unreadable"
+const CAUSE_DST_UNWRITABLE: String = "dst_unwritable"
+const CAUSE_TRANSCODE_FAILED: String = "transcode_failed"
 const CAUSE_UNKNOWN_COPY_ERROR: String = "unknown_copy_error"
 # Graph-editor structural causes (L4 validation).
-const CAUSE_NO_START:           String = "no_start"
-const CAUSE_DANGLING_EDGE:      String = "dangling_edge"
-const CAUSE_CYCLE:              String = "cycle"
-const CAUSE_UNREACHABLE:        String = "unreachable"
+const CAUSE_NO_START: String = "no_start"
+const CAUSE_DANGLING_EDGE: String = "dangling_edge"
+const CAUSE_CYCLE: String = "cycle"
+const CAUSE_UNREACHABLE: String = "unreachable"
 
 const GraphViewScene = preload("res://scenes/graph_view/GraphView.tscn")
 
-@onready var _bg:          ColorRect       = $Background
-@onready var _top_bar:     HBoxContainer   = $TopBar
-@onready var _back_btn:    Button          = $TopBar/BackButton
-@onready var _title_lbl:   Label           = $TopBar/TitleLabel
-@onready var _status_lbl:  Label           = $TopBar/StatusLabel
-@onready var _save_btn:    Button          = $TopBar/SaveButton
-@onready var _main_layout: HBoxContainer   = $MainLayout
-@onready var _graph_host:  Control         = $MainLayout/GraphHost
-@onready var _side_panel:  PanelContainer  = $MainLayout/SidePanel
+@onready var _bg: ColorRect = $Background
+@onready var _top_bar: HBoxContainer = $TopBar
+@onready var _back_btn: Button = $TopBar/BackButton
+@onready var _title_lbl: Label = $TopBar/TitleLabel
+@onready var _status_lbl: Label = $TopBar/StatusLabel
+@onready var _save_btn: Button = $TopBar/SaveButton
+@onready var _main_layout: HBoxContainer = $MainLayout
+@onready var _graph_host: Control = $MainLayout/GraphHost
+@onready var _side_panel: PanelContainer = $MainLayout/SidePanel
 @onready var _side_scroll: ScrollContainer = $MainLayout/SidePanel/SideScroll
-@onready var _side_vbox:   VBoxContainer   = $MainLayout/SidePanel/SideScroll/SideVBox
+@onready var _side_vbox: VBoxContainer = $MainLayout/SidePanel/SideScroll/SideVBox
 
 static var edit_journey: Dictionary = {}
 
@@ -67,30 +67,30 @@ const SIDE_PANEL_WIDTH: int = 480
 
 # Journey metadata: stored as member vars since the side-panel editor widgets
 # are created and destroyed dynamically when the user navigates the graph.
-var _journey_name:           String = ""
-var _journey_author:         String = ""
-var _journey_desc:           String = ""
-var _journey_difficulty_idx: int    = 0
-var _journey_tags:           Array  = []  # Array[String] of tag ids (see TagRegistry)
-var _journey_map_enabled:    bool   = true  # author allows the in-play journey map (off = enforce surprise)
-var _journey_map_fog:        bool   = false # fog of war: reveal the map as the player discovers it (map must be enabled)
-var _journey_map_fog_reveal: int    = 1     # fog reveal depth: ghost levels ahead of the trail (< 0 = whole structure)
+var _journey_name: String = ""
+var _journey_author: String = ""
+var _journey_desc: String = ""
+var _journey_difficulty_idx: int = 0
+var _journey_tags: Array = []  # Array[String] of tag ids (see TagRegistry)
+var _journey_map_enabled: bool = true  # author allows the in-play journey map (off = enforce surprise)
+var _journey_map_fog: bool = false  # fog of war: reveal the map as the player discovers it (map must be enabled)
+var _journey_map_fog_reveal: int = 1  # fog reveal depth: ghost levels ahead of the trail (< 0 = whole structure)
 
 # Folder the journey was loaded from when editing. If the journey is renamed,
 # the save writes a new folder; this lets us delete the stale original.
 var _original_journey_folder: String = ""
 
-var _cover_path:    String       = ""
+var _cover_path: String = ""
 var _cover_texture: ImageTexture = null  # cached so the journey-info view can re-show the preview without re-reading from disk
 
 var _graph: Control = null  # GraphView instance, host inside _graph_host
 
 # The free-form GRAPH editor model (GRAPH_EDITOR_OVERHAUL.md) — the journey as nodes + edges.
-var _graph_model: Dictionary = {}   # {start, nodes:{id:{type,data,pos,out}}}
-var _selected_graph_node_id: String = ""   # the lone selected node id, or "" when 0 or 2+ are selected
-var _selected_graph_node_ids: Array = []   # the full selection set (mirrors GraphView; drives group ops)
-var _connecting_from: String = ""          # source node while wiring an edge (click-to-connect), else ""
-var _connecting_edge_idx: int = -1         # while wiring: the fork choice index to wire, or -1 for a regular node's single out-edge
+var _graph_model: Dictionary = {}  # {start, nodes:{id:{type,data,pos,out}}}
+var _selected_graph_node_id: String = ""  # the lone selected node id, or "" when 0 or 2+ are selected
+var _selected_graph_node_ids: Array = []  # the full selection set (mirrors GraphView; drives group ops)
+var _connecting_from: String = ""  # source node while wiring an edge (click-to-connect), else ""
+var _connecting_edge_idx: int = -1  # while wiring: the fork choice index to wire, or -1 for a regular node's single out-edge
 
 # Undo / redo of the graph STRUCTURE (not in-field text edits). Each entry is a deep _graph_model
 # snapshot taken just before a structural mutation; recent last.
@@ -103,7 +103,7 @@ const UNDO_LIMIT: int = 50
 # edges between them; a note is a plain comment dict. _paste_count cascades the offset on repeat paste.
 var _node_clipboard: Array = []
 var _clip_comment: Dictionary = {}
-var _clip_kind: String = ""   # "" | "nodes" | "comment"
+var _clip_kind: String = ""  # "" | "nodes" | "comment"
 var _paste_count: int = 0
 const PASTE_OFFSET: Vector2 = Vector2(48, 48)
 
@@ -111,7 +111,7 @@ const PASTE_OFFSET: Vector2 = Vector2(48, 48)
 var _side_renderer: BuilderSidePanel = null
 
 var _transcode_cancel: bool = false
-var _transcode_pid:    int  = -1
+var _transcode_pid: int = -1
 
 # Set true when a media copy/transcode fails or is cancelled mid-save (by _copy_file or
 # _save_round_node_media), so the _save_graph_nodes walk can stop and _on_save_pressed
@@ -167,15 +167,15 @@ var _pending_test_location: Dictionary = {}
 # in the node editor side panel.
 var _test_seed_score: int = 0
 var _test_seed_coins: int = 0
-var _test_seed_flags: Array = []   # flag names to pre-set for a Test-From-Here run (exercise flag forks)
-var _test_panel_expanded: bool = false   # side-panel "Test From Here" group open/closed, persisted across node selections (panel rebuilds)
+var _test_seed_flags: Array = []  # flag names to pre-set for a Test-From-Here run (exercise flag forks)
+var _test_panel_expanded: bool = false  # side-panel "Test From Here" group open/closed, persisted across node selections (panel rebuilds)
 
 # Streaming-copy tuning. Chunks are read/written 1 MB at a time; the main thread
 # yields one frame only after COPY_FRAME_BUDGET_MS of accumulated work — frequent
 # enough that the window stays responsive, rare enough that the frame-wait tax
 # stays under ~1 s even on multi-GB videos.
-const COPY_CHUNK_SIZE:       int = 1024 * 1024
-const COPY_FRAME_BUDGET_MS:  int = 100
+const COPY_CHUNK_SIZE: int = 1024 * 1024
+const COPY_FRAME_BUDGET_MS: int = 100
 
 
 func _ready() -> void:
@@ -202,7 +202,7 @@ func _ready() -> void:
 # signal to the side panel.
 func _setup_graph_view() -> void:
 	_graph = GraphViewScene.instantiate()
-	_graph.anchor_right  = 1.0
+	_graph.anchor_right = 1.0
 	_graph.anchor_bottom = 1.0
 	_graph_host.add_child(_graph)
 	# Rendered from _graph_model, populated IN PLACE by _load_graph (existing journey) before this
@@ -217,7 +217,7 @@ func _setup_graph_view() -> void:
 	_graph.frame_toggle_collapse.connect(_on_frame_toggle_collapse)
 	_graph.canvas_context_menu_requested.connect(_on_canvas_context_menu_requested)
 	_graph.node_context_menu_requested.connect(_on_node_context_menu_requested)
-	_graph.warning_provider = _compute_node_warnings   # GraphView pulls soft-validation badges each layout
+	_graph.warning_provider = _compute_node_warnings  # GraphView pulls soft-validation badges each layout
 	_graph.call_deferred("set_graph", _graph_model)
 
 
@@ -236,13 +236,15 @@ func _refresh_graph() -> void:
 func _compute_node_warnings() -> Dictionary:
 	var warnings: Dictionary = {}
 	var nodes: Dictionary = _graph_model.get("nodes", {})
-	var known_flags: Dictionary = _all_set_flags()   # every flag any node/choice sets (for dead-flag detection)
+	var known_flags: Dictionary = _all_set_flags()  # every flag any node/choice sets (for dead-flag detection)
 	for id: String in nodes:
 		var n: Dictionary = nodes[id]
 		var issues: Array = []
 		match str(n.get("type", "")):
-			"round":      _save_check_round(n.get("data", {}), "Round", issues)
-			"storyboard": _save_check_storyboard(n.get("data", {}), "Storyboard", issues)
+			"round":
+				_save_check_round(n.get("data", {}), "Round", issues)
+			"storyboard":
+				_save_check_storyboard(n.get("data", {}), "Storyboard", issues)
 			"fork":
 				_save_check_fork_graph(n, "Fork", issues)
 				_check_dead_flag_paths(n, known_flags, issues)
@@ -255,7 +257,7 @@ func _compute_node_warnings() -> Dictionary:
 	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model):
 		var sid: String = str(gi.get("id", ""))
 		if sid == "" or not nodes.has(sid):
-			continue   # journey-level (e.g. no_start) — surfaced at save, not per node
+			continue  # journey-level (e.g. no_start) — surfaced at save, not per node
 		var msg: String = _structural_warning_text(str(gi.get("kind", "")))
 		if msg != "":
 			warnings[sid] = (str(warnings[sid]) + "\n" + msg) if warnings.has(sid) else msg
@@ -279,20 +281,36 @@ func _all_set_flags() -> Dictionary:
 # usually a typo). Detail-only — doesn't block save.
 func _check_dead_flag_paths(node: Dictionary, known_flags: Dictionary, issues: Array) -> void:
 	var data: Dictionary = node.get("data", {})
-	if str(data.get("resolution", "")) != "conditional" or str(data.get("cond_metric", "")) != "flag":
+	if (
+		str(data.get("resolution", "")) != "conditional"
+		or str(data.get("cond_metric", "")) != "flag"
+	):
 		return
 	for ei in (node.get("out", []) as Array).size():
-		var rf: String = str(((node["out"][ei]) as Dictionary).get("required_flag", "")).strip_edges()
+		var rf: String = (
+			str(((node["out"][ei]) as Dictionary).get("required_flag", "")).strip_edges()
+		)
 		if rf != "" and not known_flags.has(rf):
-			issues.append({"detail": "Choice %d requires flag \"%s\", which nothing in this journey sets (typo?)." % [ei + 1, rf]})
+			issues.append(
+				{
+					"detail":
+					(
+						'Choice %d requires flag "%s", which nothing in this journey sets (typo?).'
+						% [ei + 1, rf]
+					)
+				}
+			)
 
 
 # Short per-node text for a structural validation issue (JourneyGraph.validate_graph kind).
 func _structural_warning_text(kind: String) -> String:
 	match kind:
-		"unreachable": return "Unreachable — nothing leads here, so this node would never play."
-		"dangling":    return "A connection points to a node that no longer exists."
-		"cycle":       return "Part of a loop — a journey must flow forward (no cycles)."
+		"unreachable":
+			return "Unreachable — nothing leads here, so this node would never play."
+		"dangling":
+			return "A connection points to a node that no longer exists."
+		"cycle":
+			return "Part of a loop — a journey must flow forward (no cycles)."
 	return ""
 
 
@@ -300,47 +318,51 @@ func _structural_warning_text(kind: String) -> String:
 # Layout
 # ---------------------------------------------------------------------------
 
+
 func _apply_layout() -> void:
-	anchor_right  = 1.0
+	anchor_right = 1.0
 	anchor_bottom = 1.0
 
-	_bg.anchor_right  = 1.0
+	_bg.anchor_right = 1.0
 	_bg.anchor_bottom = 1.0
-	_bg.offset_left = 0; _bg.offset_top = 0; _bg.offset_right = 0; _bg.offset_bottom = 0
+	_bg.offset_left = 0
+	_bg.offset_top = 0
+	_bg.offset_right = 0
+	_bg.offset_bottom = 0
 
 	var animated_bg: Control = $AnimatedBackground
-	animated_bg.anchor_right  = 1.0
+	animated_bg.anchor_right = 1.0
 	animated_bg.anchor_bottom = 1.0
 
-	_top_bar.anchor_right  = 1.0
-	_top_bar.offset_left   = 16
-	_top_bar.offset_right  = -16
-	_top_bar.offset_top    = 12
+	_top_bar.anchor_right = 1.0
+	_top_bar.offset_left = 16
+	_top_bar.offset_right = -16
+	_top_bar.offset_top = 12
 	_top_bar.offset_bottom = TOP_BAR_HEIGHT
 	_top_bar.add_theme_constant_override("separation", 12)
 
 	# Title expands to fill space between Back (left) and Status/Save (right).
 	_title_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
-	_main_layout.anchor_right  = 1.0
+	_main_layout.anchor_right = 1.0
 	_main_layout.anchor_bottom = 1.0
-	_main_layout.offset_left   = 16
-	_main_layout.offset_right  = -16
-	_main_layout.offset_top    = TOP_BAR_HEIGHT + 8
+	_main_layout.offset_left = 16
+	_main_layout.offset_right = -16
+	_main_layout.offset_top = TOP_BAR_HEIGHT + 8
 	_main_layout.offset_bottom = -16
 	_main_layout.add_theme_constant_override("separation", 12)
 
 	_graph_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_graph_host.size_flags_vertical   = Control.SIZE_EXPAND_FILL
-	_graph_host.clip_contents         = true
+	_graph_host.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_graph_host.clip_contents = true
 
 	_side_panel.custom_minimum_size = Vector2(SIDE_PANEL_WIDTH, 0)
 	_side_panel.size_flags_horizontal = Control.SIZE_SHRINK_END
-	_side_panel.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	_side_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	_side_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_side_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_side_scroll.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	_side_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	_side_vbox.add_theme_constant_override("separation", 10)
 	_side_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -349,6 +371,7 @@ func _apply_layout() -> void:
 # ---------------------------------------------------------------------------
 # Theme
 # ---------------------------------------------------------------------------
+
 
 func _apply_theme() -> void:
 	_bg.color = UITheme.BG
@@ -365,18 +388,23 @@ func _apply_theme() -> void:
 
 	# Side panel background
 	var sp_style: StyleBoxFlat = StyleBoxFlat.new()
-	sp_style.bg_color           = UITheme.PANEL_BG
-	sp_style.border_color       = UITheme.PURPLE_MID
-	sp_style.border_width_left  = 1; sp_style.border_width_right  = 1
-	sp_style.border_width_top   = 1; sp_style.border_width_bottom = 1
-	sp_style.content_margin_left   = 14; sp_style.content_margin_right  = 14
-	sp_style.content_margin_top    = 14; sp_style.content_margin_bottom = 14
+	sp_style.bg_color = UITheme.PANEL_BG
+	sp_style.border_color = UITheme.PURPLE_MID
+	sp_style.border_width_left = 1
+	sp_style.border_width_right = 1
+	sp_style.border_width_top = 1
+	sp_style.border_width_bottom = 1
+	sp_style.content_margin_left = 14
+	sp_style.content_margin_right = 14
+	sp_style.content_margin_top = 14
+	sp_style.content_margin_bottom = 14
 	_side_panel.add_theme_stylebox_override("panel", sp_style)
 
 
 # ---------------------------------------------------------------------------
 # Toolbar (top bar) — Fit + Shortcuts buttons inserted before Save
 # ---------------------------------------------------------------------------
+
 
 # Adds the "Fit" (frame the whole graph) and "Shortcuts" (keybinding reference)
 # buttons to the top bar, just left of Save. Created in code so the .tscn stays
@@ -387,9 +415,10 @@ func _setup_toolbar_buttons() -> void:
 	fit_btn.focus_mode = Control.FOCUS_NONE
 	fit_btn.tooltip_text = "Frame the whole journey in view"
 	UITheme.style_button(fit_btn, UITheme.PURPLE_MID)
-	fit_btn.pressed.connect(func() -> void:
-		if _graph:
-			_graph.fit_to_view()
+	fit_btn.pressed.connect(
+		func() -> void:
+			if _graph:
+				_graph.fit_to_view()
 	)
 	_top_bar.add_child(fit_btn)
 	_top_bar.move_child(fit_btn, _save_btn.get_index())
@@ -454,6 +483,7 @@ func _on_arrange_pressed() -> void:
 
 # ── Canvas right-click context menu ──────────────────────────────────────────
 
+
 # GraphView reports a right-click on empty canvas with the world position under the cursor; open the
 # menu there. Houses the old 🗒 NOTE / ▭ GROUP / ⌨ SHORTCUTS toolbar actions plus node creation, all
 # dropping at the click position.
@@ -473,10 +503,14 @@ func _show_canvas_context_menu(world_pos: Vector2) -> void:
 	var panel_style: StyleBoxFlat = StyleBoxFlat.new()
 	panel_style.bg_color = UITheme.PANEL_BG
 	panel_style.border_color = UITheme.PURPLE_BRIGHT
-	panel_style.border_width_left = 2; panel_style.border_width_right = 2
-	panel_style.border_width_top = 2; panel_style.border_width_bottom = 2
-	panel_style.content_margin_left = 8; panel_style.content_margin_right = 8
-	panel_style.content_margin_top = 8; panel_style.content_margin_bottom = 8
+	panel_style.border_width_left = 2
+	panel_style.border_width_right = 2
+	panel_style.border_width_top = 2
+	panel_style.border_width_bottom = 2
+	panel_style.content_margin_left = 8
+	panel_style.content_margin_right = 8
+	panel_style.content_margin_top = 8
+	panel_style.content_margin_bottom = 8
 	popup.add_theme_stylebox_override("panel", panel_style)
 
 	var vbox: VBoxContainer = VBoxContainer.new()
@@ -485,30 +519,44 @@ func _show_canvas_context_menu(world_pos: Vector2) -> void:
 	popup.add_child(vbox)
 
 	# Add-node actions — each drops a fresh node centred on the click.
-	for spec: Array in [["＋ ROUND", "round"], ["＋ SHOP", "shop"], ["＋ STORYBOARD", "storyboard"], ["＋ FORK", "fork"]]:
+	for spec: Array in [
+		["＋ ROUND", "round"], ["＋ SHOP", "shop"], ["＋ STORYBOARD", "storyboard"], ["＋ FORK", "fork"]
+	]:
 		var t: String = spec[1]
-		var node_b: Button = _ctx_menu_button(spec[0], UITheme.PURPLE_BRIGHT, func() -> void:
-			popup.queue_free()
-			_create_graph_node(t, world_pos)
+		var node_b: Button = _ctx_menu_button(
+			spec[0],
+			UITheme.PURPLE_BRIGHT,
+			func() -> void:
+				popup.queue_free()
+				_create_graph_node(t, world_pos)
 		)
 		vbox.add_child(node_b)
 
 	vbox.add_child(_ctx_menu_separator())
-	var note_b: Button = _ctx_menu_button("🗒 NOTE", UITheme.AMBER, func() -> void:
-		popup.queue_free()
-		_add_comment(world_pos)
+	var note_b: Button = _ctx_menu_button(
+		"🗒 NOTE",
+		UITheme.AMBER,
+		func() -> void:
+			popup.queue_free()
+			_add_comment(world_pos)
 	)
 	vbox.add_child(note_b)
-	var group_b: Button = _ctx_menu_button("▭ GROUP", UITheme.PURPLE_MID, func() -> void:
-		popup.queue_free()
-		_add_frame(world_pos)
+	var group_b: Button = _ctx_menu_button(
+		"▭ GROUP",
+		UITheme.PURPLE_MID,
+		func() -> void:
+			popup.queue_free()
+			_add_frame(world_pos)
 	)
 	vbox.add_child(group_b)
 
 	vbox.add_child(_ctx_menu_separator())
-	var keys_b: Button = _ctx_menu_button("⌨ SHORTCUTS", UITheme.PURPLE_MID, func() -> void:
-		popup.queue_free()
-		_show_shortcuts_overlay()
+	var keys_b: Button = _ctx_menu_button(
+		"⌨ SHORTCUTS",
+		UITheme.PURPLE_MID,
+		func() -> void:
+			popup.queue_free()
+			_show_shortcuts_overlay()
 	)
 	vbox.add_child(keys_b)
 
@@ -534,10 +582,14 @@ func _show_node_context_menu(node_id: String) -> void:
 	var panel_style: StyleBoxFlat = StyleBoxFlat.new()
 	panel_style.bg_color = UITheme.PANEL_BG
 	panel_style.border_color = UITheme.PURPLE_BRIGHT
-	panel_style.border_width_left = 2; panel_style.border_width_right = 2
-	panel_style.border_width_top = 2; panel_style.border_width_bottom = 2
-	panel_style.content_margin_left = 8; panel_style.content_margin_right = 8
-	panel_style.content_margin_top = 8; panel_style.content_margin_bottom = 8
+	panel_style.border_width_left = 2
+	panel_style.border_width_right = 2
+	panel_style.border_width_top = 2
+	panel_style.border_width_bottom = 2
+	panel_style.content_margin_left = 8
+	panel_style.content_margin_right = 8
+	panel_style.content_margin_top = 8
+	panel_style.content_margin_bottom = 8
 	popup.add_theme_stylebox_override("panel", panel_style)
 
 	var vbox: VBoxContainer = VBoxContainer.new()
@@ -546,9 +598,12 @@ func _show_node_context_menu(node_id: String) -> void:
 	popup.add_child(vbox)
 
 	var already_start: bool = str(_graph_model.get("start", "")) == node_id
-	var start_b: Button = _ctx_menu_button(("✓ START NODE" if already_start else "★ SET AS START"), UITheme.CYAN, func() -> void:
-		popup.queue_free()
-		_set_node_as_start(node_id)
+	var start_b: Button = _ctx_menu_button(
+		"✓ START NODE" if already_start else "★ SET AS START",
+		UITheme.CYAN,
+		func() -> void:
+			popup.queue_free()
+			_set_node_as_start(node_id)
 	)
 	vbox.add_child(start_b)
 
@@ -592,8 +647,9 @@ func _ctx_menu_separator() -> HSeparator:
 
 # ── Canvas comments (sticky notes) ───────────────────────────────────────────
 
-var _selected_comment_idx: int = -1   # the note whose editor is open; Delete/Backspace targets it
-var _selected_frame_idx: int = -1     # the group frame whose editor is open; Delete/Backspace targets it
+var _selected_comment_idx: int = -1  # the note whose editor is open; Delete/Backspace targets it
+var _selected_frame_idx: int = -1  # the group frame whose editor is open; Delete/Backspace targets it
+
 
 # Canvas-menu 🗒 NOTE — drops a new empty sticky note (at the right-click cursor, else the view centre)
 # and opens it.
@@ -634,6 +690,7 @@ func _delete_comment(idx: int) -> void:
 
 
 # ── Group frames ─────────────────────────────────────────────────────────────
+
 
 # Canvas-menu ▭ GROUP — wraps the current selection, else drops a labelled group frame (at the
 # right-click cursor, else the view centre) and opens it.
@@ -696,7 +753,10 @@ func _nodes_bounds(ids: Array) -> Rect2:
 	var first: bool = true
 	for id: String in ids:
 		if nodes.has(id):
-			var nr: Rect2 = Rect2((nodes[id] as Dictionary).get("pos", Vector2.ZERO), Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT))
+			var nr: Rect2 = Rect2(
+				(nodes[id] as Dictionary).get("pos", Vector2.ZERO),
+				Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT)
+			)
 			rect = nr if first else rect.merge(nr)
 			first = false
 	return rect
@@ -716,8 +776,10 @@ func _nodes_in_rect(rect: Rect2) -> Array:
 # A frame rect wrapping a node bounding box: padding all round + extra room at the top for the header.
 func _frame_rect_for(bb: Rect2) -> Rect2:
 	var pad: float = 30.0
-	var r: Rect2 = Rect2(bb.position - Vector2(pad, pad + GraphView.FRAME_HEADER_H),
-		bb.size + Vector2(pad * 2.0, pad * 2.0 + GraphView.FRAME_HEADER_H))
+	var r: Rect2 = Rect2(
+		bb.position - Vector2(pad, pad + GraphView.FRAME_HEADER_H),
+		bb.size + Vector2(pad * 2.0, pad * 2.0 + GraphView.FRAME_HEADER_H)
+	)
 	r.position = GraphLayout.snap(r.position)
 	r.size = GraphLayout.snap(r.size)
 	return r
@@ -739,11 +801,11 @@ func _on_frame_toggle_collapse(idx: int) -> void:
 		# last expand's make-room, so it sits below the frame here and is excluded — never re-absorbed.
 		g["members"] = _nodes_in_rect(g.get("rect", Rect2()))
 		_undo_expand_pushout(g)  # parked node(s) back to the freed space; nudged-aside nodes back up
-		_apply_frame_reflow(g)   # pull the nodes below up to the collapsed bar…
+		_apply_frame_reflow(g)  # pull the nodes below up to the collapsed bar…
 		_apply_frame_shift(g, idx)  # …and the OTHER group frames below, so they ride along with their nodes
 	else:
-		_undo_frame_reflow(g)      # push the nodes back down to make room for the revealed body…
-		_undo_frame_shift(g)       # …and the group frames below back down (reverses the collapse shift)
+		_undo_frame_reflow(g)  # push the nodes back down to make room for the revealed body…
+		_undo_frame_shift(g)  # …and the group frames below back down (reverses the collapse shift)
 		_push_parked_nodes_out(g)  # shove any node parked in the footprint clear of the frame (make room)
 		g.erase("members")
 	_selected_frame_idx = idx
@@ -818,7 +880,7 @@ func _undo_frame_shift(g: Dictionary) -> void:
 	if amt > 0.0:
 		var groups: Array = _graph_model.get("groups", [])
 		for raw in g.get("frame_shift_idxs", []):
-			var i: int = int(raw)   # JSON round-trips the indices as floats; coerce back
+			var i: int = int(raw)  # JSON round-trips the indices as floats; coerce back
 			if i >= 0 and i < groups.size():
 				var fr: Dictionary = groups[i]
 				var r: Rect2 = fr.get("rect", Rect2())
@@ -851,7 +913,7 @@ func _shift_frames_below(threshold_y: float, dy: float, exclude_idx: int) -> Arr
 # single amount so side-by-side layouts survive. Exact moves are recorded for _undo_expand_pushout.
 func _push_parked_nodes_out(g: Dictionary) -> void:
 	var rect: Rect2 = g.get("rect", Rect2())
-	var skip: Dictionary = {}   # nodes that must never be shoved: frozen members + the parked node(s)
+	var skip: Dictionary = {}  # nodes that must never be shoved: frozen members + the parked node(s)
 	for id: String in g.get("members", []):
 		skip[id] = true
 	var parked: Array = []
@@ -882,23 +944,33 @@ func _push_parked_nodes_out(g: Dictionary) -> void:
 	for id: String in nodes:
 		if skip.has(id):
 			continue
-		if ((nodes[id] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y + GraphView.NODE_HEIGHT > frame_bottom:
+		if (
+			(
+				((nodes[id] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
+				+ GraphView.NODE_HEIGHT
+			)
+			> frame_bottom
+		):
 			below.append(id)
-	below.sort_custom(func(a: String, b: String) -> bool:
-		return ((nodes[a] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y < ((nodes[b] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
+	below.sort_custom(
+		func(a: String, b: String) -> bool:
+			return (
+				((nodes[a] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
+				< ((nodes[b] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
+			)
 	)
 
 	var block_ids: Array = []
 	var shift: float = 0.0
 	if not below.is_empty():
 		var first_y: float = ((nodes[below[0]] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
-		if first_y < parked_new_bottom + gap:   # the parked node lands on the first node → make room
+		if first_y < parked_new_bottom + gap:  # the parked node lands on the first node → make room
 			shift = (parked_new_bottom + gap) - first_y
 			var block_bottom: float = -INF
 			for id: String in below:
 				var y: float = ((nodes[id] as Dictionary).get("pos", Vector2.ZERO) as Vector2).y
 				if not block_ids.is_empty() and (y - block_bottom) >= shift:
-					break   # a gap wide enough to absorb the shift — everything from here down is clear
+					break  # a gap wide enough to absorb the shift — everything from here down is clear
 				block_ids.append(id)
 				block_bottom = maxf(block_bottom, y + GraphView.NODE_HEIGHT)
 			for id: String in block_ids:
@@ -940,12 +1012,12 @@ func _undo_expand_pushout(g: Dictionary) -> void:
 # Export image — high-res PNG of the whole journey layout (for sharing)
 # ---------------------------------------------------------------------------
 
-const CAPTURE_SCALE:          float = 1.0             # render multiplier (native = crisp text; >1 = more pixels but softer)
-const CAPTURE_MARGIN:         float = 48.0            # px padding around the graph
-const CAPTURE_MAX_DIM:        int   = 12000           # cap longest side
-const CAPTURE_MAX_MEGAPIXELS: float = 48.0            # cap total area (bounds the render target's GPU/RAM)
-const CAPTURE_MAX_BYTES:      int   = 8 * 1024 * 1024  # 8 MB site upload limit
-const CAPTURE_JPEG_QUALITY:   float = 0.9             # used when a PNG would blow the 8 MB budget
+const CAPTURE_SCALE: float = 1.0  # render multiplier (native = crisp text; >1 = more pixels but softer)
+const CAPTURE_MARGIN: float = 48.0  # px padding around the graph
+const CAPTURE_MAX_DIM: int = 12000  # cap longest side
+const CAPTURE_MAX_MEGAPIXELS: float = 48.0  # cap total area (bounds the render target's GPU/RAM)
+const CAPTURE_MAX_BYTES: int = 8 * 1024 * 1024  # 8 MB site upload limit
+const CAPTURE_JPEG_QUALITY: float = 0.9  # used when a PNG would blow the 8 MB budget
 
 
 func _on_export_image_pressed() -> void:
@@ -972,14 +1044,16 @@ func _render_graph_image() -> Image:
 
 	var bg: ColorRect = ColorRect.new()
 	bg.color = UITheme.BG
-	bg.anchor_right = 1.0; bg.anchor_bottom = 1.0
+	bg.anchor_right = 1.0
+	bg.anchor_bottom = 1.0
 	svp.add_child(bg)
 
 	var g: GraphView = GraphViewScene.instantiate()
-	g.anchor_right = 1.0; g.anchor_bottom = 1.0
-	g.map_mode = true   # render the journey clean — no editor chrome (out-handles, selection wiring)
+	g.anchor_right = 1.0
+	g.anchor_bottom = 1.0
+	g.map_mode = true  # render the journey clean — no editor chrome (out-handles, selection wiring)
 	svp.add_child(g)
-	add_child(svp)   # offscreen — a bare SubViewport still renders to its texture
+	add_child(svp)  # offscreen — a bare SubViewport still renders to its texture
 
 	g.set_graph(_graph_model)
 	# Wait for the deferred layout chain (refresh → _do_layout → centre) to settle.
@@ -1053,24 +1127,31 @@ func _save_capture_with_dialog(result: Dictionary) -> void:
 		base = "journey"
 
 	var dlg: FileDialog = FileDialog.new()
-	dlg.file_mode        = FileDialog.FILE_MODE_SAVE_FILE
-	dlg.access           = FileDialog.ACCESS_FILESYSTEM
+	dlg.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	dlg.access = FileDialog.ACCESS_FILESYSTEM
 	dlg.use_native_dialog = true
 	dlg.add_filter("*." + ext, ext.to_upper() + " image")
 	dlg.current_file = "%s_layout.%s" % [base, ext]
 	add_child(dlg)
-	dlg.file_selected.connect(func(path: String) -> void:
-		if not path.to_lower().ends_with("." + ext):
-			path += "." + ext
-		var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
-		if f == null:
-			_show_status("Couldn't write %s." % path.get_file(), true)
-		else:
-			f.store_buffer(data)
-			f.close()
-			_show_status("Saved layout image (%.1f MB) — %s" % [data.size() / 1048576.0, path.get_file()], false)
-			OS.shell_show_in_file_manager(ProjectSettings.globalize_path(path))
-		dlg.queue_free()
+	dlg.file_selected.connect(
+		func(path: String) -> void:
+			if not path.to_lower().ends_with("." + ext):
+				path += "." + ext
+			var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+			if f == null:
+				_show_status("Couldn't write %s." % path.get_file(), true)
+			else:
+				f.store_buffer(data)
+				f.close()
+				_show_status(
+					(
+						"Saved layout image (%.1f MB) — %s"
+						% [data.size() / 1048576.0, path.get_file()]
+					),
+					false
+				)
+				OS.shell_show_in_file_manager(ProjectSettings.globalize_path(path))
+			dlg.queue_free()
 	)
 	dlg.canceled.connect(dlg.queue_free)
 	dlg.popup_centered_ratio(0.6)
@@ -1079,7 +1160,9 @@ func _save_capture_with_dialog(result: Dictionary) -> void:
 # Centered modal listing every builder keyboard / mouse shortcut. Closeable via
 # the Close button or the backdrop.
 func _show_shortcuts_overlay() -> void:
-	var parts: Dictionary = UITheme.build_centered_modal("⌨  SHORTCUTS", UITheme.PURPLE_BRIGHT, Vector2i(580, 740))
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"⌨  SHORTCUTS", UITheme.PURPLE_BRIGHT, Vector2i(580, 740)
+	)
 	var modal: Control = parts["modal"]
 	var vbox: VBoxContainer = parts["vbox"]
 	add_child(modal)
@@ -1088,8 +1171,8 @@ func _show_shortcuts_overlay() -> void:
 	# the panel; the Close button stays pinned below it.
 	var scroll: ScrollContainer = ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.size_flags_horizontal  = Control.SIZE_EXPAND_FILL
-	scroll.size_flags_vertical    = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(scroll)
 
 	var list: VBoxContainer = VBoxContainer.new()
@@ -1098,48 +1181,78 @@ func _show_shortcuts_overlay() -> void:
 	scroll.add_child(list)
 
 	var groups: Array = [
-		["EDIT", [
-			["Ctrl + S", "Save journey"],
-			["Ctrl + Z", "Undo"],
-			["Ctrl + Y  /  Ctrl + Shift + Z", "Redo"],
-			["Delete  /  Backspace", "Delete the selected node(s)"],
-		]],
-		["CLIPBOARD", [
-			["Ctrl + C", "Copy the selection — node(s) or a note"],
-			["Ctrl + X", "Cut (copy + delete)"],
-			["Ctrl + V", "Paste (fresh ids, offset on repeat)"],
-			["Ctrl + D", "Duplicate the selection in place"],
-		]],
-		["ADD NODE  (near the selection)", [
-			["Ctrl + 1", "Add a round"],
-			["Ctrl + 2", "Add a shop"],
-			["Ctrl + 3", "Add a storyboard"],
-			["Ctrl + 4", "Add a fork"],
-		]],
-		["RIGHT-CLICK", [
-			["Right-click empty space", "Menu: add a node / note / group at the cursor"],
-			["Right-click a node", "Menu: set it as the journey's start"],
-		]],
-		["SELECT & MOVE", [
-			["Click a node", "Select it (edit it in the side panel)"],
-			["Ctrl + click", "Add / remove a node from the selection"],
-			["Shift + click", "Add a node to the selection"],
-			["Drag a box on empty space", "Marquee-select nodes"],
-			["Drag a node", "Move it — or the whole selection"],
-			["Escape", "Cancel a wire in progress, or clear the selection"],
-		]],
-		["WIRE EDGES", [
-			["Drag a node's bottom handle → a node", "Connect them (line turns red if it would loop)"],
-			["Select  →  🔗 Connect  →  click", "Same, button-driven (the accessible fallback)"],
-		]],
-		["NAVIGATE", [
-			["Middle-drag", "Pan the graph"],
-			["Mouse wheel", "Zoom in / out"],
-			["⊡ Fit button", "Frame the whole journey"],
-		]],
-		["IMPORT", [
-			["Drop videos / a folder on the canvas", "Auto-create chained round nodes (matched by name)"],
-		]],
+		[
+			"EDIT",
+			[
+				["Ctrl + S", "Save journey"],
+				["Ctrl + Z", "Undo"],
+				["Ctrl + Y  /  Ctrl + Shift + Z", "Redo"],
+				["Delete  /  Backspace", "Delete the selected node(s)"],
+			]
+		],
+		[
+			"CLIPBOARD",
+			[
+				["Ctrl + C", "Copy the selection — node(s) or a note"],
+				["Ctrl + X", "Cut (copy + delete)"],
+				["Ctrl + V", "Paste (fresh ids, offset on repeat)"],
+				["Ctrl + D", "Duplicate the selection in place"],
+			]
+		],
+		[
+			"ADD NODE  (near the selection)",
+			[
+				["Ctrl + 1", "Add a round"],
+				["Ctrl + 2", "Add a shop"],
+				["Ctrl + 3", "Add a storyboard"],
+				["Ctrl + 4", "Add a fork"],
+			]
+		],
+		[
+			"RIGHT-CLICK",
+			[
+				["Right-click empty space", "Menu: add a node / note / group at the cursor"],
+				["Right-click a node", "Menu: set it as the journey's start"],
+			]
+		],
+		[
+			"SELECT & MOVE",
+			[
+				["Click a node", "Select it (edit it in the side panel)"],
+				["Ctrl + click", "Add / remove a node from the selection"],
+				["Shift + click", "Add a node to the selection"],
+				["Drag a box on empty space", "Marquee-select nodes"],
+				["Drag a node", "Move it — or the whole selection"],
+				["Escape", "Cancel a wire in progress, or clear the selection"],
+			]
+		],
+		[
+			"WIRE EDGES",
+			[
+				[
+					"Drag a node's bottom handle → a node",
+					"Connect them (line turns red if it would loop)"
+				],
+				["Select  →  🔗 Connect  →  click", "Same, button-driven (the accessible fallback)"],
+			]
+		],
+		[
+			"NAVIGATE",
+			[
+				["Middle-drag", "Pan the graph"],
+				["Mouse wheel", "Zoom in / out"],
+				["⊡ Fit button", "Frame the whole journey"],
+			]
+		],
+		[
+			"IMPORT",
+			[
+				[
+					"Drop videos / a folder on the canvas",
+					"Auto-create chained round nodes (matched by name)"
+				],
+			]
+		],
 	]
 
 	for group: Array in groups:
@@ -1179,9 +1292,10 @@ func _show_shortcuts_overlay() -> void:
 	# Backdrop click also dismisses (the backdrop is the modal's first child).
 	var backdrop: Control = modal.get_child(0) as Control
 	if backdrop:
-		backdrop.gui_input.connect(func(event: InputEvent) -> void:
-			if event is InputEventMouseButton and (event as InputEventMouseButton).pressed:
-				modal.queue_free()
+		backdrop.gui_input.connect(
+			func(event: InputEvent) -> void:
+				if event is InputEventMouseButton and (event as InputEventMouseButton).pressed:
+					modal.queue_free()
 		)
 
 
@@ -1191,10 +1305,10 @@ func _show_shortcuts_overlay() -> void:
 
 # Style helpers moved to UITheme (autoload). Callers use UITheme.style_*(...).
 
-
 # ---------------------------------------------------------------------------
 # Signals
 # ---------------------------------------------------------------------------
+
 
 func _connect_signals() -> void:
 	_back_btn.pressed.connect(_on_back_pressed)
@@ -1224,7 +1338,9 @@ func _input(event: InputEvent) -> void:
 				# text field (the author may be typing, and Ctrl+digit can be a native shortcut).
 				if _focus_is_text_field():
 					return
-				_create_graph_node({KEY_1: "round", KEY_2: "shop", KEY_3: "storyboard", KEY_4: "fork"}[k.keycode])
+				_create_graph_node(
+					{KEY_1: "round", KEY_2: "shop", KEY_3: "storyboard", KEY_4: "fork"}[k.keycode]
+				)
 				get_viewport().set_input_as_handled()
 			KEY_Z:
 				# Ctrl+Shift+Z = redo (common alias); plain Ctrl+Z = undo. Defer to native text undo
@@ -1308,7 +1424,9 @@ func _on_back_pressed() -> void:
 func _saved_journey_folder_abs() -> String:
 	var name: String = _journey_name.strip_edges()
 	if name != "":
-		var folder: String = SettingsService.get_journeys_dir() + "/" + JourneyData.sanitize_folder_name(name)
+		var folder: String = (
+			SettingsService.get_journeys_dir() + "/" + JourneyData.sanitize_folder_name(name)
+		)
 		var abs: String = ProjectSettings.globalize_path(folder)
 		if DirAccess.dir_exists_absolute(abs):
 			return abs
@@ -1333,8 +1451,8 @@ func _open_journey_folder() -> void:
 
 # ── Bulk import (drop videos / a folder on the canvas → chained round nodes) ──
 
-const BULK_IMPORT_ROW:     float = 140.0   # vertical spacing between imported round nodes
-const BULK_IMPORT_COL_GAP: float = 360.0   # gap to the right of existing content for the new column
+const BULK_IMPORT_ROW: float = 140.0  # vertical spacing between imported round nodes
+const BULK_IMPORT_COL_GAP: float = 360.0  # gap to the right of existing content for the new column
 
 
 # Viewport file-drop router. A folder always bulk-imports (expanded recursively). A file drop over
@@ -1373,7 +1491,9 @@ func _on_viewport_files_dropped(files: PackedStringArray) -> void:
 # them into the node's funscript / axis / vib slots by suffix (the per-field DropZones only take one
 # file each). Otherwise, with nothing selected, accept a dropped image as the journey cover.
 func _handle_side_panel_drop(files: PackedStringArray) -> void:
-	var node: Dictionary = (_graph_model.get("nodes", {}) as Dictionary).get(_selected_graph_node_id, {})
+	var node: Dictionary = (_graph_model.get("nodes", {}) as Dictionary).get(
+		_selected_graph_node_id, {}
+	)
 	if _selected_graph_node_id != "" and node.get("type", "") == "round":
 		var fs_files: Array = []
 		for f: String in files:
@@ -1381,8 +1501,10 @@ func _handle_side_panel_drop(files: PackedStringArray) -> void:
 				fs_files.append(f)
 		if fs_files.size() > 1:
 			var data: Dictionary = node.get("data", {})
-			if not data.has("axis_scripts"): data["axis_scripts"] = {}
-			if not data.has("vib_scripts"):  data["vib_scripts"] = {}
+			if not data.has("axis_scripts"):
+				data["axis_scripts"] = {}
+			if not data.has("vib_scripts"):
+				data["vib_scripts"] = {}
 			for f: String in fs_files:
 				var vib_ch: String = ImportScanner.detect_vib_channel(f)
 				if vib_ch != "":
@@ -1419,8 +1541,13 @@ func _bulk_import_graph_rounds(files: PackedStringArray) -> bool:
 
 	if rounds.is_empty():
 		if skipped_no_video > 0:
-			_show_status("No rounds created — found %d funscript%s with no matching video." % [
-				skipped_no_video, "s" if skipped_no_video != 1 else ""], true)
+			_show_status(
+				(
+					"No rounds created — found %d funscript%s with no matching video."
+					% [skipped_no_video, "s" if skipped_no_video != 1 else ""]
+				),
+				true
+			)
 		return false
 
 	_push_undo()
@@ -1435,8 +1562,8 @@ func _bulk_import_graph_rounds(files: PackedStringArray) -> bool:
 		nodes[node_id] = {
 			"type": "round",
 			"data": rounds[i],
-			"pos":  GraphLayout.snap(origin + Vector2(0.0, float(i) * BULK_IMPORT_ROW)),
-			"out":  [],
+			"pos": GraphLayout.snap(origin + Vector2(0.0, float(i) * BULK_IMPORT_ROW)),
+			"out": [],
 		}
 		if prev_id != "":
 			(nodes[prev_id] as Dictionary)["out"] = [{"to": node_id}]
@@ -1445,9 +1572,14 @@ func _bulk_import_graph_rounds(files: PackedStringArray) -> bool:
 		prev_id = node_id
 		created.append(node_id)
 	_graph.set_selection(created)
-	var msg: String = "Imported %d round%s (chained)." % [created.size(), "" if created.size() == 1 else "s"]
+	var msg: String = (
+		"Imported %d round%s (chained)." % [created.size(), "" if created.size() == 1 else "s"]
+	)
 	if skipped_no_video > 0:
-		msg += " Skipped %d funscript%s with no video." % [skipped_no_video, "s" if skipped_no_video != 1 else ""]
+		msg += (
+			" Skipped %d funscript%s with no video."
+			% [skipped_no_video, "s" if skipped_no_video != 1 else ""]
+		)
 	msg += " Ctrl+Z to undo."
 	_show_status(msg, false)
 	return true
@@ -1472,18 +1604,20 @@ func _bulk_import_origin() -> Vector2:
 # Cover image
 # ---------------------------------------------------------------------------
 
+
 func _on_cover_pressed() -> void:
 	var dialog: FileDialog = FileDialog.new()
-	dialog.access    = FileDialog.ACCESS_FILESYSTEM
+	dialog.access = FileDialog.ACCESS_FILESYSTEM
 	dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-	dialog.filters   = ["*.png,*.jpg,*.jpeg,*.webp ; Image Files"]
-	dialog.title     = "Select Cover Image"
+	dialog.filters = ["*.png,*.jpg,*.jpeg,*.webp ; Image Files"]
+	dialog.title = "Select Cover Image"
 	add_child(dialog)
 	dialog.popup_centered(Vector2i(900, 600))
-	dialog.file_selected.connect(func(path: String) -> void:
-		_cover_path = path
-		_update_cover_preview()
-		dialog.queue_free()
+	dialog.file_selected.connect(
+		func(path: String) -> void:
+			_cover_path = path
+			_update_cover_preview()
+			dialog.queue_free()
 	)
 	dialog.canceled.connect(func() -> void: dialog.queue_free())
 
@@ -1507,25 +1641,27 @@ func _update_cover_preview() -> void:
 # Load existing journey for editing
 # ---------------------------------------------------------------------------
 
+
 # Graph-editor load (L1): journey-level meta (same source as the tree loader) + the composed
 # graph with positions (Format 2 read, or legacy migrated + seeded). Mutates _graph_model IN
 # PLACE so the deferred set_graph from _setup_graph_view renders the populated graph.
 func _load_graph(journey: Dictionary) -> void:
 	var parsed: Dictionary = JourneyData.parse_journey(journey)
-	_journey_name           = parsed["name"]
-	_journey_author         = parsed["author"]
-	_journey_desc           = parsed["description"]
+	_journey_name = parsed["name"]
+	_journey_author = parsed["author"]
+	_journey_desc = parsed["description"]
 	_journey_difficulty_idx = parsed["difficulty_idx"]
-	_journey_tags           = (parsed.get("tags", []) as Array).duplicate()
-	_journey_map_enabled    = bool(parsed.get("map_enabled", true))
-	_journey_map_fog        = bool(parsed.get("map_fog", false))
+	_journey_tags = (parsed.get("tags", []) as Array).duplicate()
+	_journey_map_enabled = bool(parsed.get("map_enabled", true))
+	_journey_map_fog = bool(parsed.get("map_fog", false))
 	_journey_map_fog_reveal = int(parsed.get("map_fog_reveal", 1))
 	if (parsed["cover_path"] as String) != "":
 		_cover_path = parsed["cover_path"]
 		_update_cover_preview()
 	var folder: String = journey.get("folder", "")
 	var loaded: Dictionary = JourneyScanner.parse_graph_for_editor(
-		folder, journey.get("folder_name", (folder as String).get_file()))
+		folder, journey.get("folder_name", (folder as String).get_file())
+	)
 	# Seed positions from the TREE layout (compact + centered on x=0, the layout the author knows),
 	# keyed by node_id. For a saved Format-2 journey parse_journey yields no items, so tree_pos is
 	# empty and the positions read from disk are kept.
@@ -1541,7 +1677,7 @@ func _load_graph(journey: Dictionary) -> void:
 # Mirror it and show the matching side panel — journey info (0), the node editor (1), or the
 # multi-select panel (2+).
 func _on_graph_selection_changed(ids: Array) -> void:
-	_selected_comment_idx = -1   # selecting a node (or clearing) takes over from any open note/frame
+	_selected_comment_idx = -1  # selecting a node (or clearing) takes over from any open note/frame
 	_selected_frame_idx = -1
 	_selected_graph_node_ids = ids.duplicate()
 	_selected_graph_node_id = str(ids[0]) if ids.size() == 1 else ""
@@ -1578,20 +1714,34 @@ func _create_graph_node(type: String, at_world: Variant = null) -> void:
 	var template: Dictionary = JourneyData.new_item(type)
 	var node_id: String = str(template.get("node_id", JourneyData.new_node_id()))
 	var data: Dictionary = template.duplicate(true)
-	data.erase("type"); data.erase("node_id"); data.erase("paths")   # node-level / edge-level keys
+	data.erase("type")
+	data.erase("node_id")
+	data.erase("paths")  # node-level / edge-level keys
 	var out: Array = []
 	if type == "fork":
 		for p: Dictionary in template.get("paths", []):
-			out.append({"to": "", "name": p.get("name", ""), "description": p.get("description", ""),
-				"image_path": "", "weight": int(p.get("weight", 1)), "threshold": int(p.get("threshold", 0)),
-				"required_item": str(p.get("required_item", "")), "cost": int(p.get("cost", 0))})
+			out.append(
+				{
+					"to": "",
+					"name": p.get("name", ""),
+					"description": p.get("description", ""),
+					"image_path": "",
+					"weight": int(p.get("weight", 1)),
+					"threshold": int(p.get("threshold", 0)),
+					"required_item": str(p.get("required_item", "")),
+					"cost": int(p.get("cost", 0))
+				}
+			)
 	# Cursor placement (right-click menu) centres the node on the click; otherwise drop it just right of
 	# the selected node, else at the origin.
 	var pos: Vector2 = Vector2.ZERO
 	if at_world is Vector2:
 		pos = (at_world as Vector2) - Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT) * 0.5
 	elif _selected_graph_node_id != "" and nodes.has(_selected_graph_node_id):
-		pos = (nodes[_selected_graph_node_id] as Dictionary).get("pos", Vector2.ZERO) + Vector2(240.0, 0.0)
+		pos = (
+			(nodes[_selected_graph_node_id] as Dictionary).get("pos", Vector2.ZERO)
+			+ Vector2(240.0, 0.0)
+		)
 	nodes[node_id] = {"type": type, "data": data, "pos": GraphLayout.snap(pos), "out": out}
 	if str(_graph_model.get("start", "")) == "":
 		_graph_model["start"] = node_id
@@ -1646,6 +1796,7 @@ func _delete_selected_nodes() -> void:
 
 # ── Clipboard (copy / cut / paste / duplicate) ───────────────────────────────
 
+
 # Builds a clipboard-shaped list ([{id, node}] deep copies) from the current selection.
 func _snapshot_selection() -> Array:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
@@ -1671,7 +1822,13 @@ func _copy_selection() -> void:
 		_node_clipboard = _snapshot_selection()
 		_clip_kind = "nodes"
 		_paste_count = 0
-		_show_status("Copied %d node%s — Ctrl+V to paste." % [_node_clipboard.size(), "" if _node_clipboard.size() == 1 else "s"], false)
+		_show_status(
+			(
+				"Copied %d node%s — Ctrl+V to paste."
+				% [_node_clipboard.size(), "" if _node_clipboard.size() == 1 else "s"]
+			),
+			false
+		)
 
 
 # Ctrl+X — copy the active selection, then delete it (one undo step).
@@ -1697,8 +1854,10 @@ func _paste_clipboard() -> void:
 		return
 	_paste_count += 1
 	match _clip_kind:
-		"nodes":   _paste_nodes(_node_clipboard, _paste_count)
-		"comment": _paste_comment(_clip_comment, _paste_count)
+		"nodes":
+			_paste_nodes(_node_clipboard, _paste_count)
+		"comment":
+			_paste_comment(_clip_comment, _paste_count)
 
 
 # Ctrl+D — duplicate the active selection in place (without disturbing the clipboard).
@@ -1746,18 +1905,22 @@ func _paste_nodes(entries: Array, offset_mult: int) -> void:
 					ne2["to"] = str(id_map[to])
 					out.append(ne2)
 		var data: Dictionary = (src.get("data", {}) as Dictionary).duplicate(true)
-		data.erase("type"); data.erase("node_id"); data.erase("paths")   # node/edge-level keys never live in data
+		data.erase("type")
+		data.erase("node_id")
+		data.erase("paths")  # node/edge-level keys never live in data
 		nodes[new_id] = {
 			"type": src_type,
 			"data": data,
-			"pos":  GraphLayout.snap((src.get("pos", Vector2.ZERO) as Vector2) + offset),
-			"out":  out,
+			"pos": GraphLayout.snap((src.get("pos", Vector2.ZERO) as Vector2) + offset),
+			"out": out,
 		}
 		if str(_graph_model.get("start", "")) == "":
 			_graph_model["start"] = new_id
 		pasted_ids.append(new_id)
 	_graph.set_selection(pasted_ids)
-	_show_status("Pasted %d node%s." % [pasted_ids.size(), "" if pasted_ids.size() == 1 else "s"], false)
+	_show_status(
+		"Pasted %d node%s." % [pasted_ids.size(), "" if pasted_ids.size() == 1 else "s"], false
+	)
 
 
 # Paste a sticky note from the clipboard, offset by `offset_mult` grid steps; selects it. One undo step.
@@ -1769,7 +1932,9 @@ func _paste_comment(comment: Dictionary, offset_mult: int) -> void:
 		_graph_model["comments"] = []
 	var comments: Array = _graph_model["comments"]
 	var nc: Dictionary = comment.duplicate(true)
-	nc["pos"] = GraphLayout.snap((comment.get("pos", Vector2.ZERO) as Vector2) + PASTE_OFFSET * float(offset_mult))
+	nc["pos"] = GraphLayout.snap(
+		(comment.get("pos", Vector2.ZERO) as Vector2) + PASTE_OFFSET * float(offset_mult)
+	)
 	comments.append(nc)
 	_graph.deselect_nodes_silent()
 	_selected_graph_node_ids = []
@@ -1896,10 +2061,21 @@ func _add_fork_edge(fork_id: String) -> void:
 		return
 	_push_undo()
 	var edges: Array = (nodes[fork_id] as Dictionary).get("out", [])
-	edges.append({
-		"to": "", "name": "Path %s" % char(65 + edges.size()), "description": "", "image_path": "",
-		"weight": 1, "threshold": 0, "required_item": "", "cost": 0,
-	})
+	(
+		edges
+		. append(
+			{
+				"to": "",
+				"name": "Path %s" % char(65 + edges.size()),
+				"description": "",
+				"image_path": "",
+				"weight": 1,
+				"threshold": 0,
+				"required_item": "",
+				"cost": 0,
+			}
+		)
+	)
 	(nodes[fork_id] as Dictionary)["out"] = edges
 	_graph.select_graph_node(fork_id)
 
@@ -1927,6 +2103,7 @@ func _remove_fork_edge(fork_id: String, edge_idx: int) -> void:
 # add / remove. Each entry is a deep copy of _graph_model (start + nodes) taken just before a
 # structural mutation. In-field text edits (names, coins, …) are deliberately NOT snapshotted —
 # they keep their own native LineEdit/TextEdit undo. Drag-reposition isn't covered yet.
+
 
 # Deep snapshot of the graph model for the undo stack.
 func _graph_snapshot() -> Dictionary:
@@ -1993,9 +2170,12 @@ func _restore_graph_snapshot(snap: Dictionary) -> void:
 # Save
 # ---------------------------------------------------------------------------
 
+
 func _show_status(msg: String, is_error: bool) -> void:
 	_status_lbl.text = msg
-	_status_lbl.add_theme_color_override("font_color", UITheme.ERROR_SOFT if is_error else UITheme.SUCCESS)
+	_status_lbl.add_theme_color_override(
+		"font_color", UITheme.ERROR_SOFT if is_error else UITheme.SUCCESS
+	)
 	_status_lbl.visible = true
 
 
@@ -2042,9 +2222,9 @@ func _launch_test_play(paths: Dictionary) -> void:
 	var seek_node: String = str(_pending_test_location.get("node_id", ""))
 	_pending_test_location = {}
 
-	var folder_name: String   = (paths["final_abs_dir"] as String).get_file()
-	var journey_path: String  = SettingsService.get_journeys_dir() + "/" + folder_name
-	var journey: Dictionary   = JourneyScanner.parse_graph(journey_path, folder_name)
+	var folder_name: String = (paths["final_abs_dir"] as String).get_file()
+	var journey_path: String = SettingsService.get_journeys_dir() + "/" + folder_name
+	var journey: Dictionary = JourneyScanner.parse_graph(journey_path, folder_name)
 	if journey.is_empty():
 		_show_status("Test play failed: could not read the saved journey.", true)
 		_save_btn.disabled = false
@@ -2079,7 +2259,7 @@ func _do_save() -> bool:
 		return false
 
 	var paths: Dictionary = _setup_save_folders()
-	var modal: Control    = _create_save_progress_modal_if_needed()
+	var modal: Control = _create_save_progress_modal_if_needed()
 
 	var data: Dictionary = await _save_graph_nodes(paths, modal)
 	if modal:
@@ -2109,13 +2289,13 @@ func _do_save() -> bool:
 # this one (stale _save_aborted flag, leftover error stash, round counter
 # from a partial walk).
 func _reset_save_state() -> void:
-	_status_lbl.visible        = false
-	_transcode_cancel          = false
-	_save_aborted              = false
-	_save_abort_error          = {}
-	_round_folder_counter      = 0
-	_invalidated_save_count    = 0
-	_pending_test_location     = {}
+	_status_lbl.visible = false
+	_transcode_cancel = false
+	_save_aborted = false
+	_save_abort_error = {}
+	_round_folder_counter = 0
+	_invalidated_save_count = 0
+	_pending_test_location = {}
 
 
 # Runs the whole-tree presave validation pass. Returns false (and shows the
@@ -2124,10 +2304,13 @@ func _validate_presave() -> bool:
 	var issues: Array = _collect_presave_issues()
 	if issues.is_empty():
 		return true
-	var headline: String = "Found %d issue%s that prevent saving. Fix the items below and try again." % [
-		issues.size(),
-		"s" if issues.size() != 1 else "",
-	]
+	var headline: String = (
+		"Found %d issue%s that prevent saving. Fix the items below and try again."
+		% [
+			issues.size(),
+			"s" if issues.size() != 1 else "",
+		]
+	)
 	_show_save_error_modal("CANNOT SAVE JOURNEY", headline, issues)
 	return false
 
@@ -2168,7 +2351,8 @@ func _build_transcode_plan() -> bool:
 			CAUSE_FFMPEG_MISSING,
 			"Journey",
 			"ffmpeg / ffprobe could not be run, so videos can't be verified or converted to a format the player can decode.",
-			"Set a custom ffmpeg location in Options → Transcoding (a folder containing ffmpeg and ffprobe), or install ffmpeg on your PATH. If your videos are already H.264, you can instead turn off Auto-Transcode in Options → Transcoding to use them as-is. (Under Wine, the bundled Windows ffmpeg may not launch — a system ffmpeg path usually fixes this.)")
+			"Set a custom ffmpeg location in Options → Transcoding (a folder containing ffmpeg and ffprobe), or install ffmpeg on your PATH. If your videos are already H.264, you can instead turn off Auto-Transcode in Options → Transcoding to use them as-is. (Under Wine, the bundled Windows ffmpeg may not launch — a system ffmpeg path usually fixes this.)"
+		)
 		return false
 
 	var all_video_sources: Array = JourneyData.graph_video_sources(_graph_model)
@@ -2182,15 +2366,15 @@ func _build_transcode_plan() -> bool:
 			continue
 		var info: Dictionary = _get_video_stream_info(src)
 		var codec: String = info["codec"]
-		var pix:   String = info["pix_fmt"]
+		var pix: String = info["pix_fmt"]
 
 		var reason: String = ""
 		if codec == "":
-			reason = "unverifiable"                      # couldn't read — re-encode to be safe
+			reason = "unverifiable"  # couldn't read — re-encode to be safe
 		elif not (codec in H264_NAMES):
-			reason = codec                               # wrong codec (HEVC/AV1/VP9/…)
+			reason = codec  # wrong codec (HEVC/AV1/VP9/…)
 		elif pix != "" and not (pix in SAFE_PIX_FMTS):
-			reason = "%s %s" % [codec, pix]              # h264 but undecodable profile
+			reason = "%s %s" % [codec, pix]  # h264 but undecodable profile
 
 		if reason != "":
 			_transcode_plan[src] = {"codec": reason, "duration": _video_duration_seconds(src)}
@@ -2212,18 +2396,18 @@ func _build_transcode_plan() -> bool:
 #     copied_images:       Dict    - dedup map shared with _save_all_items
 #   }
 func _setup_save_folders() -> Dictionary:
-	var journey_name: String      = _journey_name.strip_edges()
-	var journeys_root: String     = SettingsService.get_journeys_dir()
-	var folder_name: String       = JourneyData.sanitize_folder_name(journey_name)
+	var journey_name: String = _journey_name.strip_edges()
+	var journeys_root: String = SettingsService.get_journeys_dir()
+	var folder_name: String = JourneyData.sanitize_folder_name(journey_name)
 	var final_journey_dir: String = journeys_root + "/" + folder_name
-	var final_abs_dir: String     = ProjectSettings.globalize_path(final_journey_dir)
+	var final_abs_dir: String = ProjectSettings.globalize_path(final_journey_dir)
 
 	# Stage to a sibling temp folder so a mid-save failure or user cancel can
 	# roll back cleanly — the existing journey on disk is never touched until
 	# the swap at the end. The dot prefix makes JourneyScanner skip leftover
 	# staging folders if the app crashes before the swap.
 	var staging_journey_dir: String = journeys_root + "/.~save_" + folder_name
-	var abs_dir: String             = ProjectSettings.globalize_path(staging_journey_dir)
+	var abs_dir: String = ProjectSettings.globalize_path(staging_journey_dir)
 	if DirAccess.dir_exists_absolute(abs_dir):
 		JourneyData.delete_dir_recursive(abs_dir)
 	DirAccess.make_dir_recursive_absolute(abs_dir)
@@ -2247,12 +2431,12 @@ func _setup_save_folders() -> Dictionary:
 		_copy_image_deduped(_cover_path, abs_media_dir, "cover." + ext, copied_images)
 
 	return {
-		"journey_name":        journey_name,
+		"journey_name": journey_name,
 		"staging_journey_dir": staging_journey_dir,
-		"abs_dir":             abs_dir,
-		"abs_media_dir":       abs_media_dir,
-		"final_abs_dir":       final_abs_dir,
-		"copied_images":       copied_images,
+		"abs_dir": abs_dir,
+		"abs_media_dir": abs_media_dir,
+		"final_abs_dir": final_abs_dir,
+		"copied_images": copied_images,
 	}
 
 
@@ -2273,8 +2457,8 @@ func _create_save_progress_modal_if_needed() -> Control:
 # journey.json dict, or {} on cancel/I-O failure (the error modal + staging cleanup happen in
 # _do_save).
 func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
-	var abs_dir: String           = paths["abs_dir"]
-	var abs_media_dir: String     = paths["abs_media_dir"]
+	var abs_dir: String = paths["abs_dir"]
+	var abs_media_dir: String = paths["abs_media_dir"]
 	var copied_images: Dictionary = paths["copied_images"]
 
 	# Fresh content pool for this save (staging is rebuilt from scratch — no cross-save state).
@@ -2303,20 +2487,28 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		match node_type:
 			"round":
 				round_seen += 1
-				saved_data = await _save_round_node_media(saved_data, data_in, abs_dir, modal, round_seen, total_rounds)
+				saved_data = await _save_round_node_media(
+					saved_data, data_in, abs_dir, modal, round_seen, total_rounds
+				)
 				if saved_data.is_empty():
-					return {}   # transcode/copy failure: modal already shown
+					return {}  # transcode/copy failure: modal already shown
 			"storyboard":
-				saved_data = _save_storyboard_node_media(saved_data, data_in, abs_media_dir, id, copied_images)
+				saved_data = _save_storyboard_node_media(
+					saved_data, data_in, abs_media_dir, id, copied_images
+				)
 			"fork":
-				saved_out = _save_fork_node_edges(node.get("out", []), abs_media_dir, id, copied_images)
+				saved_out = _save_fork_node_edges(
+					node.get("out", []), abs_media_dir, id, copied_images
+				)
 			"shop":
-				pass   # no media
+				pass  # no media
 
 		# A non-video copy (funscript / axis / vib / boss / image) failed somewhere above.
 		if _save_aborted:
-			var sr: Dictionary = _save_abort_error.get("result", {"reason": CAUSE_UNKNOWN_COPY_ERROR})
-			var si: String     = _save_abort_error.get("item",   "File copy")
+			var sr: Dictionary = _save_abort_error.get(
+				"result", {"reason": CAUSE_UNKNOWN_COPY_ERROR}
+			)
+			var si: String = _save_abort_error.get("item", "File copy")
 			_show_copy_failure_modal(sr, si)
 			return {}
 
@@ -2328,18 +2520,20 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 	# Assemble the Format-2 node block (Format/Start/Nodes) + journey meta around it.
 	# Redirects are intentionally gone — in a free-form graph, skip/converge/end are just
 	# edges (GRAPH_EDITOR_OVERHAUL.md §7).
-	var node_block: Dictionary = JourneyGraph.to_json({"start": _graph_model.get("start", ""), "nodes": out_nodes})
+	var node_block: Dictionary = JourneyGraph.to_json(
+		{"start": _graph_model.get("start", ""), "nodes": out_nodes}
+	)
 	var result: Dictionary = {
-		"Name":        paths["journey_name"],
-		"Author":      _journey_author.strip_edges(),
+		"Name": paths["journey_name"],
+		"Author": _journey_author.strip_edges(),
 		"Description": _journey_desc.strip_edges(),
-		"Difficulty":  JourneyData.DIFFICULTIES[_journey_difficulty_idx],
-		"Tags":        TagRegistry.sanitize(_journey_tags),
-		"MapEnabled":  _journey_map_enabled,
-		"MapFog":      _journey_map_fog,
+		"Difficulty": JourneyData.DIFFICULTIES[_journey_difficulty_idx],
+		"Tags": TagRegistry.sanitize(_journey_tags),
+		"MapEnabled": _journey_map_enabled,
+		"MapFog": _journey_map_fog,
 		"MapFogReveal": _journey_map_fog_reveal,
 	}
-	result.merge(node_block)   # adds Format, Start, Nodes
+	result.merge(node_block)  # adds Format, Start, Nodes
 	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))
 	result["Groups"] = _serialize_groups(_graph_model.get("groups", []))
 	return result
@@ -2362,7 +2556,11 @@ func _serialize_groups(groups: Array) -> Array:
 	var out: Array = []
 	for g: Dictionary in groups:
 		var r: Rect2 = g.get("rect", Rect2())
-		var entry: Dictionary = {"Pos": [r.position.x, r.position.y], "Size": [r.size.x, r.size.y], "Label": str(g.get("label", ""))}
+		var entry: Dictionary = {
+			"Pos": [r.position.x, r.position.y],
+			"Size": [r.size.x, r.size.y],
+			"Label": str(g.get("label", ""))
+		}
 		if g.has("color"):
 			entry["Color"] = (g["color"] as Color).to_html()
 		if g.get("collapsed", false):
@@ -2381,7 +2579,14 @@ func _serialize_groups(groups: Array) -> Array:
 # refreshing the funscript stats. Reads SOURCE paths from data_in (absolute). Returns the
 # updated saved_data, or {} when a video transcode/copy fails (error modal already shown).
 # A small-file copy failure sets _save_aborted instead (surfaced by the caller's checkpoint).
-func _save_round_node_media(saved_data: Dictionary, data_in: Dictionary, abs_dir: String, modal: Control, rorder: int, total: int) -> Dictionary:
+func _save_round_node_media(
+	saved_data: Dictionary,
+	data_in: Dictionary,
+	abs_dir: String,
+	modal: Control,
+	rorder: int,
+	total: int
+) -> Dictionary:
 	var round_name: String = str(saved_data.get("name", "")).strip_edges()
 	# FolderName slug — a stable logical round id + the legacy folder-scan fallback key.
 	# No per-round folder is created; all playback assets pool into content/ by hash.
@@ -2402,15 +2607,17 @@ func _save_round_node_media(saved_data: Dictionary, data_in: Dictionary, abs_dir
 		else:
 			fs_stats = _pooled_fs_stats.get(fs_pool["fingerprint"], fs_stats)
 	saved_data["funscript_path"] = funscript_rel
-	saved_data["action_count"]   = fs_stats["count"]
-	saved_data["length_ms"]      = fs_stats["length_ms"]
+	saved_data["action_count"] = fs_stats["count"]
+	saved_data["length_ms"] = fs_stats["length_ms"]
 
 	# Secondary-axis scripts — pooled, keyed by axis (suffix preserved via _channel_pool_ext).
 	var axis_in: Dictionary = data_in.get("axis_scripts", {})
 	var axis_rel: Dictionary = {}
 	for axis: String in axis_in:
 		var ax_src: String = str(axis_in[axis])
-		var ax_rel: String = _pool_small_file(ax_src, abs_dir, _channel_pool_ext(JourneyData.AXIS_SUFFIXES.get(axis, ""), ax_src))
+		var ax_rel: String = _pool_small_file(
+			ax_src, abs_dir, _channel_pool_ext(JourneyData.AXIS_SUFFIXES.get(axis, ""), ax_src)
+		)
 		if ax_rel != "":
 			axis_rel[axis] = ax_rel
 	saved_data["axis_scripts"] = axis_rel
@@ -2420,7 +2627,9 @@ func _save_round_node_media(saved_data: Dictionary, data_in: Dictionary, abs_dir
 	var vib_rel: Dictionary = {}
 	for ch: String in vib_in:
 		var vib_src: String = str(vib_in[ch])
-		var vib_rel_path: String = _pool_small_file(vib_src, abs_dir, _channel_pool_ext(JourneyData.VIB_SUFFIXES.get(ch, ""), vib_src))
+		var vib_rel_path: String = _pool_small_file(
+			vib_src, abs_dir, _channel_pool_ext(JourneyData.VIB_SUFFIXES.get(ch, ""), vib_src)
+		)
 		if vib_rel_path != "":
 			vib_rel[ch] = vib_rel_path
 	saved_data["vib_scripts"] = vib_rel
@@ -2454,22 +2663,38 @@ func _save_round_node_media(saved_data: Dictionary, data_in: Dictionary, abs_dir
 				if not ok:
 					if _transcode_cancel:
 						_show_save_error_single(
-							"SAVE CANCELLED", CAUSE_CANCELLED, "Round \"%s\"" % round_name,
-							"You cancelled the transcode while round \"%s\" was being processed." % round_name,
-							"Press Save again to retry. Nothing on disk was changed.")
+							"SAVE CANCELLED",
+							CAUSE_CANCELLED,
+							'Round "%s"' % round_name,
+							(
+								'You cancelled the transcode while round "%s" was being processed.'
+								% round_name
+							),
+							"Press Save again to retry. Nothing on disk was changed."
+						)
 					else:
 						_show_save_error_single(
-							"SAVE FAILED", CAUSE_TRANSCODE_FAILED, "Round \"%s\"" % round_name,
-							"ffmpeg failed to transcode video \"%s\" (codec %s → h264)." % [vid_src.get_file(), info["codec"]],
-							"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round.")
+							"SAVE FAILED",
+							CAUSE_TRANSCODE_FAILED,
+							'Round "%s"' % round_name,
+							(
+								'ffmpeg failed to transcode video "%s" (codec %s → h264).'
+								% [vid_src.get_file(), info["codec"]]
+							),
+							"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round."
+						)
 					return {}
 			else:
-				_update_modal_label(modal, "Round %d / %d — %s  (copying video)" % [rorder, total, round_name])
+				_update_modal_label(
+					modal, "Round %d / %d — %s  (copying video)" % [rorder, total, round_name]
+				)
 				var copy_result: Dictionary = await _copy_file_chunked(
-					vid_src, vid_dst,
-					func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot))
+					vid_src,
+					vid_dst,
+					func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot)
+				)
 				if not copy_result["ok"]:
-					_show_copy_failure_modal(copy_result, "Round \"%s\"" % round_name)
+					_show_copy_failure_modal(copy_result, 'Round "%s"' % round_name)
 					return {}
 	saved_data["video_path"] = video_rel
 	return saved_data
@@ -2479,12 +2704,20 @@ func _save_round_node_media(saved_data: Dictionary, data_in: Dictionary, abs_dir
 # rewriting saved_data's image fields to journey-root-relative paths. Filenames are keyed by
 # the node id so two storyboards can't collide. Sync (small files); a copy failure sets
 # _save_aborted, surfaced by the caller's checkpoint.
-func _save_storyboard_node_media(saved_data: Dictionary, data_in: Dictionary, abs_media_dir: String, node_id: String, copied_images: Dictionary) -> Dictionary:
+func _save_storyboard_node_media(
+	saved_data: Dictionary,
+	data_in: Dictionary,
+	abs_media_dir: String,
+	node_id: String,
+	copied_images: Dictionary
+) -> Dictionary:
 	var img_src: String = str(data_in.get("image", ""))
 	saved_data["image"] = ""
 	if img_src != "":
 		var ext: String = img_src.get_extension().to_lower()
-		var f: String = _copy_image_deduped(img_src, abs_media_dir, "%s.%s" % [node_id, ext], copied_images)
+		var f: String = _copy_image_deduped(
+			img_src, abs_media_dir, "%s.%s" % [node_id, ext], copied_images
+		)
 		saved_data["image"] = ("media/" + f) if f != "" else ""
 
 	var lines_out: Array = []
@@ -2495,9 +2728,17 @@ func _save_storyboard_node_media(saved_data: Dictionary, data_in: Dictionary, ab
 		var li_rel: String = ""
 		if li_src != "":
 			var le: String = li_src.get_extension().to_lower()
-			var lf: String = _copy_image_deduped(li_src, abs_media_dir, "%s_line_%d.%s" % [node_id, li, le], copied_images)
+			var lf: String = _copy_image_deduped(
+				li_src, abs_media_dir, "%s_line_%d.%s" % [node_id, li, le], copied_images
+			)
 			li_rel = ("media/" + lf) if lf != "" else ""
-		lines_out.append({"speaker": str(line.get("speaker", "")), "text": str(line.get("text", "")), "image": li_rel})
+		lines_out.append(
+			{
+				"speaker": str(line.get("speaker", "")),
+				"text": str(line.get("text", "")),
+				"image": li_rel
+			}
+		)
 	saved_data["lines"] = lines_out
 	return saved_data
 
@@ -2506,7 +2747,9 @@ func _save_storyboard_node_media(saved_data: Dictionary, data_in: Dictionary, ab
 # coerced (weights/threshold/cost → int) and the choice's card image copied into media/
 # (keyed by node id + choice index so paths sharing a name can't collide). The `to` target
 # id is preserved verbatim (it's a node reference, not a path).
-func _save_fork_node_edges(edges: Array, abs_media_dir: String, node_id: String, copied_images: Dictionary) -> Array:
+func _save_fork_node_edges(
+	edges: Array, abs_media_dir: String, node_id: String, copied_images: Dictionary
+) -> Array:
 	var out: Array = []
 	for ei in edges.size():
 		var e: Dictionary = edges[ei]
@@ -2514,20 +2757,27 @@ func _save_fork_node_edges(edges: Array, abs_media_dir: String, node_id: String,
 		var img_rel: String = ""
 		if img_src != "":
 			var ext: String = img_src.get_extension().to_lower()
-			var f: String = _copy_image_deduped(img_src, abs_media_dir, "%s_e%d_cover.%s" % [node_id, ei, ext], copied_images)
+			var f: String = _copy_image_deduped(
+				img_src, abs_media_dir, "%s_e%d_cover.%s" % [node_id, ei, ext], copied_images
+			)
 			img_rel = ("media/" + f) if f != "" else ""
-		out.append({
-			"to":            str(e.get("to", "")),
-			"name":          str(e.get("name", "")),
-			"description":   str(e.get("description", "")),
-			"image_path":    img_rel,
-			"weight":        int(e.get("weight", 1)),
-			"threshold":     int(e.get("threshold", 0)),
-			"required_item": str(e.get("required_item", "")),
-			"cost":          int(e.get("cost", 0)),
-			"required_flag": str(e.get("required_flag", "")),
-			"set_flags":     JourneyData.clean_flag_list(e.get("set_flags", [])),
-		})
+		(
+			out
+			. append(
+				{
+					"to": str(e.get("to", "")),
+					"name": str(e.get("name", "")),
+					"description": str(e.get("description", "")),
+					"image_path": img_rel,
+					"weight": int(e.get("weight", 1)),
+					"threshold": int(e.get("threshold", 0)),
+					"required_item": str(e.get("required_item", "")),
+					"cost": int(e.get("cost", 0)),
+					"required_flag": str(e.get("required_flag", "")),
+					"set_flags": JourneyData.clean_flag_list(e.get("set_flags", [])),
+				}
+			)
+		)
 	return out
 
 
@@ -2554,7 +2804,8 @@ func _write_journey_json(paths: Dictionary, data: Dictionary) -> bool:
 			CAUSE_DST_UNWRITABLE,
 			"journey.json",
 			"Could not create %s." % json_path,
-			"Check that the journeys folder drive isn't full or write-protected, and that no antivirus is blocking the editor. You can change the journeys folder in Options → Storage Location.")
+			"Check that the journeys folder drive isn't full or write-protected, and that no antivirus is blocking the editor. You can change the journeys folder in Options → Storage Location."
+		)
 		return false
 	f.store_string(JSON.stringify(data, "\t"))
 	f.close()
@@ -2567,7 +2818,7 @@ func _write_journey_json(paths: Dictionary, data: Dictionary) -> bool:
 # folder (journey rename), then rename staging into place. Per-round renames
 # vanish implicitly along with the old folder.
 func _swap_staging_into_place(paths: Dictionary) -> void:
-	var abs_dir: String       = paths["abs_dir"]
+	var abs_dir: String = paths["abs_dir"]
 	var final_abs_dir: String = paths["final_abs_dir"]
 	if DirAccess.dir_exists_absolute(final_abs_dir):
 		JourneyData.delete_dir_recursive(final_abs_dir)
@@ -2627,6 +2878,7 @@ func _finalize_save_success() -> void:
 # Transcoding
 # ---------------------------------------------------------------------------
 
+
 func _ffmpeg_binary(name: String) -> String:
 	# Resolution order (custom folder → bundled → PATH) lives in
 	# SettingsService.resolve_ffmpeg_binary so the Options "Test" button shares
@@ -2669,18 +2921,20 @@ func _ffmpeg_available() -> bool:
 	return OS.execute(_ffmpeg_binary("ffprobe"), ["-version"], out, true, false) == 0
 
 
-
-
 # Probes a video's primary stream for both codec name and pixel format in one
 # ffprobe call. Returns {"codec": String, "pix_fmt": String} (lowercased; empty
 # strings when the probe fails). Used by the transcode planner.
 func _get_video_stream_info(path: String) -> Dictionary:
 	var out: Array = []
 	var args: PackedStringArray = [
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-show_entries", "stream=codec_name,pix_fmt",
-		"-of", "csv=p=0",
+		"-v",
+		"error",
+		"-select_streams",
+		"v:0",
+		"-show_entries",
+		"stream=codec_name,pix_fmt",
+		"-of",
+		"csv=p=0",
 		ProjectSettings.globalize_path(path),
 	]
 	if OS.execute(_ffmpeg_binary("ffprobe"), args, out, true, false) != 0 or out.is_empty():
@@ -2692,7 +2946,7 @@ func _get_video_stream_info(path: String) -> Dictionary:
 		if line == "":
 			continue
 		var parts: PackedStringArray = line.split(",")
-		var codec: String   = parts[0].strip_edges() if parts.size() > 0 else ""
+		var codec: String = parts[0].strip_edges() if parts.size() > 0 else ""
 		var pix_fmt: String = parts[1].strip_edges() if parts.size() > 1 else ""
 		return {"codec": codec, "pix_fmt": pix_fmt}
 	return {"codec": "", "pix_fmt": ""}
@@ -2701,9 +2955,12 @@ func _get_video_stream_info(path: String) -> Dictionary:
 func _video_duration_seconds(path: String) -> float:
 	var out: Array = []
 	var args: PackedStringArray = [
-		"-v", "error",
-		"-show_entries", "format=duration",
-		"-of", "csv=p=0",
+		"-v",
+		"error",
+		"-show_entries",
+		"format=duration",
+		"-of",
+		"csv=p=0",
 		ProjectSettings.globalize_path(path),
 	]
 	if OS.execute(_ffmpeg_binary("ffprobe"), args, out, true, false) != 0 or out.is_empty():
@@ -2723,15 +2980,24 @@ func _transcode_video(input: String, output: String, duration: float, modal: Con
 	var args: PackedStringArray = [
 		"-y",
 		"-hide_banner",
-		"-loglevel", "error",
-		"-i", ProjectSettings.globalize_path(input),
-		"-c:v", "libx264",
-		"-preset", "fast",
-		"-crf", "22",
-		"-pix_fmt", "yuv420p",
-		"-c:a", "aac",
-		"-b:a", "192k",
-		"-progress", progress_abs,
+		"-loglevel",
+		"error",
+		"-i",
+		ProjectSettings.globalize_path(input),
+		"-c:v",
+		"libx264",
+		"-preset",
+		"fast",
+		"-crf",
+		"22",
+		"-pix_fmt",
+		"yuv420p",
+		"-c:a",
+		"aac",
+		"-b:a",
+		"192k",
+		"-progress",
+		progress_abs,
 		ProjectSettings.globalize_path(output),
 	]
 
@@ -2782,12 +3048,15 @@ func _poll_progress(progress_path: String, duration: float, modal: Control) -> v
 # Transcode modal UI
 # ---------------------------------------------------------------------------
 
+
 func _create_transcode_modal() -> Control:
-	var parts: Dictionary    = UITheme.build_centered_modal("SAVING JOURNEY", UITheme.PURPLE_BRIGHT, Vector2i(520, 240))
-	var modal: Control       = parts["modal"]
-	var vbox:  VBoxContainer = parts["vbox"]
-	modal.name           = "TranscodeModal"
-	parts["title"].name  = "Title"
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"SAVING JOURNEY", UITheme.PURPLE_BRIGHT, Vector2i(520, 240)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
+	modal.name = "TranscodeModal"
+	parts["title"].name = "Title"
 	# Override the default 12-separation with the transcode modal's looser 14
 	# spacing — the progress bar reads more cleanly with extra breathing room.
 	vbox.add_theme_constant_override("separation", 14)
@@ -2833,7 +3102,9 @@ func _create_transcode_modal() -> Control:
 	return modal
 
 
-func _update_modal_round(modal: Control, round_num: int, total: int, round_name: String, codec: String) -> void:
+func _update_modal_round(
+	modal: Control, round_num: int, total: int, round_name: String, codec: String
+) -> void:
 	if modal == null:
 		return
 	var lbl: Label = modal.get_node("PanelContainer/VBoxContainer/RoundLabel") as Label
@@ -2841,10 +3112,14 @@ func _update_modal_round(modal: Control, round_num: int, total: int, round_name:
 		# Fallback: walk children since we didn't name the intermediate panel/vbox.
 		lbl = modal.find_child("RoundLabel", true, false) as Label
 	if lbl:
-		lbl.text = "Round %d / %d — %s  (%s → h264)" % [round_num, total, round_name, codec.to_upper()]
+		lbl.text = (
+			"Round %d / %d — %s  (%s → h264)" % [round_num, total, round_name, codec.to_upper()]
+		)
 
 
-func _update_modal_progress(modal: Control, progress: float, current_s: float, total_s: float, speed: String) -> void:
+func _update_modal_progress(
+	modal: Control, progress: float, current_s: float, total_s: float, speed: String
+) -> void:
 	if modal == null:
 		return
 	var bar: ProgressBar = modal.find_child("Bar", true, false) as ProgressBar
@@ -2883,8 +3158,10 @@ func _update_modal_copy(modal: Control, copied: int, total: int) -> void:
 		bar.value = frac
 	var status: Label = modal.find_child("Status", true, false) as Label
 	if status:
-		status.text = "Copying… %d%%  (%s / %s)" % [
-			int(round(frac * 100.0)), _format_size(copied), _format_size(total)]
+		status.text = (
+			"Copying… %d%%  (%s / %s)"
+			% [int(round(frac * 100.0)), _format_size(copied), _format_size(total)]
+		)
 
 
 func _format_size(bytes: int) -> String:
@@ -2897,7 +3174,9 @@ func _format_size(bytes: int) -> String:
 # Returns the destination filename (relative to abs_dir) for an image. If the
 # same source path was already copied during this save, reuses the existing
 # destination file rather than copying again. `copied` maps src_path → fname.
-func _copy_image_deduped(src: String, abs_dir: String, candidate_fname: String, copied: Dictionary) -> String:
+func _copy_image_deduped(
+	src: String, abs_dir: String, candidate_fname: String, copied: Dictionary
+) -> String:
 	if src == "":
 		return ""
 	if copied.has(src):
@@ -2964,7 +3243,7 @@ func _copy_file(src: String, dst: String) -> void:
 		_save_aborted = true
 		_save_abort_error = {
 			"result": {"ok": false, "reason": CAUSE_SRC_UNREADABLE, "detail": src},
-			"item":   "File copy",
+			"item": "File copy",
 		}
 		return
 	var bytes: PackedByteArray = src_file.get_buffer(src_file.get_length())
@@ -2975,7 +3254,7 @@ func _copy_file(src: String, dst: String) -> void:
 		_save_aborted = true
 		_save_abort_error = {
 			"result": {"ok": false, "reason": CAUSE_DST_UNWRITABLE, "detail": dst},
-			"item":   "File copy",
+			"item": "File copy",
 		}
 		return
 	dst_file.store_buffer(bytes)
@@ -3051,9 +3330,11 @@ func _delete_stale_files(dir_path: String, keep_filename: String, extensions: Ar
 	var to_delete: PackedStringArray = []
 	var fname: String = da.get_next()
 	while fname != "":
-		if not da.current_is_dir() \
-				and fname.get_extension().to_lower() in extensions \
-				and fname != keep_filename:
+		if (
+			not da.current_is_dir()
+			and fname.get_extension().to_lower() in extensions
+			and fname != keep_filename
+		):
 			to_delete.append(dir_path + "/" + fname)
 		fname = da.get_next()
 	da.list_dir_end()
@@ -3073,8 +3354,11 @@ func _delete_stale_l0_files(dir_path: String, keep_filename: String) -> void:
 	var to_delete: PackedStringArray = []
 	var fname: String = da.get_next()
 	while fname != "":
-		if not da.current_is_dir() and fname != keep_filename \
-				and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS:
+		if (
+			not da.current_is_dir()
+			and fname != keep_filename
+			and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS
+		):
 			var stem: String = fname.get_basename()
 			var is_secondary: bool = false
 			for ax: String in JourneyData.EXTRA_AXES:
@@ -3104,9 +3388,12 @@ func _delete_stale_axis_files(dir_path: String, axis: String, keep_filename: Str
 	var to_delete: PackedStringArray = []
 	var fname: String = da.get_next()
 	while fname != "":
-		if not da.current_is_dir() and fname != keep_filename \
-				and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS \
-				and fname.get_basename().ends_with("_" + axis):
+		if (
+			not da.current_is_dir()
+			and fname != keep_filename
+			and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS
+			and fname.get_basename().ends_with("_" + axis)
+		):
 			to_delete.append(dir_path + "/" + fname)
 		fname = da.get_next()
 	da.list_dir_end()
@@ -3126,9 +3413,12 @@ func _delete_stale_vib_files(dir_path: String, ch_key: String, keep_filename: St
 	var to_delete: PackedStringArray = []
 	var fname: String = da.get_next()
 	while fname != "":
-		if not da.current_is_dir() and fname != keep_filename \
-				and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS \
-				and fname.get_basename().ends_with("_" + ch_key):
+		if (
+			not da.current_is_dir()
+			and fname != keep_filename
+			and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS
+			and fname.get_basename().ends_with("_" + ch_key)
+		):
 			to_delete.append(dir_path + "/" + fname)
 		fname = da.get_next()
 	da.list_dir_end()
@@ -3153,6 +3443,7 @@ func _delete_stale_vib_files(dir_path: String, ch_key: String, keep_filename: St
 # user sees them in one pass. Mid-save failures (cancel, copy error, transcode
 # error) build one SaveError and route through the same modal.
 
+
 # Returns true if the given source-file path exists on disk. Used by validation
 # instead of FileAccess.file_exists so user:// paths and absolute paths both work.
 func _save_source_exists(path: String) -> bool:
@@ -3172,36 +3463,53 @@ func _collect_presave_issues() -> Array:
 func _collect_journey_meta_issues(issues: Array) -> void:
 	var jn: String = _journey_name.strip_edges()
 	if jn == "":
-		issues.append({
-			"cause":  CAUSE_BAD_NAME,
-			"item":   "Journey",
-			"detail": "Journey name is required.",
-			"hint":   "Enter a name in the Journey Info panel (right-side, no node selected).",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_BAD_NAME,
+					"item": "Journey",
+					"detail": "Journey name is required.",
+					"hint":
+					"Enter a name in the Journey Info panel (right-side, no node selected).",
+				}
+			)
+		)
 	else:
 		# Rename-collision guard. If the sanitized name maps to a folder that
 		# already exists AND it's not the journey we're editing, the swap at
 		# the end of save would wipe that other journey's data. Refuse here.
-		var sanitized_jn: String      = JourneyData.sanitize_folder_name(jn)
+		var sanitized_jn: String = JourneyData.sanitize_folder_name(jn)
 		var target_journey_dir: String = SettingsService.get_journeys_dir() + "/" + sanitized_jn
-		var target_abs: String        = ProjectSettings.globalize_path(target_journey_dir)
-		var original_abs: String      = ""
+		var target_abs: String = ProjectSettings.globalize_path(target_journey_dir)
+		var original_abs: String = ""
 		if _original_journey_folder != "":
 			original_abs = ProjectSettings.globalize_path(_original_journey_folder)
 		if target_abs != original_abs and DirAccess.dir_exists_absolute(target_abs):
-			issues.append({
-				"cause":  CAUSE_NAME_COLLISION,
-				"item":   "Journey",
-				"detail": "A journey already exists at: %s" % target_abs,
-				"hint":   "Saving with this name would replace that other journey. Pick a different name, or delete the existing journey from the catalogue first.",
-			})
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_NAME_COLLISION,
+						"item": "Journey",
+						"detail": "A journey already exists at: %s" % target_abs,
+						"hint":
+						"Saving with this name would replace that other journey. Pick a different name, or delete the existing journey from the catalogue first.",
+					}
+				)
+			)
 	if _cover_path != "" and not _save_source_exists(_cover_path):
-		issues.append({
-			"cause":  CAUSE_MISSING_SOURCE,
-			"item":   "Journey cover image",
-			"detail": "Cover image no longer exists at: %s" % _cover_path,
-			"hint":   "Re-drag the cover image into the Journey Info panel, or remove it.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": "Journey cover image",
+					"detail": "Cover image no longer exists at: %s" % _cover_path,
+					"hint": "Re-drag the cover image into the Journey Info panel, or remove it.",
+				}
+			)
+		)
 
 
 # Graph-editor presave validation. Per GRAPH_EDITOR_OVERHAUL.md §10/§12, deep structural
@@ -3220,12 +3528,17 @@ func _collect_presave_issues_graph() -> Array:
 			has_round = true
 			break
 	if not has_round:
-		issues.append({
-			"cause":  CAUSE_NO_ROUNDS,
-			"item":   "Journey",
-			"detail": "A journey needs at least one round node.",
-			"hint":   "Add a round from the side panel's ADD NODE row.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_NO_ROUNDS,
+					"item": "Journey",
+					"detail": "A journey needs at least one round node.",
+					"hint": "Add a round from the side panel's ADD NODE row.",
+				}
+			)
+		)
 
 	var round_num: int = 0
 	var sb_num: int = 0
@@ -3251,33 +3564,58 @@ func _collect_presave_issues_graph() -> Array:
 	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model):
 		match str(gi.get("kind", "")):
 			"no_start":
-				issues.append({
-					"cause":  CAUSE_NO_START,
-					"item":   "Journey",
-					"detail": "The journey has no valid start node.",
-					"hint":   "Reopen the journey, or add a node — the first node becomes the start.",
-				})
+				(
+					issues
+					. append(
+						{
+							"cause": CAUSE_NO_START,
+							"item": "Journey",
+							"detail": "The journey has no valid start node.",
+							"hint":
+							"Reopen the journey, or add a node — the first node becomes the start.",
+						}
+					)
+				)
 			"dangling":
-				issues.append({
-					"cause":  CAUSE_DANGLING_EDGE,
-					"item":   _graph_issue_label(str(gi.get("id", ""))),
-					"detail": "A connection points to a node that no longer exists.",
-					"hint":   "Re-wire that connection to a current node — its target may have been deleted.",
-				})
+				(
+					issues
+					. append(
+						{
+							"cause": CAUSE_DANGLING_EDGE,
+							"item": _graph_issue_label(str(gi.get("id", ""))),
+							"detail": "A connection points to a node that no longer exists.",
+							"hint":
+							"Re-wire that connection to a current node — its target may have been deleted.",
+						}
+					)
+				)
 			"cycle":
-				issues.append({
-					"cause":  CAUSE_CYCLE,
-					"item":   _graph_issue_label(str(gi.get("id", ""))),
-					"detail": "This node is part of a loop — a journey must flow forward (no cycles).",
-					"hint":   "Remove the connection that loops back to an earlier node.",
-				})
+				(
+					issues
+					. append(
+						{
+							"cause": CAUSE_CYCLE,
+							"item": _graph_issue_label(str(gi.get("id", ""))),
+							"detail":
+							"This node is part of a loop — a journey must flow forward (no cycles).",
+							"hint": "Remove the connection that loops back to an earlier node.",
+						}
+					)
+				)
 			"unreachable":
-				issues.append({
-					"cause":  CAUSE_UNREACHABLE,
-					"item":   _graph_issue_label(str(gi.get("id", ""))),
-					"detail": "This node can't be reached from the start, so it would never play — and its media would bloat the saved journey.",
-					"hint":   "Connect it into the flow (wire an earlier node to it), or delete it.",
-				})
+				(
+					issues
+					. append(
+						{
+							"cause": CAUSE_UNREACHABLE,
+							"item": _graph_issue_label(str(gi.get("id", ""))),
+							"detail":
+							"This node can't be reached from the start, so it would never play — and its media would bloat the saved journey.",
+							"hint":
+							"Connect it into the flow (wire an earlier node to it), or delete it.",
+						}
+					)
+				)
 	return issues
 
 
@@ -3291,15 +3629,15 @@ func _graph_issue_label(node_id: String) -> String:
 	match str(n.get("type", "")):
 		"round":
 			var rn: String = str(d.get("name", "")).strip_edges()
-			return "Round \"%s\"" % rn if rn != "" else "A round"
+			return 'Round "%s"' % rn if rn != "" else "A round"
 		"shop":
 			var sn: String = str(d.get("title", "")).strip_edges()
-			return "Shop \"%s\"" % sn if sn != "" else "A shop"
+			return 'Shop "%s"' % sn if sn != "" else "A shop"
 		"storyboard":
 			return "A storyboard"
 		"fork":
 			var fn: String = str(d.get("title", "")).strip_edges()
-			return "Fork \"%s\"" % fn if fn != "" else "A fork"
+			return 'Fork "%s"' % fn if fn != "" else "A fork"
 	return "A node"
 
 
@@ -3310,110 +3648,171 @@ func _graph_issue_label(node_id: String) -> String:
 func _save_check_fork_graph(node: Dictionary, ctx: String, issues: Array) -> void:
 	var edges: Array = node.get("out", [])
 	if edges.size() < 2:
-		issues.append({
-			"cause":  CAUSE_FORK_UNDERFILLED,
-			"item":   ctx,
-			"detail": "Fork has only %d choice(s); needs at least 2." % edges.size(),
-			"hint":   "Add a second choice in the fork editor.",
-		})
-	if str((node.get("data", {}) as Dictionary).get("resolution", "choice")) == "sacrifice" and not edges.is_empty():
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_FORK_UNDERFILLED,
+					"item": ctx,
+					"detail": "Fork has only %d choice(s); needs at least 2." % edges.size(),
+					"hint": "Add a second choice in the fork editor.",
+				}
+			)
+		)
+	if (
+		str((node.get("data", {}) as Dictionary).get("resolution", "choice")) == "sacrifice"
+		and not edges.is_empty()
+	):
 		var has_free: bool = false
 		for e: Dictionary in edges:
 			if int(e.get("cost", 0)) <= 0 and str(e.get("required_item", "")).strip_edges() == "":
 				has_free = true
 				break
 		if not has_free:
-			issues.append({
-				"cause":  CAUSE_FORK_UNDERFILLED,
-				"item":   ctx,
-				"detail": "This Sacrifice fork has no free choice — the player could be stuck with no affordable option.",
-				"hint":   "Make at least one choice free: Coin Cost 0 and Required Item None.",
-			})
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_FORK_UNDERFILLED,
+						"item": ctx,
+						"detail":
+						"This Sacrifice fork has no free choice — the player could be stuck with no affordable option.",
+						"hint":
+						"Make at least one choice free: Coin Cost 0 and Required Item None.",
+					}
+				)
+			)
 	for ei in edges.size():
 		if str((edges[ei] as Dictionary).get("name", "")).strip_edges() == "":
-			issues.append({
-				"cause":  CAUSE_BAD_NAME,
-				"item":   "%s → Choice %d" % [ctx, ei + 1],
-				"detail": "Choice name is empty.",
-				"hint":   "Give the choice a name in the fork editor (the player sees it on the choice screen).",
-			})
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_BAD_NAME,
+						"item": "%s → Choice %d" % [ctx, ei + 1],
+						"detail": "Choice name is empty.",
+						"hint":
+						"Give the choice a name in the fork editor (the player sees it on the choice screen).",
+					}
+				)
+			)
 
 
 func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> void:
 	var name: String = (round_data.get("name", "") as String).strip_edges()
-	var label: String = "%s \"%s\"" % [ctx, name] if name != "" else ctx
+	var label: String = '%s "%s"' % [ctx, name] if name != "" else ctx
 
 	# Names are display-only now (see short-folder slug scheme). Any character
 	# is fine — only empty names need to be flagged, since the name is the
 	# user's identifier for the round in journey.json and the editor.
 	if name == "":
-		issues.append({
-			"cause":  CAUSE_BAD_NAME,
-			"item":   ctx,
-			"detail": "Round name is empty.",
-			"hint":   "Give the round a name in the side-panel editor.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_BAD_NAME,
+					"item": ctx,
+					"detail": "Round name is empty.",
+					"hint": "Give the round a name in the side-panel editor.",
+				}
+			)
+		)
 
 	# Required: funscript.
 	var fs: String = round_data.get("funscript_path", "")
 	if fs == "":
-		issues.append({
-			"cause":  CAUSE_MISSING_SOURCE,
-			"item":   label,
-			"detail": "No funscript file selected.",
-			"hint":   "Drag a .funscript or .json file into the Funscript field for this round.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": label,
+					"detail": "No funscript file selected.",
+					"hint":
+					"Drag a .funscript or .json file into the Funscript field for this round.",
+				}
+			)
+		)
 	elif not _save_source_exists(fs):
-		issues.append({
-			"cause":  CAUSE_MISSING_SOURCE,
-			"item":   label,
-			"detail": "Funscript file no longer exists at: %s" % fs,
-			"hint":   "The source file may have been moved or deleted. Re-drag it into the editor.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": label,
+					"detail": "Funscript file no longer exists at: %s" % fs,
+					"hint":
+					"The source file may have been moved or deleted. Re-drag it into the editor.",
+				}
+			)
+		)
 
 	# Optional: video.
 	var vid: String = round_data.get("video_path", "")
 	if vid != "" and not _save_source_exists(vid):
-		issues.append({
-			"cause":  CAUSE_MISSING_SOURCE,
-			"item":   label,
-			"detail": "Video file no longer exists at: %s" % vid,
-			"hint":   "The source file may have been moved or deleted. Re-drag it into the editor or remove the video.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": label,
+					"detail": "Video file no longer exists at: %s" % vid,
+					"hint":
+					"The source file may have been moved or deleted. Re-drag it into the editor or remove the video.",
+				}
+			)
+		)
 
 	# Secondary axis scripts.
 	var axis_scripts: Dictionary = round_data.get("axis_scripts", {})
 	for axis: String in axis_scripts:
 		var p: String = axis_scripts[axis]
 		if p != "" and not _save_source_exists(p):
-			issues.append({
-				"cause":  CAUSE_MISSING_SOURCE,
-				"item":   label,
-				"detail": "%s axis funscript no longer exists at: %s" % [axis, p],
-				"hint":   "Re-drag the %s funscript in the Extra Axes section." % axis,
-			})
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_MISSING_SOURCE,
+						"item": label,
+						"detail": "%s axis funscript no longer exists at: %s" % [axis, p],
+						"hint": "Re-drag the %s funscript in the Extra Axes section." % axis,
+					}
+				)
+			)
 
 	# Vibrator-channel scripts.
 	var vib_scripts: Dictionary = round_data.get("vib_scripts", {})
 	for ch_key: String in vib_scripts:
 		var p: String = vib_scripts[ch_key]
 		if p != "" and not _save_source_exists(p):
-			issues.append({
-				"cause":  CAUSE_MISSING_SOURCE,
-				"item":   label,
-				"detail": "%s vibrator funscript no longer exists at: %s" % [ch_key, p],
-				"hint":   "Re-drag the %s funscript in the Vibrator Scripts section." % ch_key,
-			})
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_MISSING_SOURCE,
+						"item": label,
+						"detail": "%s vibrator funscript no longer exists at: %s" % [ch_key, p],
+						"hint":
+						"Re-drag the %s funscript in the Vibrator Scripts section." % ch_key,
+					}
+				)
+			)
 
 	# Boss intro image.
 	var boss_image: String = round_data.get("boss_image", "")
 	if boss_image != "" and not _save_source_exists(boss_image):
-		issues.append({
-			"cause":  CAUSE_MISSING_SOURCE,
-			"item":   label,
-			"detail": "Boss intro image no longer exists at: %s" % boss_image,
-			"hint":   "Re-drag the boss image in the Boss Round section, or disable boss mode.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": label,
+					"detail": "Boss intro image no longer exists at: %s" % boss_image,
+					"hint":
+					"Re-drag the boss image in the Boss Round section, or disable boss mode.",
+				}
+			)
+		)
 
 	# (Path-length check used to live here. Removed once round folder names
 	# became fixed-length slugs — a round folder is always exactly 4 chars
@@ -3425,28 +3824,39 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> void:
 	var default_img: String = sb_data.get("image", "")
 	if default_img != "" and not _save_source_exists(default_img):
-		issues.append({
-			"cause":  CAUSE_MISSING_SOURCE,
-			"item":   ctx,
-			"detail": "Default image no longer exists at: %s" % default_img,
-			"hint":   "Re-drag the default image into the storyboard, or remove it.",
-		})
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": ctx,
+					"detail": "Default image no longer exists at: %s" % default_img,
+					"hint": "Re-drag the default image into the storyboard, or remove it.",
+				}
+			)
+		)
 	var lines: Array = sb_data.get("lines", [])
 	for li in lines.size():
 		var line: Dictionary = lines[li]
 		var img: String = line.get("image", "")
 		if img != "" and not _save_source_exists(img):
-			issues.append({
-				"cause":  CAUSE_MISSING_SOURCE,
-				"item":   "%s, Line %d" % [ctx, li + 1],
-				"detail": "Speaker image no longer exists at: %s" % img,
-				"hint":   "Re-drag the speaker image into this line, or remove it.",
-			})
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_MISSING_SOURCE,
+						"item": "%s, Line %d" % [ctx, li + 1],
+						"detail": "Speaker image no longer exists at: %s" % img,
+						"hint": "Re-drag the speaker image into this line, or remove it.",
+					}
+				)
+			)
 
 
 # ---------------------------------------------------------------------------
 # Error modal
 # ---------------------------------------------------------------------------
+
 
 # Shows a centred modal listing one or more SaveError dicts. Closeable via the
 # OK button or backdrop. "Copy details" copies a plain-text version of every
@@ -3455,21 +3865,23 @@ func _show_save_error_modal(title: String, headline: String, errors: Array) -> v
 	if errors.is_empty():
 		return
 
-	var parts: Dictionary    = UITheme.build_centered_modal(title, UITheme.ERROR_SOFT, Vector2i(720, 520))
-	var modal: Control       = parts["modal"]
-	var vbox:  VBoxContainer = parts["vbox"]
+	var parts: Dictionary = UITheme.build_centered_modal(
+		title, UITheme.ERROR_SOFT, Vector2i(720, 520)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
 	modal.name = "SaveErrorModal"
 
 	var headline_lbl: Label = Label.new()
 	headline_lbl.text = headline
 	UITheme.style_label(headline_lbl, UITheme.WHITE_SOFT, 13, false)
 	headline_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	headline_lbl.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+	headline_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(headline_lbl)
 
 	var scroll: ScrollContainer = ScrollContainer.new()
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(scroll)
 
 	var list: VBoxContainer = VBoxContainer.new()
@@ -3489,9 +3901,10 @@ func _show_save_error_modal(title: String, headline: String, errors: Array) -> v
 	copy_btn.text = "⎘  COPY DETAILS"
 	copy_btn.custom_minimum_size = Vector2(160, 0)
 	UITheme.style_button(copy_btn, UITheme.PURPLE_MID)
-	copy_btn.pressed.connect(func() -> void:
-		DisplayServer.clipboard_set(_save_errors_to_text(title, errors))
-		copy_btn.text = "✓  COPIED"
+	copy_btn.pressed.connect(
+		func() -> void:
+			DisplayServer.clipboard_set(_save_errors_to_text(title, errors))
+			copy_btn.text = "✓  COPIED"
 	)
 	btn_row.add_child(copy_btn)
 
@@ -3510,12 +3923,16 @@ func _show_save_error_modal(title: String, headline: String, errors: Array) -> v
 func _make_save_error_row(err: Dictionary) -> Control:
 	var row: PanelContainer = PanelContainer.new()
 	var rs: StyleBoxFlat = StyleBoxFlat.new()
-	rs.bg_color              = UITheme.CARD_BG
-	rs.border_color          = Color(UITheme.ERROR_SOFT.r, UITheme.ERROR_SOFT.g, UITheme.ERROR_SOFT.b, 0.45)
-	rs.border_width_left     = 1; rs.border_width_right  = 1
-	rs.border_width_top      = 1; rs.border_width_bottom = 1
-	rs.content_margin_left   = 10; rs.content_margin_right  = 10
-	rs.content_margin_top    = 8;  rs.content_margin_bottom = 8
+	rs.bg_color = UITheme.CARD_BG
+	rs.border_color = Color(UITheme.ERROR_SOFT.r, UITheme.ERROR_SOFT.g, UITheme.ERROR_SOFT.b, 0.45)
+	rs.border_width_left = 1
+	rs.border_width_right = 1
+	rs.border_width_top = 1
+	rs.border_width_bottom = 1
+	rs.content_margin_left = 10
+	rs.content_margin_right = 10
+	rs.content_margin_top = 8
+	rs.content_margin_bottom = 8
 	row.add_theme_stylebox_override("panel", rs)
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
@@ -3563,13 +3980,21 @@ func _save_errors_to_text(title: String, errors: Array) -> String:
 # Builds a one-off SaveError list and shows the modal. Used by mid-save
 # failures that produce a single specific error (copy failed, transcode
 # failed, journey.json write failed, etc.).
-func _show_save_error_single(title: String, cause: String, item: String, detail: String, hint: String) -> void:
-	_show_save_error_modal(title, "Save failed.", [{
-		"cause":  cause,
-		"item":   item,
-		"detail": detail,
-		"hint":   hint,
-	}])
+func _show_save_error_single(
+	title: String, cause: String, item: String, detail: String, hint: String
+) -> void:
+	_show_save_error_modal(
+		title,
+		"Save failed.",
+		[
+			{
+				"cause": cause,
+				"item": item,
+				"detail": detail,
+				"hint": hint,
+			}
+		]
+	)
 
 
 # Maps a _copy_file_chunked result dict to the right save-error modal call.
@@ -3584,28 +4009,32 @@ func _show_copy_failure_modal(copy_result: Dictionary, item: String) -> void:
 				CAUSE_CANCELLED,
 				item,
 				"You cancelled the copy while %s was being processed." % item,
-				"Press Save again to retry. Nothing on disk was changed.")
+				"Press Save again to retry. Nothing on disk was changed."
+			)
 		CAUSE_SRC_UNREADABLE:
 			_show_save_error_single(
 				"SAVE FAILED",
 				CAUSE_SRC_UNREADABLE,
 				item,
 				"Source file became unreadable: %s" % copy_result.get("detail", "?"),
-				"The file may have been moved, deleted, or its drive disconnected since you opened the editor. Re-drag it into this round and try again.")
+				"The file may have been moved, deleted, or its drive disconnected since you opened the editor. Re-drag it into this round and try again."
+			)
 		CAUSE_DST_UNWRITABLE:
 			_show_save_error_single(
 				"SAVE FAILED",
 				CAUSE_DST_UNWRITABLE,
 				item,
 				"Could not create the destination file: %s" % copy_result.get("detail", "?"),
-				"Check that the journeys folder drive isn't full or write-protected, and that no antivirus is blocking the editor. You can change the journeys folder in Options → Storage Location.")
+				"Check that the journeys folder drive isn't full or write-protected, and that no antivirus is blocking the editor. You can change the journeys folder in Options → Storage Location."
+			)
 		_:
 			_show_save_error_single(
 				"SAVE FAILED",
 				CAUSE_UNKNOWN_COPY_ERROR,
 				item,
 				"An unexpected copy failure occurred while processing %s." % item,
-				"Try saving again. If the problem persists, check the Godot debug output for details.")
+				"Try saving again. If the problem persists, check the Godot debug output for details."
+			)
 
 
 # ---------------------------------------------------------------------------
@@ -3622,6 +4051,7 @@ func _show_copy_failure_modal(copy_result: Dictionary, item: String) -> void:
 # On builder startup we scan for these and offer to clean them up. We show
 # the dialog only when there's something to act on — first-time users with
 # no leftovers see nothing.
+
 
 # Returns absolute paths to every `.~save_*` folder currently sitting in the
 # journeys root. Empty if nothing to recover.
@@ -3655,22 +4085,28 @@ func _check_for_stale_staging_folders() -> void:
 # a-blue-moon flow and doesn't justify a scene file. Mirrors the SaveError
 # modal style so it feels native.
 func _show_stale_staging_dialog(stale: Array) -> void:
-	var parts: Dictionary    = UITheme.build_centered_modal("UNFINISHED SAVES FOUND", UITheme.AMBER, Vector2i(680, 440))
-	var modal: Control       = parts["modal"]
-	var vbox:  VBoxContainer = parts["vbox"]
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"UNFINISHED SAVES FOUND", UITheme.AMBER, Vector2i(680, 440)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
 
 	var headline: Label = Label.new()
-	headline.text = ("Found %d leftover save folder%s from a previous session that didn't finish (crash, power loss, or force-quit). They take disk space and are normally safe to delete." % [
-		stale.size(), "s" if stale.size() != 1 else "",
-	])
-	headline.autowrap_mode        = TextServer.AUTOWRAP_WORD_SMART
+	headline.text = (
+		"Found %d leftover save folder%s from a previous session that didn't finish (crash, power loss, or force-quit). They take disk space and are normally safe to delete."
+		% [
+			stale.size(),
+			"s" if stale.size() != 1 else "",
+		]
+	)
+	headline.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	headline.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	UITheme.style_label(headline, UITheme.WHITE_SOFT, 13, false)
 	vbox.add_child(headline)
 
 	var scroll: ScrollContainer = ScrollContainer.new()
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(scroll)
 
 	var list: VBoxContainer = VBoxContainer.new()
@@ -3710,10 +4146,11 @@ func _show_stale_staging_dialog(stale: Array) -> void:
 	delete_btn.text = "✕  DELETE ALL"
 	delete_btn.custom_minimum_size = Vector2(180, 0)
 	UITheme.style_button(delete_btn, UITheme.MAGENTA)
-	delete_btn.pressed.connect(func() -> void:
-		for path: String in stale:
-			JourneyData.delete_dir_recursive(path)
-		modal.queue_free()
+	delete_btn.pressed.connect(
+		func() -> void:
+			for path: String in stale:
+				JourneyData.delete_dir_recursive(path)
+			modal.queue_free()
 	)
 	btn_row.add_child(delete_btn)
 
