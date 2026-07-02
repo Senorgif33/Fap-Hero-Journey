@@ -5,7 +5,8 @@ extends Control
 # by the parent GraphView to this control's position + scale, so node positions
 # and edge coordinates share the same canvas-local space.
 
-# Edges: list of { from: Vector2, to: Vector2, color: Color }
+# Edges: list of { points: PackedVector2Array, color: Color, arrow_dir: Vector2 }
+# plus optional dashed: bool and width: float (traffic heatmap thickens hot edges).
 var edges: Array = []
 
 
@@ -19,10 +20,11 @@ func _draw() -> void:
 		var points: PackedVector2Array = e["points"]
 		var color: Color = e["color"]
 		var dashed: bool = e.get("dashed", false)
+		var width: float = float(e.get("width", 2.0))
 		# The route is pre-computed by GraphView (orthogonal, entering the target on whichever face
 		# points back toward the source). Draw each segment, then an arrowhead along the entry heading.
 		for i in range(points.size() - 1):
-			_edge_seg(points[i], points[i + 1], color, dashed)
+			_edge_seg(points[i], points[i + 1], color, dashed, width)
 		if points.size() > 0:
 			_draw_arrowhead(points[points.size() - 1], e.get("arrow_dir", Vector2(0, 1)), color)
 
@@ -38,8 +40,8 @@ func _draw_arrowhead(tip: Vector2, dir: Vector2, color: Color) -> void:
 
 
 # One edge segment, solid for normal flow or dashed for a redirect (a non-default jump).
-func _edge_seg(a: Vector2, b: Vector2, color: Color, dashed: bool) -> void:
+func _edge_seg(a: Vector2, b: Vector2, color: Color, dashed: bool, width: float = 2.0) -> void:
 	if dashed:
-		draw_dashed_line(a, b, color, 2.0, 6.0)
+		draw_dashed_line(a, b, color, width, 6.0)
 	else:
-		draw_line(a, b, color, 2.0, true)
+		draw_line(a, b, color, width, true)

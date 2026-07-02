@@ -441,9 +441,64 @@ func _setup_toolbar_buttons() -> void:
 	_top_bar.add_child(img_btn)
 	_top_bar.move_child(img_btn, _save_btn.get_index())
 
+	var audit_btn: Button = Button.new()
+	audit_btn.text = "⚖ AUDIT"
+	audit_btn.focus_mode = Control.FOCUS_NONE
+	audit_btn.tooltip_text = (
+		"Balance report: dead fork paths, unaffordable costs, unobtainable items,"
+		+ " unset flags, and rarely-visited content"
+	)
+	UITheme.style_button(audit_btn, UITheme.PURPLE_MID)
+	audit_btn.pressed.connect(_on_audit_pressed)
+	_top_bar.add_child(audit_btn)
+	_top_bar.move_child(audit_btn, _save_btn.get_index())
+
+	_traffic_btn = Button.new()
+	_traffic_btn.text = "🔥 TRAFFIC"
+	_traffic_btn.toggle_mode = true
+	_traffic_btn.focus_mode = Control.FOCUS_NONE
+	_traffic_btn.tooltip_text = (
+		"Heatmap: tint the graph by how often simulated runs travel each path"
+		+ " (red/thick = extremely common, light green/thin = extremely rare)."
+		+ " Turns off on a structural edit."
+	)
+	UITheme.style_button(_traffic_btn, UITheme.PURPLE_MID)
+	_traffic_btn.toggled.connect(_on_traffic_toggled)
+	_top_bar.add_child(_traffic_btn)
+	_top_bar.move_child(_traffic_btn, _save_btn.get_index())
+
 	# 🗒 NOTE, ▭ GROUP and ⌨ SHORTCUTS moved off the toolbar into the canvas right-click context menu
 	# (_show_canvas_context_menu) to cut top-bar clutter — they drop at the cursor instead of the view
 	# centre. ⊡ FIT, ⊞ ARRANGE and 📷 IMAGE stay here as the frequent / global actions.
+
+
+# Toggles the audit traffic heatmap overlay. Enabling computes (or reuses) the
+# cached audit and paints the Monte-Carlo traffic onto the canvas; a structural
+# edit turns it back off (_push_undo) since the percentages no longer match.
+func _on_traffic_toggled(on: bool) -> void:
+	if not _graph:
+		return
+	if not on:
+		_graph.set_traffic({})
+		return
+	if (_graph_model.get("nodes", {}) as Dictionary).is_empty():
+		_traffic_btn.set_pressed_no_signal(false)
+		_show_status("Nothing to map — the journey is empty.", true)
+		return
+	if _audit_result.is_empty():
+		_run_audit()
+	var visits: Dictionary = _audit_result.get("visits", {})
+	var runs: int = maxi(1, int(visits.get("runs", 1)))
+	var traffic: Dictionary = {"nodes": {}, "edges": {}}
+	for id: String in visits.get("nodes", {}):
+		(traffic["nodes"] as Dictionary)[id] = (
+			int((visits["nodes"] as Dictionary)[id]) * 100.0 / runs
+		)
+	for key: String in visits.get("edges", {}):
+		(traffic["edges"] as Dictionary)[key] = (
+			int((visits["edges"] as Dictionary)[key]) * 100.0 / runs
+		)
+	_graph.set_traffic(traffic)
 
 
 # Auto-arranges the whole graph into tidy Sugiyama layers (rows by depth, crossings reduced, x
@@ -479,6 +534,413 @@ func _on_arrange_pressed() -> void:
 	_refresh_graph()
 	_graph.call_deferred("fit_to_view")
 	_show_status("Arranged the graph into layers. Ctrl+Z to undo.", false)
+
+
+# ---------------------------------------------------------------------------
+# Journey audit (⚖) — balance report
+# ---------------------------------------------------------------------------
+
+# The last audit result, reused by the side panel's ⚖ ON ARRIVAL block.
+# Cleared on every structural mutation (_push_undo) — {} means "stale/none".
+var _audit_result: Dictionary = {}
+var _traffic_btn: Button = null  # 🔥 heatmap toggle; forced off when the cache invalidates
+
+
+func _on_audit_pressed() -> void:
+	if not _graph or (_graph_model.get("nodes", {}) as Dictionary).is_empty():
+		_show_status("Nothing to audit — the journey is empty.", true)
+		return
+	_show_audit_modal(_run_audit())
+
+
+# Runs JourneyAudit over the live graph model and caches the result. Baseline
+# round scores/lengths are computed here (file I/O stays out of the pure core):
+# each round's funscript is parsed once.
+func _run_audit() -> Dictionary:
+	var items: Dictionary = {}
+	for item_id: String in InventoryService.GetAllItemIds():
+		var item_data: Dictionary = InventoryService.GetItemData(item_id)
+		items[item_id] = {
+			"price": int(item_data.get("price", 0)),
+			"kind": str(item_data.get("kind", "")),
+		}
+
+	var round_scores: Dictionary = {}
+	var round_lengths: Dictionary = {}
+	for nid: String in _graph_model.get("nodes", {}):
+		var node: Dictionary = _graph_model["nodes"][nid]
+		if str(node.get("type", "")) != "round":
+			continue
+		var fs_path: String = str((node.get("data", {}) as Dictionary).get("funscript_path", ""))
+		if fs_path != "" and FileAccess.file_exists(fs_path):
+			var actions: Array = JourneyData.read_funscript_actions(fs_path)
+			round_scores[nid] = JourneyAudit.baseline_score(actions)
+			if not actions.is_empty():
+				round_lengths[nid] = int((actions[-1] as Vector2).x)
+
+	_audit_result = JourneyAudit.audit(
+		_graph_model, {"items": items, "round_scores": round_scores, "round_lengths": round_lengths}
+	)
+	return _audit_result
+
+
+# Arrival-state summary at a node for the side panel: coins/score bounds from
+# the interval walk, averages + reach share from the Monte-Carlo pass. Returns
+# {} when no audit is cached (never run, or invalidated by a structural edit)
+# or the node wasn't reachable in the analysis.
+func audit_arrival_info(node_id: String) -> Dictionary:
+	if _audit_result.is_empty():
+		return {}
+	var coins: Dictionary = (_audit_result.get("coins", {}) as Dictionary).get(node_id, {})
+	if coins.is_empty():
+		return {}
+	var score: Dictionary = (_audit_result.get("last_score", {}) as Dictionary).get(node_id, {})
+	var visits: Dictionary = _audit_result.get("visits", {})
+	var runs: int = maxi(1, int(visits.get("runs", 1)))
+	return {
+		"coins_lo": int(coins["lo"]),
+		"coins_hi": int(coins["hi"]),
+		"coins_avg": float((visits.get("avg_arrival_coins", {}) as Dictionary).get(node_id, 0.0)),
+		"score_lo": int(score.get("lo", 0)),
+		"score_hi": int(score.get("hi", 0)),
+		"score_avg": float((visits.get("avg_arrival_score", {}) as Dictionary).get(node_id, 0.0)),
+		"seen_pct": int((visits.get("nodes", {}) as Dictionary).get(node_id, 0)) * 100.0 / runs,
+	}
+
+
+# Side-panel refresh button: recompute the audit, then rebuild the panel so
+# the ⚖ ON ARRIVAL block shows the fresh numbers.
+func refresh_arrival_audit(node_id: String) -> void:
+	_run_audit()
+	_side_renderer.show_graph_node_editor(node_id)
+
+
+# The audit report: findings grouped worst-first, each anchored to its node by
+# display name. Advisory only — nothing here blocks saving.
+func _show_audit_modal(result: Dictionary) -> void:
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"JOURNEY AUDIT", UITheme.PURPLE_BRIGHT, Vector2i(760, 560)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
+
+	var findings: Array = result.get("findings", [])
+	var runs: int = int((result.get("visits", {}) as Dictionary).get("runs", 0))
+
+	var stats: Dictionary = result.get("stats", {})
+	if not stats.is_empty():
+		vbox.add_child(_audit_stats_strip(stats))
+		var sep: HSeparator = HSeparator.new()
+		sep.add_theme_color_override("separator", UITheme.SEPARATOR)
+		vbox.add_child(sep)
+
+	var scroll: ScrollContainer = ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vbox.add_child(scroll)
+	var list: VBoxContainer = VBoxContainer.new()
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list.add_theme_constant_override("separation", 8)
+	scroll.add_child(list)
+
+	# Clicking a finding closes the report and locates its node on the canvas.
+	var jump := func(node_id: String) -> void:
+		if node_id == "" or not (_graph_model.get("nodes", {}) as Dictionary).has(node_id):
+			return
+		modal.queue_free()
+		if _graph:
+			_graph.select_graph_node(node_id)
+			_graph.center_on(node_id)
+
+	if findings.is_empty():
+		var ok_lbl: Label = Label.new()
+		ok_lbl.text = "NO ISSUES FOUND — every gate is reachable and affordable."
+		UITheme.style_label(ok_lbl, UITheme.OK, 13, true)
+		ok_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		list.add_child(ok_lbl)
+	else:
+		# Worst first: dead content, then per-route warnings, then info.
+		for severity: String in [
+			JourneyAudit.SEV_DEAD, JourneyAudit.SEV_WARN, JourneyAudit.SEV_INFO
+		]:
+			for f: Dictionary in findings:
+				if str(f.get("severity", "")) == severity:
+					list.add_child(_audit_finding_row(f, jump))
+
+	var foot: Label = Label.new()
+	foot.text = (
+		"Baseline model: completes every round, endures curses, buys only what locked paths ahead require."
+		+ (" Traffic from %d simulated runs." % runs if runs > 0 else "")
+	)
+	UITheme.style_label(foot, UITheme.DARK_TEXT, 10, false)
+	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	foot.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(foot)
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	var close_btn: Button = Button.new()
+	close_btn.text = "CLOSE"
+	close_btn.custom_minimum_size = Vector2(120, 0)
+	UITheme.style_button(close_btn, UITheme.PURPLE_MID)
+	close_btn.pressed.connect(modal.queue_free)
+	btn_row.add_child(close_btn)
+	vbox.add_child(btn_row)
+
+	add_child(modal)
+
+
+func _audit_finding_row(f: Dictionary, jump: Callable) -> Control:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+
+	var sev: String = str(f.get("severity", ""))
+	var tag: Label = Label.new()
+	var tag_color: Color = UITheme.CYAN
+	var tag_text: String = "INFO"
+	if sev == JourneyAudit.SEV_DEAD:
+		tag_color = UITheme.ERROR_SOFT
+		tag_text = "DEAD"
+	elif sev == JourneyAudit.SEV_WARN:
+		tag_color = UITheme.AMBER
+		tag_text = "WARN"
+	tag.text = tag_text
+	tag.custom_minimum_size = Vector2(52, 0)
+	UITheme.style_label(tag, tag_color, 11, true)
+	row.add_child(tag)
+
+	var body: Label = Label.new()
+	body.text = "%s — %s" % [_audit_node_label(str(f.get("node_id", ""))), str(f.get("msg", ""))]
+	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	UITheme.style_label(body, UITheme.WHITE_SOFT, 12, false)
+	row.add_child(body)
+
+	# Whole-row click → jump to the node (labels ignore mouse, so the row gets it).
+	var node_id: String = str(f.get("node_id", ""))
+	row.mouse_filter = Control.MOUSE_FILTER_STOP
+	row.tooltip_text = "Click to locate this node on the canvas"
+	row.gui_input.connect(
+		func(ev: InputEvent) -> void:
+			if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT and ev.pressed:
+				jump.call(node_id)
+	)
+	return row
+
+
+# A node's display name for the report: its authored name/title, else its type.
+func _audit_node_label(node_id: String) -> String:
+	var node: Dictionary = (_graph_model.get("nodes", {}) as Dictionary).get(node_id, {})
+	var data: Dictionary = node.get("data", {})
+	var name: String = str(data.get("name", data.get("title", ""))).strip_edges()
+	var type: String = str(node.get("type", "?")).to_upper()
+	return '%s "%s"' % [type, name] if name != "" else type
+
+
+# The journey-wide summary above the findings: a 2×2 grid of stat cards (big
+# average, small range detail), an endings ratio bar, and the save-spacing bar.
+# Route bounds come from the interval walk, averages from the simulated runs.
+func _audit_stats_strip(stats: Dictionary) -> Control:
+	var strip: VBoxContainer = VBoxContainer.new()
+	strip.add_theme_constant_override("separation", 8)
+
+	var grid: GridContainer = GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 8)
+	strip.add_child(grid)
+
+	var coins: Dictionary = stats.get("end_coins", {})
+	if coins.has("lo"):
+		grid.add_child(
+			_audit_stat_card(
+				"COINS AT END",
+				"♦ %d" % roundi(coins["avg"]),
+				"range ♦ %d – %d" % [coins["lo"], coins["hi"]]
+			)
+		)
+
+	var score: Dictionary = stats.get("total_score", {})
+	var best: Dictionary = stats.get("best_round", {})
+	if score.has("lo"):
+		var best_line: String = ""
+		if str(best.get("node_id", "")) != "":
+			best_line = (
+				"best: %s (%d)" % [_audit_node_label(str(best["node_id"])), int(best["score"])]
+			)
+		grid.add_child(
+			_audit_stat_card(
+				"TOTAL SCORE",
+				"%d" % roundi(score["avg"]),
+				"range %d – %d" % [score["lo"], score["hi"]],
+				best_line
+			)
+		)
+
+	var rounds: Dictionary = stats.get("rounds", {})
+	var dur: Dictionary = stats.get("duration_ms", {})
+	if rounds.has("lo"):
+		var sub: String = "%d – %d rounds" % [rounds["lo"], rounds["hi"]]
+		if dur.has("lo") and int(dur["hi"]) > 0:
+			sub += "  ·  %s – %s" % [_audit_mmss(int(dur["lo"])), _audit_mmss(int(dur["hi"]))]
+		grid.add_child(_audit_stat_card("RUN LENGTH", "≈ %.1f rounds" % float(rounds["avg"]), sub))
+
+	var cp: Dictionary = stats.get("checkpoints", {})
+	if not cp.is_empty():
+		var count: int = int(cp.get("count", 0))
+		var value: String = "%d saves" % count if count > 0 else "none"
+		var sub: String = ""
+		if int(cp.get("longest_ms", 0)) > 0:
+			sub = (
+				"stretch %s – %s  ·  avg %s"
+				% [
+					_audit_mmss(int(cp.get("shortest_ms", 0))),
+					_audit_mmss(int(cp.get("longest_ms", 0))),
+					_audit_mmss(roundi(float(cp.get("avg_ms", 0.0)))),
+				]
+			)
+		grid.add_child(_audit_stat_card("CHECKPOINTS", value, sub))
+
+	var endings: Array = stats.get("endings", [])
+	if endings.size() > 1:
+		strip.add_child(_audit_endings_bar(endings))
+
+	var cp_bar: Dictionary = stats.get("cp_bar", {})
+	if int(cp_bar.get("total_ms", 0)) > 0 and (cp_bar.get("segments", []) as Array).size() > 0:
+		strip.add_child(_audit_checkpoint_bar(cp_bar))
+
+	return strip
+
+
+# One stat card: dim caption, big value, small detail line(s). `sub2_text`
+# adds a second detail line when non-empty (long details bleed off one line).
+func _audit_stat_card(
+	caption_text: String, value_text: String, sub_text: String, sub2_text: String = ""
+) -> Control:
+	var panel: PanelContainer = PanelContainer.new()
+	var style: StyleBoxFlat = StyleBoxFlat.new()
+	style.bg_color = UITheme.CARD_BG
+	style.border_color = UITheme.PURPLE_DARK
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(UITheme.CORNER_RADIUS)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
+	panel.add_theme_stylebox_override("panel", style)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 2)
+	panel.add_child(col)
+
+	var caption: Label = Label.new()
+	caption.text = caption_text
+	UITheme.style_label(caption, UITheme.PURPLE_MID, 10, true)
+	col.add_child(caption)
+
+	var value: Label = Label.new()
+	value.text = value_text
+	UITheme.style_label(value, UITheme.WHITE_SOFT, 18, true)
+	col.add_child(value)
+
+	var sub: Label = Label.new()
+	sub.text = sub_text
+	sub.clip_text = true
+	UITheme.style_label(sub, UITheme.DARK_TEXT, 10, false)
+	col.add_child(sub)
+
+	if sub2_text != "":
+		var sub2: Label = Label.new()
+		sub2.text = sub2_text
+		sub2.clip_text = true
+		UITheme.style_label(sub2, UITheme.DARK_TEXT, 10, false)
+		col.add_child(sub2)
+	return panel
+
+
+# Endings as a stacked ratio bar: one tinted segment per ending, width by its
+# share of simulated runs, labelled inline (name + %).
+func _audit_endings_bar(endings: Array) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 3)
+	var caption: Label = Label.new()
+	caption.text = "ENDINGS  (SHARE OF SIMULATED RUNS)"
+	UITheme.style_label(caption, UITheme.PURPLE_MID, 10, true)
+	box.add_child(caption)
+
+	var bar: HBoxContainer = HBoxContainer.new()
+	bar.add_theme_constant_override("separation", 2)
+	bar.custom_minimum_size = Vector2(0, 24)
+	var palette: Array = [
+		UITheme.PURPLE_BRIGHT, UITheme.CYAN, UITheme.MAGENTA, UITheme.AMBER, UITheme.TOXIC_GREEN
+	]
+	for i: int in endings.size():
+		var e: Dictionary = endings[i]
+		var seg: PanelContainer = PanelContainer.new()
+		var seg_style: StyleBoxFlat = StyleBoxFlat.new()
+		seg_style.bg_color = (palette[i % palette.size()] as Color).darkened(0.45)
+		seg_style.set_corner_radius_all(UITheme.CORNER_RADIUS)
+		seg.add_theme_stylebox_override("panel", seg_style)
+		seg.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		seg.size_flags_stretch_ratio = maxf(0.02, float(e["pct"]))
+		seg.tooltip_text = "%s — %.1f%%" % [_audit_node_label(str(e["node_id"])), float(e["pct"])]
+		var lbl: Label = Label.new()
+		lbl.text = "%s  %.0f%%" % [_audit_node_label(str(e["node_id"])), float(e["pct"])]
+		lbl.clip_text = true
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		UITheme.style_label(lbl, UITheme.WHITE_SOFT, 10, false)
+		seg.add_child(lbl)
+		bar.add_child(seg)
+	box.add_child(bar)
+	return box
+
+
+# Save spacing along the worst-case (longest-playtime) route: one segment per
+# checkpoint stretch, width by playtime, tinted by how close the stretch runs
+# to the 30-minute finding threshold; ◆ ticks mark the checkpoints between.
+func _audit_checkpoint_bar(cp_bar: Dictionary) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 3)
+	var caption: Label = Label.new()
+	caption.text = "CHECKPOINT SPACING  (WORST-CASE ROUTE)"
+	UITheme.style_label(caption, UITheme.PURPLE_MID, 10, true)
+	box.add_child(caption)
+
+	var bar: HBoxContainer = HBoxContainer.new()
+	bar.add_theme_constant_override("separation", 2)
+	bar.custom_minimum_size = Vector2(0, 14)
+	var segments: Array = cp_bar.get("segments", [])
+	for i: int in segments.size():
+		if i > 0:
+			var tick: Label = Label.new()
+			tick.text = "◆"
+			tick.tooltip_text = "Checkpoint"
+			UITheme.style_label(tick, UITheme.CYAN, 11, false)
+			bar.add_child(tick)
+		var seg: Dictionary = segments[i]
+		var ms: int = int(seg["ms"])
+		var tint: Color = UITheme.TOXIC_GREEN
+		if ms > JourneyAudit.CHECKPOINT_GAP_MS:
+			tint = UITheme.ERROR_SOFT
+		elif ms > JourneyAudit.CHECKPOINT_GAP_MS * 2 / 3:
+			tint = UITheme.AMBER
+		var block: PanelContainer = PanelContainer.new()
+		var seg_style: StyleBoxFlat = StyleBoxFlat.new()
+		seg_style.bg_color = tint.darkened(0.5)
+		seg_style.set_corner_radius_all(UITheme.CORNER_RADIUS)
+		block.add_theme_stylebox_override("panel", seg_style)
+		block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		block.size_flags_stretch_ratio = maxf(0.02, float(ms))
+		block.tooltip_text = "%d rounds · %s" % [int(seg["rounds"]), _audit_mmss(ms)]
+		bar.add_child(block)
+	box.add_child(bar)
+	return box
+
+
+func _audit_mmss(ms: int) -> String:
+	var total_s: int = ms / 1000
+	return "%d:%02d" % [total_s / 60, total_s % 60]
 
 
 # ── Canvas right-click context menu ──────────────────────────────────────────
@@ -2122,6 +2584,13 @@ func _push_undo() -> void:
 	if _undo_stack.size() > UNDO_LIMIT:
 		_undo_stack.pop_front()
 	_redo_stack.clear()
+	_audit_result = {}  # structural change → the cached audit no longer matches
+	# The heatmap percentages reference the pre-edit structure — turn it off
+	# quietly (the mutation's own _refresh_graph re-renders without the overlay).
+	if _traffic_btn and _traffic_btn.button_pressed:
+		_traffic_btn.set_pressed_no_signal(false)
+		if _graph:
+			_graph.set_traffic({})
 
 
 # Ctrl+Z — reverts to the structure captured by the last _push_undo().

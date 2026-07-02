@@ -762,6 +762,9 @@ static func _parse_shop(raw: Dictionary) -> Dictionary:
 	var items: Array = []
 	for it in raw.get("Items", raw.get("items", [])):
 		items.append(str(it))
+	var guaranteed: Array = []
+	for it in raw.get("Guaranteed", raw.get("guaranteed", [])):
+		guaranteed.append(str(it))
 	return {
 		"after_order": raw.get("AfterOrder", raw.get("after_order", 0)),
 		"node_id": raw.get("NodeId", raw.get("node_id", "")),
@@ -769,6 +772,7 @@ static func _parse_shop(raw: Dictionary) -> Dictionary:
 		"mode": raw.get("Mode", raw.get("mode", "pool")),
 		"count": int(raw.get("Count", raw.get("count", 3))),
 		"items": items,
+		"guaranteed": guaranteed,
 		"price_multiplier": float(raw.get("PriceMultiplier", raw.get("price_multiplier", 1.0))),
 	}
 

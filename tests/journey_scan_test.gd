@@ -91,6 +91,7 @@ func _full_journey() -> Dictionary:
 				"Mode": "fixed",
 				"Count": 2,
 				"Items": ["key", "cleanse"],
+				"Guaranteed": ["key"],
 				"PriceMultiplier": 1.5
 			},
 		],
@@ -270,6 +271,7 @@ func test_shop_fields() -> void:
 	assert_str(s.mode).is_equal("fixed")
 	assert_int(s.count).is_equal(2)
 	assert_array(s.items).contains_exactly(["key", "cleanse"])
+	assert_array(s.guaranteed).contains_exactly(["key"])
 	assert_float(s.price_multiplier).is_equal_approx(1.5, EPS)
 
 

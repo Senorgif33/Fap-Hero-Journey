@@ -11,7 +11,7 @@ repos:
     rev: "4.3.4"
     hooks:
       - id: gdformat
-        exclude: '^addons/'        # never reformat vendored code (gdUnit4, etc.)
+		exclude: '^addons/'        # never reformat vendored code (gdUnit4, etc.)
       # Optional linter (naming, line length, …) — noisier; add a .gdlintrc first, then enable:
       # - id: gdlint
-      #   exclude: '^addons/'
+	  #   exclude: '^addons/'

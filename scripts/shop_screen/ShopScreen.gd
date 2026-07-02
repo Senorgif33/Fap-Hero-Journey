@@ -3,8 +3,6 @@ extends Control
 signal closed
 signal map_requested  # player tapped the header "◇ MAP" button (GameLoop owns the map)
 
-const DEFAULT_COUNT: int = 3
-
 @onready var _backdrop: ColorRect = $Backdrop
 @onready var _panel: PanelContainer = $Panel
 @onready var _vbox: VBoxContainer = $Panel/VBox
@@ -138,21 +136,11 @@ func _pulse_coin_badge() -> void:
 
 
 # Resolves which item ids to display from the shop's authored config.
-# "fixed" mode shows exactly the authored list (in registry order for a stable
-# lineup); "pool" mode draws `count` random items from the authored pool, or
-# from all items when no pool was specified. Stale ids are dropped.
+# The logic lives in JourneyData.resolve_shop_offer (pure, shared with the
+# journey auditor): "fixed" mode shows exactly the authored list; "pool" mode
+# shows every guaranteed item plus random draws from the rest of the registry.
 func _resolve_offer(shop_data: Dictionary) -> Array:
-	var all_ids: Array = InventoryService.GetAllItemIds()
-	var configured: Array = shop_data.get("items", [])
-	var valid: Array = configured.filter(func(id: String) -> bool: return id in all_ids)
-
-	if shop_data.get("mode", "pool") == "fixed":
-		return all_ids.filter(func(id: String) -> bool: return id in valid)
-
-	var pool: Array = valid if not valid.is_empty() else all_ids.duplicate()
-	pool.shuffle()
-	var count: int = int(shop_data.get("count", DEFAULT_COUNT))
-	return pool.slice(0, min(count, pool.size()))
+	return JourneyData.resolve_shop_offer(shop_data, InventoryService.GetAllItemIds())
 
 
 # Item price after the per-shop multiplier, rounded to a whole coin.

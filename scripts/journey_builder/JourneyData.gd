@@ -351,6 +351,7 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			out["count"] = int(data.get("count", 3))
 			out["price_multiplier"] = float(data.get("price_multiplier", 1.0))
 			_fill_default(out, "items", [])
+			_fill_default(out, "guaranteed", [])
 		"storyboard":
 			# image + lines are overwritten by _save_storyboard_node_media.
 			out["coins"] = int(data.get("coins", 0))
@@ -395,6 +396,62 @@ static func clean_flag_list(v: Variant) -> Array:
 		if s != "" and not (s in out):
 			out.append(s)
 	return out
+
+
+# ── Shop offer ───────────────────────────────────────────────────────────────
+
+
+# Resolves a shop's displayed lineup from its authored config. Pure — the item
+# registry is passed in so this is shared by ShopScreen (live) and JourneyAudit
+# (analysis). "fixed" mode shows exactly the authored `items`; "pool" mode shows
+# every `guaranteed` item plus random draws from the rest of the registry up to
+# `count` (count can never trim a guaranteed item). Stale ids are dropped.
+# Returned in registry order so guaranteed items aren't visually distinguishable
+# from drawn ones. `rng` is injectable for deterministic tests (null = global).
+static func resolve_shop_offer(
+	shop_data: Dictionary, all_ids: Array, rng: RandomNumberGenerator = null
+) -> Array:
+	if str(shop_data.get("mode", "pool")) == "fixed":
+		return shop_fixed_ids(shop_data, all_ids)
+
+	var guaranteed: Array = shop_guaranteed_ids(shop_data, all_ids)
+	var rest: Array = all_ids.filter(func(id: String) -> bool: return not (id in guaranteed))
+	if rng != null:
+		# Fisher-Yates with the injected rng (Array.shuffle only uses the global one).
+		for i: int in range(rest.size() - 1, 0, -1):
+			var j: int = rng.randi_range(0, i)
+			var tmp: Variant = rest[i]
+			rest[i] = rest[j]
+			rest[j] = tmp
+	else:
+		rest.shuffle()
+
+	var count: int = maxi(int(shop_data.get("count", 3)), guaranteed.size())
+	var lineup: Array = guaranteed + rest.slice(0, count - guaranteed.size())
+	return all_ids.filter(func(id: String) -> bool: return id in lineup)
+
+
+# The item ids a shop is GUARANTEED to offer: the whole lineup in fixed mode,
+# the authored `guaranteed` list in pool mode. Registry order; stale ids dropped.
+static func shop_guaranteed_ids(shop_data: Dictionary, all_ids: Array) -> Array:
+	if str(shop_data.get("mode", "pool")) == "fixed":
+		return shop_fixed_ids(shop_data, all_ids)
+	var g: Array = shop_data.get("guaranteed", [])
+	return all_ids.filter(func(id: String) -> bool: return id in g)
+
+
+# The item ids a shop MIGHT offer: the fixed lineup, or (pool mode) the whole
+# registry — pool draws fill from every non-guaranteed item.
+static func shop_possible_ids(shop_data: Dictionary, all_ids: Array) -> Array:
+	if str(shop_data.get("mode", "pool")) == "fixed":
+		return shop_fixed_ids(shop_data, all_ids)
+	return all_ids.duplicate()
+
+
+# The authored fixed lineup filtered to ids that still exist, in registry order.
+static func shop_fixed_ids(shop_data: Dictionary, all_ids: Array) -> Array:
+	var configured: Array = shop_data.get("items", [])
+	return all_ids.filter(func(id: String) -> bool: return id in configured)
 
 
 # Returns a fresh default item dict for a builder node of the given type. Single

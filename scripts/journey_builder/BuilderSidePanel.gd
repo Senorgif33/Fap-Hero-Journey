@@ -358,6 +358,9 @@ func show_graph_node_editor(node_id: String) -> void:
 	# {node_id} item is all _save_and_test_from needs; the graph is node-id native).
 	side_vbox.add_child(_make_test_controls({"node_id": node_id}, []))
 	side_vbox.add_child(_side_divider_line())
+	# ⚖ ON ARRIVAL — what the audit says the player has when reaching this node.
+	side_vbox.add_child(_make_arrival_audit_block(node_id))
+	side_vbox.add_child(_side_divider_line())
 	var node_type: String = node.get("type", "round")
 	if node_type == "fork":
 		# Fork editing = out-edges as choices (3c-ii). reselect rebuilds the side panel after a
@@ -1281,6 +1284,8 @@ func _make_side_shop_editor(arr: Array, idx: int) -> Control:
 		shop_data["count"] = 3
 	if not shop_data.has("items"):
 		shop_data["items"] = []
+	if not shop_data.has("guaranteed"):
+		shop_data["guaranteed"] = []
 	if not shop_data.has("price_multiplier"):
 		shop_data["price_multiplier"] = 1.0
 
@@ -1326,58 +1331,33 @@ func _make_side_shop_editor(arr: Array, idx: int) -> Control:
 	count_spin.value_changed.connect(func(v: float) -> void: arr[idx]["count"] = int(v))
 	col.add_child(count_spin)
 
-	# Fixed-lineup checklist — shown only in fixed mode; pool mode draws from all
-	# items so the list would just be noise there.
-	var items_section: VBoxContainer = VBoxContainer.new()
-	items_section.add_theme_constant_override("separation", 6)
-	items_section.visible = shop_data.get("mode", "pool") == "fixed"
-	col.add_child(items_section)
-
-	items_section.add_child(_side_section_separator())
-	items_section.add_child(_side_field_label("ITEMS"))
-	var hint: Label = Label.new()
-	hint.text = "PICK THE EXACT ITEMS THIS SHOP SELLS."
-	hint.add_theme_color_override(
-		"font_color", Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.7)
+	# Two per-mode checklists over the same registry: fixed mode picks the exact
+	# lineup ("items"); pool mode picks the always-included subset ("guaranteed" —
+	# the rest of the lineup is drawn randomly). Both lists persist across mode
+	# switches so toggling the dropdown is non-destructive.
+	var fixed_section: VBoxContainer = _shop_item_checklist(
+		arr, idx, "items", "ITEMS", "PICK THE EXACT ITEMS THIS SHOP SELLS.", all_item_ids
 	)
-	hint.add_theme_font_size_override("font_size", 10)
-	hint.uppercase = true
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	items_section.add_child(hint)
+	fixed_section.visible = shop_data.get("mode", "pool") == "fixed"
+	col.add_child(fixed_section)
 
-	var item_checks: Array[CheckBox] = []
-	for item_id: String in all_item_ids:
-		var item_data: Dictionary = InventoryService.GetItemData(item_id)
-		var cb: CheckBox = CheckBox.new()
-		cb.text = "%s  (♦%d)" % [item_data.get("name", item_id), item_data.get("price", 0)]
-		cb.button_pressed = item_id in (shop_data.get("items", []) as Array)
-		cb.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
-		cb.add_theme_font_size_override("font_size", 12)
-		cb.toggled.connect(
-			func(pressed: bool) -> void:
-				var list: Array = arr[idx]["items"]
-				if pressed and item_id not in list:
-					list.append(item_id)
-				elif not pressed:
-					list.erase(item_id)
-		)
-		item_checks.append(cb)
-		items_section.add_child(cb)
+	var pool_section: VBoxContainer = _shop_item_checklist(
+		arr,
+		idx,
+		"guaranteed",
+		"GUARANTEED IN LINEUP",
+		"CHECKED ITEMS ALWAYS APPEAR; THE REST OF THE LINEUP IS DRAWN RANDOMLY.",
+		all_item_ids
+	)
+	pool_section.visible = shop_data.get("mode", "pool") == "pool"
+	col.add_child(pool_section)
 
-	# Switching back to pool mode hides the list and clears the lineup.
 	mode_dd.item_selected.connect(
 		func(sel: int) -> void:
-			if sel == 1:
-				arr[idx]["mode"] = "fixed"
-				items_section.visible = true
-				count_spin.editable = false
-			else:
-				arr[idx]["mode"] = "pool"
-				items_section.visible = false
-				count_spin.editable = true
-				(arr[idx]["items"] as Array).clear()
-				for cb: CheckBox in item_checks:
-					cb.set_pressed_no_signal(false)
+			arr[idx]["mode"] = "fixed" if sel == 1 else "pool"
+			fixed_section.visible = sel == 1
+			pool_section.visible = sel == 0
+			count_spin.editable = sel == 0
 	)
 
 	# Price multiplier — applied on top of each item's base price.
@@ -1393,6 +1373,117 @@ func _make_side_shop_editor(arr: Array, idx: int) -> Control:
 	mult_spin.value_changed.connect(func(v: float) -> void: arr[idx]["price_multiplier"] = v)
 	col.add_child(mult_spin)
 	return col
+
+
+# ⚖ ON ARRIVAL — the audit's view of the player state reaching this node:
+# coins/last-round-score bounds (interval walk) + averages and reach share
+# (Monte-Carlo). Reads the owner's cached audit; a structural edit invalidates
+# it, so the block offers COMPUTE (no cache) or ⟳ REFRESH (stale-able cache).
+func _make_arrival_audit_block(node_id: String) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 4)
+	box.add_child(_side_field_label("⚖ ON ARRIVAL"))
+
+	var info: Dictionary = _owner.audit_arrival_info(node_id)
+	if info.is_empty():
+		var hint: Label = Label.new()
+		hint.text = "COMPUTE THE AUDIT TO SEE COINS / SCORE ARRIVING AT THIS NODE."
+		hint.add_theme_color_override(
+			"font_color",
+			Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.7)
+		)
+		hint.add_theme_font_size_override("font_size", 10)
+		hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		box.add_child(hint)
+	else:
+		box.add_child(
+			_arrival_stat_row(
+				"COINS",
+				(
+					"♦ %d – %d   (avg ≈ %d)"
+					% [info["coins_lo"], info["coins_hi"], roundi(info["coins_avg"])]
+				)
+			)
+		)
+		box.add_child(
+			_arrival_stat_row(
+				"LAST SCORE",
+				(
+					"%d – %d   (avg ≈ %d)"
+					% [info["score_lo"], info["score_hi"], roundi(info["score_avg"])]
+				)
+			)
+		)
+		box.add_child(
+			_arrival_stat_row("REACHED IN", "%.0f%% OF SIMULATED RUNS" % float(info["seen_pct"]))
+		)
+
+	var btn: Button = UITheme.make_icon_btn(
+		"⚖ COMPUTE" if info.is_empty() else "⟳ REFRESH", false, UITheme.PURPLE_MID
+	)
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.pressed.connect(func() -> void: _owner.refresh_arrival_audit(node_id))
+	box.add_child(btn)
+	return box
+
+
+func _arrival_stat_row(key_text: String, value_text: String) -> Control:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var key: Label = Label.new()
+	key.text = key_text
+	key.custom_minimum_size = Vector2(84, 0)
+	key.add_theme_color_override("font_color", UITheme.PURPLE_MID)
+	key.add_theme_font_size_override("font_size", 10)
+	row.add_child(key)
+	var value: Label = Label.new()
+	value.text = value_text
+	value.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	value.add_theme_font_size_override("font_size", 11)
+	value.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	value.clip_text = true
+	row.add_child(value)
+	return row
+
+
+# A labelled item-registry checklist section whose checked ids are written to
+# shop_data[key]. Used twice by the shop editor: the fixed lineup ("items") and
+# the pool-mode guaranteed subset ("guaranteed").
+func _shop_item_checklist(
+	arr: Array, idx: int, key: String, label: String, hint_text: String, all_item_ids: Array
+) -> VBoxContainer:
+	var section: VBoxContainer = VBoxContainer.new()
+	section.add_theme_constant_override("separation", 6)
+
+	section.add_child(_side_section_separator())
+	section.add_child(_side_field_label(label))
+	var hint: Label = Label.new()
+	hint.text = hint_text
+	hint.add_theme_color_override(
+		"font_color", Color(UITheme.PURPLE_MID.r, UITheme.PURPLE_MID.g, UITheme.PURPLE_MID.b, 0.7)
+	)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	section.add_child(hint)
+
+	for item_id: String in all_item_ids:
+		var item_data: Dictionary = InventoryService.GetItemData(item_id)
+		var cb: CheckBox = CheckBox.new()
+		cb.text = "%s  (♦%d)" % [item_data.get("name", item_id), item_data.get("price", 0)]
+		cb.button_pressed = item_id in (arr[idx].get(key, []) as Array)
+		cb.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+		cb.add_theme_font_size_override("font_size", 12)
+		cb.toggled.connect(
+			func(pressed: bool) -> void:
+				var list: Array = arr[idx][key]
+				if pressed and item_id not in list:
+					list.append(item_id)
+				elif not pressed:
+					list.erase(item_id)
+		)
+		section.add_child(cb)
+	return section
 
 
 func _make_side_storyboard_editor(arr: Array, idx: int, reselect: Callable) -> Control:

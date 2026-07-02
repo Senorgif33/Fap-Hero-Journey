@@ -63,6 +63,10 @@ var _current_layout_node_id: String = ""  # transient: the node _make_node is bu
 var _node_ctrls: Dictionary = {}  # node_id -> Control (graph mode), for live drag moves
 var _node_warnings: Dictionary = {}  # node_id -> soft-validation summary (author badge); pulled per layout
 var warning_provider: Callable = Callable()  # builder hook → {node_id: warning}; called each layout (editor only)
+# Traffic heatmap (audit Monte-Carlo results): {nodes: {id: pct}, edges: {"id:ei": pct}}.
+# Non-empty → editor edges are tinted/thickened by traffic share and nodes get a % chip.
+# Never rendered in map_mode (player map / image export). Set via set_traffic({}) to clear.
+var _traffic: Dictionary = {}
 var _connect_mode: bool = false  # builder is wiring an edge — a node click is a target, not a drag
 
 # Node-drag state. A plain press on a node arms a drag of the whole selection; _input tracks
@@ -312,6 +316,10 @@ func _layout_graph() -> void:
 			ctrl.gui_input.connect(_on_graph_node_gui_input.bind(id))
 		_canvas.add_child(ctrl)
 		_node_ctrls[id] = ctrl
+		if not map_mode and not _traffic.is_empty():
+			_attach_traffic_chip(
+				ctrl, float((_traffic.get("nodes", {}) as Dictionary).get(id, 0.0))
+			)
 	# Out-handles in a second pass so they're the topmost (always-clickable) children.
 	if not map_mode:
 		for id: String in nodes:
@@ -327,7 +335,9 @@ func _layout_graph() -> void:
 			continue
 		var n: Dictionary = nodes[id]
 		var is_fork: bool = n.get("type", "") == "fork"
-		for e: Dictionary in n.get("out", []):
+		var out: Array = n.get("out", [])
+		for ei: int in out.size():
+			var e: Dictionary = out[ei]
 			var to: String = str(e.get("to", ""))
 			if to == "":
 				continue
@@ -338,7 +348,17 @@ func _layout_graph() -> void:
 			if drawn.has(key):
 				continue
 			drawn[key] = true
-			_add_edge_between(src_ctrl, tgt_ctrl, UITheme.FORK_EDGE if is_fork else UITheme.EDGE)
+			var color: Color = UITheme.FORK_EDGE if is_fork else UITheme.EDGE
+			var width: float = 2.0
+			if not map_mode and not _traffic.is_empty():
+				# Heatmap: the edge's traffic share replaces its type color —
+				# hot = bright + thick, cold = ghostly dim + thin.
+				var pct: float = float(
+					(_traffic.get("edges", {}) as Dictionary).get("%s:%d" % [id, ei], 0.0)
+				)
+				color = _traffic_color(pct)
+				width = lerpf(1.5, 5.0, sqrt(clampf(pct / 100.0, 0.0, 1.0)))
+			_add_edge_between(src_ctrl, tgt_ctrl, color, width)
 	_canvas.set_edges(_edges)
 	_resize_canvas_to_content(_graph_content_size(_node_ctrls))
 	if not _has_initial_center:
@@ -1018,9 +1038,47 @@ func _edge_endpoint_ctrl(id: String) -> Control:
 # Appends an orthogonal edge that leaves the source and enters the target on whichever faces point
 # toward each other (top / bottom / left / right) — so a sideways or upward connection lands on the
 # side or bottom of the node instead of always routing into its top.
-func _add_edge_between(src: Control, tgt: Control, color: Color) -> void:
+func _add_edge_between(src: Control, tgt: Control, color: Color, width: float = 2.0) -> void:
 	var route: Dictionary = _edge_route(src, tgt)
-	_edges.append({"points": route["points"], "arrow_dir": route["arrow_dir"], "color": color})
+	_edges.append(
+		{"points": route["points"], "arrow_dir": route["arrow_dir"], "color": color, "width": width}
+	)
+
+
+# ── Traffic heatmap (audit overlay) ──────────────────────────────────────────
+
+
+# Applies (or clears, with {}) the audit's Monte-Carlo traffic overlay:
+# {nodes: {id: pct}, edges: {"id:edge_idx": pct}}. Re-renders immediately.
+func set_traffic(traffic: Dictionary) -> void:
+	_traffic = traffic
+	_layout_graph()
+
+
+# Traffic share → color: a temperature ramp — light green (extremely rare)
+# through amber to red (extremely common). sqrt spreads the low end so 5% vs
+# 25% is still visibly different.
+func _traffic_color(pct: float) -> Color:
+	var t: float = sqrt(clampf(pct / 100.0, 0.0, 1.0))
+	var cold: Color = Color(0.6, 1.0, 0.6)  # light green — extremely rare
+	var mid: Color = Color(1.0, 0.75, 0.2)  # amber — moderate traffic
+	var hot: Color = Color(1.0, 0.2, 0.15)  # red — extremely common
+	if t < 0.5:
+		return cold.lerp(mid, t * 2.0)
+	return mid.lerp(hot, (t - 0.5) * 2.0)
+
+
+# A small "N%" chip floated above a node's top-right corner (editor heatmap only).
+func _attach_traffic_chip(ctrl: Control, pct: float) -> void:
+	var chip: Label = Label.new()
+	chip.text = ("%.1f%%" if pct > 0.0 and pct < 1.0 else "%.0f%%") % pct
+	chip.custom_minimum_size = Vector2(NODE_WIDTH, 0)
+	chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	chip.position = Vector2(0, -14)
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_theme_font_size_override("font_size", 10)
+	chip.add_theme_color_override("font_color", _traffic_color(pct))
+	ctrl.add_child(chip)
 
 
 # Builds an orthogonal 3-segment route between two node rects. The exit/entry faces are chosen by
