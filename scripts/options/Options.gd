@@ -145,6 +145,15 @@ var _filler_range_max_lbl: Label = null
 var _tab_bar: TabBar = null
 var _range_section: VBoxContainer = null
 var _filler_section: VBoxContainer = null
+
+# Device-routing section (built in code) — device cards + per-actuator source assignment.
+var _routing_section: VBoxContainer = null
+var _routing_cards_vbox: VBoxContainer = null
+var _stroker_summary_lbl: Label = null
+var _serial_delay_slider: HSlider = null
+var _serial_delay_lbl: Label = null
+var _intiface_delay_slider: HSlider = null
+var _intiface_delay_lbl: Label = null
 var _transcode_section: VBoxContainer = null
 var _credits_section: VBoxContainer = null
 
@@ -704,48 +713,6 @@ func _apply_layout() -> void:
 	_style_label(home_hint, UITheme.SEPARATOR, 11, false)
 	range_section.add_child(home_hint)
 
-	# ── Latency Offset row ───────────────────────────────────────────────────
-	var latency_row: HBoxContainer = HBoxContainer.new()
-	latency_row.add_theme_constant_override("separation", 16)
-	range_section.add_child(latency_row)
-
-	var latency_lbl: Label = Label.new()
-	latency_lbl.text = "Latency Offset"
-	latency_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
-	_style_label(latency_lbl, UITheme.WHITE_SOFT, 14, false)
-	latency_row.add_child(latency_lbl)
-
-	var latency_col: VBoxContainer = VBoxContainer.new()
-	latency_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	latency_col.add_theme_constant_override("separation", 4)
-	latency_row.add_child(latency_col)
-
-	_latency_slider = HSlider.new()
-	_latency_slider.min_value = -500
-	_latency_slider.max_value = 500
-	_latency_slider.step = 10
-	_latency_slider.value = 0
-	_latency_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_slider(_latency_slider)
-	latency_col.add_child(_latency_slider)
-
-	_latency_value_lbl = Label.new()
-	_latency_value_lbl.text = "0 ms"
-	_style_label(_latency_value_lbl, UITheme.PURPLE_MID, 11, true)
-	latency_col.add_child(_latency_value_lbl)
-
-	_latency_slider.value_changed.connect(
-		func(v: float) -> void:
-			_latency_value_lbl.text = "%d ms" % roundi(v)
-			_save_settings()
-	)
-
-	var latency_hint: Label = Label.new()
-	latency_hint.text = "Shifts the funscript relative to the video to compensate for device/Bluetooth lag. Positive = device acts earlier."
-	latency_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_style_label(latency_hint, UITheme.SEPARATOR, 11, false)
-	range_section.add_child(latency_hint)
-
 	# ── Vibration Intensity row ──────────────────────────────────────────────
 	var vibe_row: HBoxContainer = HBoxContainer.new()
 	vibe_row.add_theme_constant_override("separation", 16)
@@ -835,6 +802,8 @@ func _apply_layout() -> void:
 	filler_section.add_theme_constant_override("separation", 12)
 	_content_vbox.add_child(filler_section)
 	_filler_section = filler_section
+
+	_build_routing_section()
 
 	var filler_header: Label = Label.new()
 	filler_header.text = "STORYBOARD FILLER"
@@ -1047,9 +1016,9 @@ func _on_tab_changed(idx: int) -> void:
 		],
 		# CONNECTION
 		[
-			get_node(VBOX + "OutputSection"),
 			get_node(VBOX + "IntifaceSection"),
-			get_node(VBOX + "SerialSection")
+			get_node(VBOX + "SerialSection"),
+			_routing_section
 		],
 		# DEVICE
 		[_range_section, _filler_section],
@@ -1369,12 +1338,6 @@ func _load_settings() -> void:
 		_home_ease_input.text = str(home_ease)
 	FunscriptPlayer.SetHomePosition(home_pos, home_ease)
 
-	var latency: int = SettingsService.get_latency_offset_ms()
-	if _latency_slider != null:
-		_latency_slider.value = latency
-		_latency_value_lbl.text = "%d ms" % latency
-	FunscriptPlayer.SetLatencyOffset(latency)
-
 	var vibe: int = SettingsService.get_vibe_intensity()
 	if _vibe_slider != null:
 		_vibe_slider.value = vibe
@@ -1486,11 +1449,6 @@ func _save_settings() -> void:
 		SettingsService.set_home_position(home_position)
 		SettingsService.set_home_ease_ms(home_ease_ms)
 		FunscriptPlayer.SetHomePosition(home_position, home_ease_ms)
-
-	if _latency_slider != null:
-		var lat: int = roundi(_latency_slider.value)
-		SettingsService.set_latency_offset_ms(lat)
-		FunscriptPlayer.SetLatencyOffset(lat)
 
 	if _vibe_slider != null:
 		var vib: int = roundi(_vibe_slider.value)
@@ -2088,6 +2046,7 @@ func _on_bp_disconnected() -> void:
 	_device_dropdown.clear()
 	_device_dropdown.disabled = true
 	_set_connected_ui(false)
+	_refresh_routing_cards()
 
 
 func _on_bp_device_added(name: String, _index: int) -> void:
@@ -2096,6 +2055,7 @@ func _on_bp_device_added(name: String, _index: int) -> void:
 	_bp_test_btn.disabled = false
 	if name == SettingsService.get_selected_device():
 		_device_dropdown.selected = _device_dropdown.item_count - 1
+	_refresh_routing_cards()
 
 
 func _on_device_selected(index: int) -> void:
@@ -2121,6 +2081,7 @@ func _on_bp_device_removed(index: int) -> void:
 	var no_devices: bool = _device_dropdown.item_count == 0
 	_device_dropdown.disabled = no_devices
 	_bp_test_btn.disabled = no_devices
+	_refresh_routing_cards()
 
 
 func _on_bp_scan_finished() -> void:
@@ -2137,6 +2098,303 @@ func _on_bp_error(message: String) -> void:
 	_set_status("● ERROR: " + message.left(60).to_upper(), UITheme.ERROR)
 	_is_connected = false
 	_set_connected_ui(false)
+
+
+# ---------------------------------------------------------------------------
+# Device routing (multi-device): device cards + per-actuator source assignment.
+# ---------------------------------------------------------------------------
+
+func _build_routing_section() -> void:
+	# The routing UI supersedes the old output-mode dropdown + single device picker.
+	var vbox_path: String = "ContentPanel/ContentScroll/MarginWrapper/ContentVBox/"
+	(get_node(vbox_path + "OutputSection") as Control).visible = false
+	(get_node(vbox_path + "IntifaceSection/DeviceRow") as Control).visible = false
+	(get_node(vbox_path + "IntifaceSection/ConnectionRow/BpTestBtn") as Control).visible = false
+
+	var section: VBoxContainer = VBoxContainer.new()
+	section.add_theme_constant_override("separation", 10)
+	_content_vbox.add_child(section)
+	_routing_section = section
+
+	var header: Label = Label.new()
+	header.text = "DEVICE ROUTING"
+	_style_label(header, UITheme.PURPLE_BRIGHT, 13, true)
+	section.add_child(header)
+
+	var divider: HSeparator = HSeparator.new()
+	divider.add_theme_stylebox_override("separator", _make_separator_style())
+	section.add_child(divider)
+
+	_stroker_summary_lbl = Label.new()
+	_style_label(_stroker_summary_lbl, UITheme.CYAN, 12, false)
+	section.add_child(_stroker_summary_lbl)
+
+	var d_intiface: Dictionary = _add_delay_row(section, "Intiface delay")
+	_intiface_delay_slider = d_intiface["slider"]
+	_intiface_delay_lbl = d_intiface["value"]
+	var d_serial: Dictionary = _add_delay_row(section, "Serial delay")
+	_serial_delay_slider = d_serial["slider"]
+	_serial_delay_lbl = d_serial["value"]
+
+	_routing_cards_vbox = VBoxContainer.new()
+	_routing_cards_vbox.add_theme_constant_override("separation", 8)
+	section.add_child(_routing_cards_vbox)
+
+	var hint: Label = Label.new()
+	hint.text = "Scan for Buttplug devices, then map each actuator. Exactly one linear device (or serial) is the stroker; constrict runs automatically from stroke activity."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(hint, UITheme.SEPARATOR, 11, false)
+	section.add_child(hint)
+
+	# Seed sliders BEFORE connecting so setup doesn't fire the change handlers.
+	_intiface_delay_slider.value = SettingsService.get_intiface_delay_ms()
+	_intiface_delay_lbl.text = "%d ms" % SettingsService.get_intiface_delay_ms()
+	_serial_delay_slider.value = SettingsService.get_serial_delay_ms()
+	_serial_delay_lbl.text = "%d ms" % SettingsService.get_serial_delay_ms()
+	_intiface_delay_slider.value_changed.connect(_on_intiface_delay_changed)
+	_serial_delay_slider.value_changed.connect(_on_serial_delay_changed)
+	_refresh_routing_cards()
+
+
+func _add_delay_row(parent: VBoxContainer, label_text: String) -> Dictionary:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(lbl, UITheme.WHITE_SOFT, 14, false)
+	row.add_child(lbl)
+
+	var slider: HSlider = HSlider.new()
+	slider.min_value = -500
+	slider.max_value = 500
+	slider.step = 10
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_slider(slider)
+	row.add_child(slider)
+
+	var value_lbl: Label = Label.new()
+	value_lbl.text = "0 ms"
+	value_lbl.custom_minimum_size = Vector2(60, 0)
+	_style_label(value_lbl, UITheme.PURPLE_MID, 11, true)
+	row.add_child(value_lbl)
+
+	return {"slider": slider, "value": value_lbl}
+
+
+# Rebuilds the device cards from the live Buttplug catalog. Cheap — called on connect / scan / add / remove.
+func _refresh_routing_cards() -> void:
+	if _routing_cards_vbox == null:
+		return
+	for c in _routing_cards_vbox.get_children():
+		c.queue_free()
+
+	# Serial (T-code) — a single-device stroker option, always offered.
+	var serial_body: VBoxContainer = _make_routing_card("SERIAL (T-CODE)", UITheme.AMBER)
+	_add_stroker_row(serial_body, DeviceRouting.SERIAL_TARGET, "Linear (T-code stroke)")
+
+	var catalog: Array = ButtplugService.GetDeviceCatalog()
+	if catalog.is_empty():
+		var none_body: VBoxContainer = _make_routing_card("BUTTPLUG", UITheme.PURPLE_MID)
+		var lbl: Label = Label.new()
+		lbl.text = "No devices — connect Intiface and Scan."
+		_style_label(lbl, UITheme.SEPARATOR, 11, false)
+		none_body.add_child(lbl)
+	else:
+		for entry: Dictionary in catalog:
+			var dev_id: String = str(entry.get("id", ""))
+			var body: VBoxContainer = _make_routing_card(str(entry.get("name", dev_id)).to_upper(), UITheme.PURPLE_BRIGHT)
+			if bool(entry.get("linear", false)):
+				_add_stroker_row(body, DeviceRouting.make_actuator_id(dev_id, "linear", 0), "Linear")
+			for ch in int(entry.get("vibrate_channels", 0)):
+				_add_vibe_row(body, DeviceRouting.make_actuator_id(dev_id, "vibrate", ch), "Vibrate %d" % (ch + 1))
+			for ch in int(entry.get("constrict_channels", 0)):
+				_add_constrict_row(body, DeviceRouting.make_actuator_id(dev_id, "constrict", ch), "Constrict %d" % (ch + 1))
+			_add_device_test_row(body, int(entry.get("index", -1)), bool(entry.get("linear", false)))
+
+	_update_stroker_summary()
+
+
+# A titled, accent-bordered card added to the cards container; returns its body VBox for the caller to fill.
+func _make_routing_card(title: String, accent: Color) -> VBoxContainer:
+	var card: PanelContainer = PanelContainer.new()
+	var style: StyleBoxFlat = StyleBoxFlat.new()
+	style.bg_color = UITheme.PANEL_BG
+	style.border_color = Color(accent.r, accent.g, accent.b, 0.4)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(UITheme.CORNER_RADIUS)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
+	card.add_theme_stylebox_override("panel", style)
+	_routing_cards_vbox.add_child(card)
+
+	var body: VBoxContainer = VBoxContainer.new()
+	body.add_theme_constant_override("separation", 4)
+	card.add_child(body)
+
+	var title_lbl: Label = Label.new()
+	title_lbl.text = title
+	_style_label(title_lbl, accent, 12, true)
+	body.add_child(title_lbl)
+	return body
+
+
+func _add_stroker_row(body: VBoxContainer, target_id: String, label_text: String) -> void:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	body.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(lbl, UITheme.WHITE_SOFT, 12, false)
+	row.add_child(lbl)
+
+	var is_stroker: bool = SettingsService.get_stroke_target() == target_id
+	var btn: Button = Button.new()
+	btn.toggle_mode = true
+	btn.button_pressed = is_stroker
+	btn.text = "◉ STROKER" if is_stroker else "○ STROKER"
+	btn.focus_mode = Control.FOCUS_NONE
+	UITheme.style_button_subtle(btn, UITheme.CYAN)
+	btn.pressed.connect(func() -> void: _set_stroker(target_id))
+	row.add_child(btn)
+
+
+func _add_vibe_row(body: VBoxContainer, actuator_id: String, label_text: String) -> void:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	body.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(lbl, UITheme.WHITE_SOFT, 12, false)
+	row.add_child(lbl)
+
+	var dd: OptionButton = OptionButton.new()
+	dd.custom_minimum_size = Vector2(160, 0)
+	dd.focus_mode = Control.FOCUS_NONE
+	dd.add_item("Off")
+	dd.add_item("vibe1")
+	dd.add_item("vibe2")
+	dd.add_item("Follow stroke")
+	UITheme.style_option_button(dd)
+	var cur: String = str(SettingsService.get_vibration_routes().get(actuator_id, ""))
+	dd.selected = {"": 0, "vibe1": 1, "vibe2": 2, "stroke": 3}.get(cur, 0)
+	dd.item_selected.connect(func(idx: int) -> void: _on_vibe_source_selected(actuator_id, idx))
+	row.add_child(dd)
+
+
+func _add_constrict_row(body: VBoxContainer, actuator_id: String, label_text: String) -> void:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	body.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(lbl, UITheme.WHITE_SOFT, 12, false)
+	row.add_child(lbl)
+
+	var on: bool = bool(SettingsService.get_constrict_routes().get(actuator_id, false))
+	var btn: Button = Button.new()
+	btn.toggle_mode = true
+	btn.button_pressed = on
+	btn.text = "AUTO" if on else "OFF"
+	btn.focus_mode = Control.FOCUS_NONE
+	UITheme.style_button_subtle(btn, Color(0.45, 0.95, 0.30))
+	btn.pressed.connect(func() -> void: _on_constrict_toggled(actuator_id, btn.button_pressed))
+	row.add_child(btn)
+
+
+func _add_device_test_row(body: VBoxContainer, device_index: int, is_linear: bool) -> void:
+	var btn: Button = Button.new()
+	btn.text = "TEST"
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	UITheme.style_button_subtle(btn, UITheme.PURPLE_MID)
+	btn.pressed.connect(func() -> void: _test_bp_device(device_index, is_linear, btn))
+	body.add_child(btn)
+
+
+# Exercises one Buttplug device by its live index — a stroke sweep for linear devices, a vibe pulse
+# otherwise. Independent of the routing config, so it verifies the device is alive and correctly mapped.
+func _test_bp_device(device_index: int, is_linear: bool, btn: Button) -> void:
+	if not ButtplugService.BpConnected or device_index < 0:
+		return
+	btn.disabled = true
+	if is_linear:
+		ButtplugService.SendLinear(device_index, 600, 1.0)
+		await get_tree().create_timer(0.7).timeout
+		ButtplugService.SendLinear(device_index, 600, 0.0)
+		await get_tree().create_timer(0.7).timeout
+		ButtplugService.SendLinear(device_index, 400, 0.5)
+	else:
+		ButtplugService.SendVibrate(device_index, 1.0)
+		await get_tree().create_timer(0.7).timeout
+		ButtplugService.SendVibrate(device_index, 0.0)
+	if is_instance_valid(btn):
+		btn.disabled = false
+
+
+func _set_stroker(target_id: String) -> void:
+	# Radio behaviour across all backends; a second press on the current stroker clears it.
+	var cur: String = SettingsService.get_stroke_target()
+	SettingsService.set_stroke_target("" if cur == target_id else target_id)
+	SettingsService.save()
+	_refresh_routing_cards()
+
+
+func _on_vibe_source_selected(actuator_id: String, idx: int) -> void:
+	var routes: Dictionary = SettingsService.get_vibration_routes()
+	var source: String = ["", "vibe1", "vibe2", "stroke"][idx]
+	if source == "":
+		routes.erase(actuator_id)
+	else:
+		routes[actuator_id] = source
+	SettingsService.set_vibration_routes(routes)
+	SettingsService.save()
+
+
+func _on_constrict_toggled(actuator_id: String, on: bool) -> void:
+	var routes: Dictionary = SettingsService.get_constrict_routes()
+	if on:
+		routes[actuator_id] = true
+	else:
+		routes.erase(actuator_id)
+	SettingsService.set_constrict_routes(routes)
+	SettingsService.save()
+
+
+func _on_intiface_delay_changed(v: float) -> void:
+	_intiface_delay_lbl.text = "%d ms" % roundi(v)
+	SettingsService.set_intiface_delay_ms(roundi(v))
+	SettingsService.save()
+	FunscriptPlayer.SetIntifaceDelay(roundi(v))
+
+
+func _on_serial_delay_changed(v: float) -> void:
+	_serial_delay_lbl.text = "%d ms" % roundi(v)
+	SettingsService.set_serial_delay_ms(roundi(v))
+	SettingsService.save()
+	FunscriptPlayer.SetSerialDelay(roundi(v))
+
+
+func _update_stroker_summary() -> void:
+	if _stroker_summary_lbl == null:
+		return
+	var target: String = SettingsService.get_stroke_target()
+	if target == DeviceRouting.SERIAL_TARGET:
+		_stroker_summary_lbl.text = "Stroker: Serial (T-code)"
+	elif target != "":
+		_stroker_summary_lbl.text = "Stroker: %s" % str(DeviceRouting.parse_actuator_id(target).get("device", target))
+	else:
+		_stroker_summary_lbl.text = "Stroker: (none set)"
 
 
 # ---------------------------------------------------------------------------

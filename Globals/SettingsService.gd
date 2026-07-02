@@ -46,6 +46,20 @@ const DEFAULT_MAX_STROKE_SPEED: int = 0  # 0 = unlimited (units/sec)
 const DEFAULT_STROKE_TARGET: String = ""
 const DEFAULT_VIBRATION_ROUTES: Dictionary = {}  # { actuator_id: "vibe1"|"vibe2"|"stroke" }
 const DEFAULT_CONSTRICT_ROUTES: Dictionary = {}  # { actuator_id: true }
+
+# Constrict auto state machine (activity-driven squeeze). WHICH actuators = constrict_routes above;
+# these globals tune the level transitions. Activity is the stroke speed in funscript units/sec.
+const DEFAULT_CONSTRICT_MAX_LEVEL: int = 1  # 1 or 2
+const DEFAULT_CONSTRICT_L1_THRESHOLD: float = 45.0  # activity to engage level 1
+const DEFAULT_CONSTRICT_L1_SUSTAIN_MS: int = 5000  # held above L1 this long → engage
+const DEFAULT_CONSTRICT_RELEASE_THRESHOLD: float = 25.0  # activity below which it releases
+const DEFAULT_CONSTRICT_RELEASE_SUSTAIN_MS: int = 10000  # held below this long → release
+const DEFAULT_CONSTRICT_MIN_HOLD_MS: int = 12000  # minimum time engaged before a release is allowed
+const DEFAULT_CONSTRICT_L2_ENABLED: bool = false
+const DEFAULT_CONSTRICT_L2_THRESHOLD: float = 90.0
+const DEFAULT_CONSTRICT_L2_SUSTAIN_MS: int = 8000
+const DEFAULT_CONSTRICT_L2_FINAL_PCT: float = 12.0  # level 2 only within the final % of the script
+const DEFAULT_CONSTRICT_HOLD_ON_PAUSE: bool = true
 const DEFAULT_HUD_HIDE_DELAY: float = 3.0  # seconds
 const DEFAULT_UI_SCALE: float = 1.0  # Window.content_scale_factor multiplier
 const DEFAULT_BEAT_BAR_ENABLED: bool = false
@@ -187,6 +201,51 @@ func get_serial_delay_ms() -> int:
 
 func get_intiface_delay_ms() -> int:
 	return int(_config.get_value("device", "intiface_delay_ms", get_latency_offset_ms()))
+
+
+# ── Constrict auto state machine (tuning; read by FunscriptPlayer) ──
+func get_constrict_max_level() -> int:
+	return int(_config.get_value("constrict", "max_level", DEFAULT_CONSTRICT_MAX_LEVEL))
+
+
+func get_constrict_level1_threshold() -> float:
+	return float(_config.get_value("constrict", "level1_threshold", DEFAULT_CONSTRICT_L1_THRESHOLD))
+
+
+func get_constrict_level1_sustain_ms() -> int:
+	return int(_config.get_value("constrict", "level1_sustain_ms", DEFAULT_CONSTRICT_L1_SUSTAIN_MS))
+
+
+func get_constrict_release_threshold() -> float:
+	return float(_config.get_value("constrict", "release_threshold", DEFAULT_CONSTRICT_RELEASE_THRESHOLD))
+
+
+func get_constrict_release_sustain_ms() -> int:
+	return int(_config.get_value("constrict", "release_sustain_ms", DEFAULT_CONSTRICT_RELEASE_SUSTAIN_MS))
+
+
+func get_constrict_min_hold_ms() -> int:
+	return int(_config.get_value("constrict", "min_hold_ms", DEFAULT_CONSTRICT_MIN_HOLD_MS))
+
+
+func get_constrict_level2_enabled() -> bool:
+	return bool(_config.get_value("constrict", "level2_enabled", DEFAULT_CONSTRICT_L2_ENABLED))
+
+
+func get_constrict_level2_threshold() -> float:
+	return float(_config.get_value("constrict", "level2_threshold", DEFAULT_CONSTRICT_L2_THRESHOLD))
+
+
+func get_constrict_level2_sustain_ms() -> int:
+	return int(_config.get_value("constrict", "level2_sustain_ms", DEFAULT_CONSTRICT_L2_SUSTAIN_MS))
+
+
+func get_constrict_level2_final_percent() -> float:
+	return float(_config.get_value("constrict", "level2_final_percent", DEFAULT_CONSTRICT_L2_FINAL_PCT))
+
+
+func get_constrict_hold_on_pause() -> bool:
+	return bool(_config.get_value("constrict", "hold_on_pause", DEFAULT_CONSTRICT_HOLD_ON_PAUSE))
 
 
 func get_hud_hide_delay() -> float:

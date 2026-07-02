@@ -66,6 +66,11 @@ const STROKE_RANGE_STEP: int = 5
 # auto-hiding HUD so it stays visible even when the rest of the HUD fades.
 var _device_warning_banner: PanelContainer = null
 var _device_warning_label: Label = null
+var _device_ever_seen: bool = false   # a device was present at some point this run (Slice 6 warning gate)
+
+const DELAY_STEP: int = 10            # [ ] ; ' nudge the per-backend delays by this many ms
+var _delay_toast: Label = null        # transient "delay X ms" feedback for the delay hotkeys
+var _delay_toast_tween: Tween = null
 @onready var _end_timer: Timer = $EndTimer
 @onready var _transition: ColorRect = $TransitionLayer/TransitionOverlay
 
@@ -2114,6 +2119,23 @@ func _input(event: InputEvent) -> void:
 					if is_instance_valid(_session_panel):
 						_session_panel.nudge_range(-STROKE_RANGE_STEP, 0)
 						get_viewport().set_input_as_handled()
+				# Live delay nudges (±10 ms) during play: [ / ] = serial, ; / ' = intiface.
+				KEY_BRACKETLEFT:
+					if not _is_overlay_open:
+						_nudge_serial_delay(-DELAY_STEP)
+						get_viewport().set_input_as_handled()
+				KEY_BRACKETRIGHT:
+					if not _is_overlay_open:
+						_nudge_serial_delay(DELAY_STEP)
+						get_viewport().set_input_as_handled()
+				KEY_SEMICOLON:
+					if not _is_overlay_open:
+						_nudge_intiface_delay(-DELAY_STEP)
+						get_viewport().set_input_as_handled()
+				KEY_APOSTROPHE:
+					if not _is_overlay_open:
+						_nudge_intiface_delay(DELAY_STEP)
+						get_viewport().set_input_as_handled()
 
 
 # ---------------------------------------------------------------------------
@@ -2259,37 +2281,62 @@ func _connect_signals() -> void:
 func _refresh_device_warning() -> void:
 	if _device_warning_banner == null:
 		return
-	var mode: String = SettingsService.get_output_mode()
-	var disconnected: bool = false
-	var label_text: String = ""
-	if mode == "serial":
-		disconnected = not SerialDeviceService.SerialConnected
-		label_text = "●  SERIAL DEVICE DISCONNECTED  —  RECONNECT IN OPTIONS"
+	# A device is "present" if serial is connected or Intiface has a live device. Multi-device makes
+	# "which device" fuzzy, so this is a general presence check across both backends.
+	var serial_up: bool = SerialDeviceService.SerialConnected
+	var bp_up: bool = ButtplugService.BpConnected and ButtplugService.GetActiveDeviceName() != ""
+	if serial_up or bp_up:
+		_device_ever_seen = true
+		_device_warning_banner.visible = false
+		return
+	# Nothing connected right now. Only warn if a device WAS present this run — so a funscript-only
+	# session with no toy never nags — and the banner clears itself the moment a device returns.
+	if _device_ever_seen:
+		_device_warning_label.text = "●  DEVICE DISCONNECTED  —  RECONNECT IN OPTIONS"
+		_device_warning_banner.visible = true
 	else:
-		if not ButtplugService.BpConnected:
-			disconnected = true
-			label_text = "●  INTIFACE DISCONNECTED  —  RECONNECT IN OPTIONS"
-		else:
-			var selected_name: String = SettingsService.get_selected_device()
-			var active_name: String = ButtplugService.GetActiveDeviceName()
-			if active_name == "":
-				disconnected = true
-				label_text = "●  NO DEVICE CONNECTED  —  POWER ON OR RE-PAIR YOUR DEVICE"
-			elif selected_name != "" and selected_name != active_name:
-				# User has an explicit preference that isn't currently present.
-				# Playback still works via the fallback to active_name; the
-				# banner just tells the user it's not the device they picked.
-				disconnected = true
-				label_text = (
-					'●  "%s" UNAVAILABLE  —  USING "%s" INSTEAD  (CHANGE IN OPTIONS)'
-					% [
-						selected_name.to_upper(),
-						active_name.to_upper(),
-					]
-				)
-	if disconnected:
-		_device_warning_label.text = label_text
-	_device_warning_banner.visible = disconnected
+		_device_warning_banner.visible = false
+
+
+func _nudge_serial_delay(delta: int) -> void:
+	var v: int = clampi(SettingsService.get_serial_delay_ms() + delta, -500, 500)
+	SettingsService.set_serial_delay_ms(v)
+	SettingsService.save()
+	FunscriptPlayer.SetSerialDelay(v)
+	_show_delay_toast("Serial delay  %d ms" % v)
+	if is_instance_valid(_session_panel):
+		_session_panel.resync()
+
+
+func _nudge_intiface_delay(delta: int) -> void:
+	var v: int = clampi(SettingsService.get_intiface_delay_ms() + delta, -500, 500)
+	SettingsService.set_intiface_delay_ms(v)
+	SettingsService.save()
+	FunscriptPlayer.SetIntifaceDelay(v)
+	_show_delay_toast("Intiface delay  %d ms" % v)
+	if is_instance_valid(_session_panel):
+		_session_panel.resync()
+
+
+# Brief, reusable on-screen readout for the delay hotkeys (no label spam on rapid presses).
+func _show_delay_toast(text: String) -> void:
+	if not is_instance_valid(_delay_toast):
+		_delay_toast = Label.new()
+		_delay_toast.add_theme_font_size_override("font_size", 20)
+		_delay_toast.add_theme_color_override("font_color", UITheme.CYAN)
+		_delay_toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_delay_toast.anchor_left = 0.0
+		_delay_toast.anchor_right = 1.0
+		_delay_toast.anchor_top = 0.12
+		_delay_toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(_delay_toast)
+	_delay_toast.text = text
+	_delay_toast.modulate.a = 1.0
+	if _delay_toast_tween != null and _delay_toast_tween.is_valid():
+		_delay_toast_tween.kill()
+	_delay_toast_tween = create_tween()
+	_delay_toast_tween.tween_interval(0.8)
+	_delay_toast_tween.tween_property(_delay_toast, "modulate:a", 0.0, 0.4)
 
 
 # ---------------------------------------------------------------------------

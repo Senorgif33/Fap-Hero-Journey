@@ -24,6 +24,90 @@ public partial class FunscriptPlayer : Node
         public int Index = 0;
     }
 
+    // Activity-driven constrict (pneumatic squeeze) state machine. Pure logic — fed stroke activity
+    // (funscript units/sec) + script progress, outputs a discrete level (0/1/2) with sustain + min-hold
+    // hysteresis so it engages/releases smoothly instead of chattering. Config seeded in ResolveOutput.
+    private sealed class ConstrictController
+    {
+        public int MaxLevel = 1;
+        public double L1Threshold = 45.0, L1SustainMs = 5000.0;
+        public double ReleaseThreshold = 25.0, ReleaseSustainMs = 10000.0;
+        public double MinHoldMs = 12000.0;
+        public bool L2Enabled = false;
+        public double L2Threshold = 90.0, L2SustainMs = 8000.0, L2FinalPct = 12.0;
+        public bool HoldOnPause = true;
+
+        public int Level { get; private set; }
+        private double _aboveL1Ms, _belowReleaseMs, _aboveL2Ms, _heldMs;
+
+        public void Reset()
+        {
+            Level = 0;
+            _aboveL1Ms = _belowReleaseMs = _aboveL2Ms = _heldMs = 0.0;
+        }
+
+        // Advance by dtMs with the current stroke activity (units/sec) and script progress (0–100).
+        public void Update(double dtMs, double activity, double progressPct, bool playing)
+        {
+            if (!playing)
+            {
+                if (!HoldOnPause)
+                    Reset();
+                return; // held (frozen) while paused when HoldOnPause
+            }
+
+            if (Level == 0)
+            {
+                if (activity >= L1Threshold)
+                {
+                    _aboveL1Ms += dtMs;
+                    if (_aboveL1Ms >= L1SustainMs)
+                    {
+                        Level = 1;
+                        _heldMs = 0.0;
+                        _belowReleaseMs = 0.0;
+                        _aboveL2Ms = 0.0;
+                    }
+                }
+                else
+                {
+                    _aboveL1Ms = 0.0;
+                }
+                return;
+            }
+
+            // Engaged (level >= 1).
+            _heldMs += dtMs;
+
+            // Level-2 promotion — enabled, allowed, and only in the final stretch of the script.
+            if (Level == 1 && L2Enabled && MaxLevel >= 2)
+            {
+                if (activity >= L2Threshold && progressPct >= (100.0 - L2FinalPct))
+                {
+                    _aboveL2Ms += dtMs;
+                    if (_aboveL2Ms >= L2SustainMs)
+                        Level = 2;
+                }
+                else
+                {
+                    _aboveL2Ms = 0.0;
+                }
+            }
+
+            // Release — sustained low activity AND the minimum hold has elapsed.
+            if (activity < ReleaseThreshold)
+            {
+                _belowReleaseMs += dtMs;
+                if (_belowReleaseMs >= ReleaseSustainMs && _heldMs >= MinHoldMs)
+                    Reset();
+            }
+            else
+            {
+                _belowReleaseMs = 0.0;
+            }
+        }
+    }
+
     // Maps T-code axis name → its loaded script state.
     // Explicitly System.Collections.Generic — AxisState is a C# class, not a Godot Variant.
     private readonly System.Collections.Generic.Dictionary<string, AxisState> _axes =
@@ -47,11 +131,20 @@ public partial class FunscriptPlayer : Node
     private double _positionMs = 0.0;
     private int _actionIndex = 0;
     // Resolved routing plan (rebuilt by BuildRoutingPlan): the stroke has one target; vibe actuators
-    // fan out per their source (vibe1 / vibe2 / stroke). Constrict lands in Slice 3c.
+    // fan out per their source (vibe1 / vibe2 / stroke); constrict actuators run the auto state machine.
     private StrokeBackend _strokeBackend = StrokeBackend.None;
     private int _strokeDeviceIndex = -1;   // Buttplug linear device index when _strokeBackend == Buttplug
     private readonly List<(int Index, int Channel, string Source)> _vibeRoutes = new List<(int Index, int Channel, string Source)>();
+    private readonly List<(int Index, int Channel)> _constrictRoutes = new List<(int Index, int Channel)>();
     private bool _syncedThisFrame = false;
+
+    // Constrict auto state machine — driven by smoothed stroke activity (units/sec), updated on a throttle.
+    private readonly ConstrictController _constrict = new ConstrictController();
+    private double _strokeActivity = 0.0;
+    private double _constrictTickMs = 0.0;
+    private int _lastConstrictLevel = -1;
+    private const double ConstrictTickIntervalMs = 200.0;
+    private const double ActivityDecayHalfLifeMs = 2000.0;
     private bool _outputResolved = false;
     private int _rangeMin = 0;
     private int _rangeMax = 100;
@@ -96,7 +189,7 @@ public partial class FunscriptPlayer : Node
 
     /// Current playback clock in milliseconds — used by the beat-bar HUD so it
     /// stays in sync with the device whether video-driven or free-running.
-    public double PositionMs => _positionMs;
+    public double PositionMs => _positionMs + StrokeDelay();
 
     // Cached autoload references — resolved once instead of looked up per-call
     // (some were hit every frame, per axis, inside _Process). FunscriptPlayer is
@@ -231,9 +324,11 @@ public partial class FunscriptPlayer : Node
         _homeEaseMs = (uint)Math.Max(50, easeMs);
     }
 
-    // Device latency compensation — shifts the funscript clock relative to the
-    // video to offset device/Bluetooth lag. Positive = device acts earlier.
-    private int _latencyOffsetMs = 0;
+    // Per-backend latency compensation — shifts each output stream's sample time relative to the
+    // playback clock to offset device / Bluetooth / serial lag. Positive = that backend acts earlier.
+    // Applied per stream in _Process (stroke uses its backend's delay; vibe = intiface; axes = serial).
+    private int _serialDelayMs = 0;
+    private int _intifaceDelayMs = 0;
 
     // Vibrator output scale (0–1). Applied to every vibration command so the
     // user can dial overall strength down. No effect on linear devices.
@@ -243,8 +338,25 @@ public partial class FunscriptPlayer : Node
     // 0 = unlimited. Moves faster than the cap are slowed by stretching duration.
     private int _maxStrokeSpeed = 0;
 
-    /// Live-update the device latency offset from Options.
-    public void SetLatencyOffset(int offsetMs) => _latencyOffsetMs = offsetMs;
+    /// Live-update both per-backend delays together (the legacy single Options slider). Slice 4's UI
+    /// and the in-play hotkeys use the per-backend setters below.
+    public void SetLatencyOffset(int offsetMs)
+    {
+        _serialDelayMs = offsetMs;
+        _intifaceDelayMs = offsetMs;
+    }
+
+    /// Live-update the serial (T-code) output delay, in milliseconds.
+    public void SetSerialDelay(int ms) => _serialDelayMs = ms;
+
+    /// Live-update the Intiface (Buttplug) output delay, in milliseconds.
+    public void SetIntifaceDelay(int ms) => _intifaceDelayMs = ms;
+
+    // Delay for whichever backend currently drives the stroke (serial or Buttplug), 0 if none. Also
+    // offsets PositionMs so the beat-bar HUD stays aligned with the stroker.
+    private double StrokeDelay() =>
+        _strokeBackend == StrokeBackend.Serial ? _serialDelayMs
+        : (_strokeBackend == StrokeBackend.Buttplug ? _intifaceDelayMs : 0.0);
 
     /// Live-update the vibrator intensity scale from Options (percent 0–100).
     public void SetVibeIntensity(int percent) => _vibeIntensity = Math.Clamp(percent, 0, 100) / 100f;
@@ -410,9 +522,22 @@ public partial class FunscriptPlayer : Node
         foreach (var kv in _vibScripts)
             kv.Value.Index = 0;
 
+        // Release constrict actuators before dropping the routes, then reset the state machine.
+        var bpc = _buttplug;
+        if (bpc != null && bpc.BpConnected)
+        {
+            foreach (var route in _constrictRoutes)
+                bpc.SendConstrictLevel(route.Index, route.Channel, 0);
+        }
+            
+        _constrict.Reset();
+        _lastConstrictLevel = -1;
+        _strokeActivity = 0.0;
+
         _strokeBackend = StrokeBackend.None;
         _strokeDeviceIndex = -1;
         _vibeRoutes.Clear();
+        _constrictRoutes.Clear();
         _outputResolved = false;
     }
 
@@ -521,7 +646,8 @@ public partial class FunscriptPlayer : Node
     // Only updates _positionMs — _Process is responsible for dispatching due actions.
     public void SyncTo(double videoPositionSec)
     {
-        _positionMs = videoPositionSec * 1000.0 + _latencyOffsetMs;
+        // Raw playback clock — per-backend delay is applied per stream in _Process, not baked in here.
+        _positionMs = videoPositionSec * 1000.0;
         _syncedThisFrame = true;
     }
 
@@ -538,9 +664,10 @@ public partial class FunscriptPlayer : Node
             else
                 _positionMs += delta * 1000.0;
 
+            double strokeDelay = StrokeDelay();
             while (_actionIndex < _actions.Count)
             {
-                if (_actions[_actionIndex].AtMs > _positionMs)
+                if (_actions[_actionIndex].AtMs > _positionMs + strokeDelay)
                     break;
 
                 SendCommand(_actionIndex);
@@ -570,7 +697,7 @@ public partial class FunscriptPlayer : Node
                         AxisState state = multiaxis.Value;
                         while (state.Index < state.Actions.Count)
                         {
-                            if (state.Actions[state.Index].AtMs > _positionMs)
+                            if (state.Actions[state.Index].AtMs > _positionMs + _serialDelayMs)
                                 break;
 
                             int idx = state.Index;
@@ -608,7 +735,7 @@ public partial class FunscriptPlayer : Node
                     var vstate = vibEntry.Value;
                     while (vstate.Index < vstate.Actions.Count)
                     {
-                        if (vstate.Actions[vstate.Index].AtMs > _positionMs)
+                        if (vstate.Actions[vstate.Index].AtMs > _positionMs + _intifaceDelayMs)
                             break;
 
                         double intensity = vstate.Actions[vstate.Index].Pos / 100.0 * _vibeIntensity;
@@ -638,6 +765,32 @@ public partial class FunscriptPlayer : Node
                 {
                     _fillerVibTickMs = 0.0;
                     _SendFillerVibrateTick();
+                }
+            }
+        }
+
+        // Constrict auto state machine — throttled; runs even while paused so it can hold/release.
+        if (_constrictRoutes.Count > 0)
+        {
+            _constrictTickMs += delta * 1000.0;
+            if (_constrictTickMs >= ConstrictTickIntervalMs)
+            {
+                double dt = _constrictTickMs;
+                _constrictTickMs = 0.0;
+
+                // Decay activity so gaps between keyframes wind it down toward release.
+                _strokeActivity *= Math.Pow(0.5, dt / ActivityDecayHalfLifeMs);
+                double lastMs = _actions.Count > 0 ? _actions[_actions.Count - 1].AtMs : 0.0;
+                double progressPct = lastMs > 0.0 ? Math.Clamp(_positionMs / lastMs * 100.0, 0.0, 100.0) : 0.0;
+                _constrict.Update(dt, _strokeActivity, progressPct, _playing);
+
+                if (_constrict.Level != _lastConstrictLevel)
+                {
+                    _lastConstrictLevel = _constrict.Level;
+                    var bpc = _buttplug;
+                    if (bpc != null && bpc.BpConnected)
+                        foreach (var route in _constrictRoutes)
+                            bpc.SendConstrictLevel(route.Index, route.Channel, _constrict.Level);
                 }
             }
         }
@@ -705,12 +858,26 @@ public partial class FunscriptPlayer : Node
         _homePosition = Math.Clamp(_settings.Call("get_home_position").AsInt32(), 0, 100);
         _homeEaseMs = (uint)Math.Max(50, _settings.Call("get_home_ease_ms").AsInt32());
 
-        // Cache device latency offset and vibrator intensity scale. Both can be
-        // overridden live by Options via their setters, but seed from disk here.
-        // (Per-backend serial/intiface delays arrive in Slice 3b.)
-        _latencyOffsetMs = _settings.Call("get_latency_offset_ms").AsInt32();
+        // Cache per-backend output delays + vibrator intensity scale. All can be overridden live via
+        // their setters, but seed from disk here. The delay getters default to the legacy
+        // latency_offset_ms, so existing setups carry their tuned value forward.
+        _serialDelayMs = _settings.Call("get_serial_delay_ms").AsInt32();
+        _intifaceDelayMs = _settings.Call("get_intiface_delay_ms").AsInt32();
         _vibeIntensity = Math.Clamp(_settings.Call("get_vibe_intensity").AsInt32(), 0, 100) / 100f;
         _maxStrokeSpeed = Math.Max(0, _settings.Call("get_max_stroke_speed").AsInt32());
+
+        // Seed the constrict state machine's tuning from settings.
+        _constrict.MaxLevel = _settings.Call("get_constrict_max_level").AsInt32();
+        _constrict.L1Threshold = _settings.Call("get_constrict_level1_threshold").AsDouble();
+        _constrict.L1SustainMs = _settings.Call("get_constrict_level1_sustain_ms").AsInt32();
+        _constrict.ReleaseThreshold = _settings.Call("get_constrict_release_threshold").AsDouble();
+        _constrict.ReleaseSustainMs = _settings.Call("get_constrict_release_sustain_ms").AsInt32();
+        _constrict.MinHoldMs = _settings.Call("get_constrict_min_hold_ms").AsInt32();
+        _constrict.L2Enabled = _settings.Call("get_constrict_level2_enabled").AsBool();
+        _constrict.L2Threshold = _settings.Call("get_constrict_level2_threshold").AsDouble();
+        _constrict.L2SustainMs = _settings.Call("get_constrict_level2_sustain_ms").AsInt32();
+        _constrict.L2FinalPct = _settings.Call("get_constrict_level2_final_percent").AsDouble();
+        _constrict.HoldOnPause = _settings.Call("get_constrict_hold_on_pause").AsBool();
 
         BuildRoutingPlan();
         _outputResolved = true;
@@ -725,6 +892,7 @@ public partial class FunscriptPlayer : Node
         _strokeBackend = StrokeBackend.None;
         _strokeDeviceIndex = -1;
         _vibeRoutes.Clear();
+        _constrictRoutes.Clear();
 
         string strokeTarget = _settings.Call("get_stroke_target").AsString();
         var vibRoutes = _settings.Call("get_vibration_routes").AsGodotDictionary();
@@ -766,6 +934,14 @@ public partial class FunscriptPlayer : Node
             int idx = _buttplug != null ? _buttplug.GetDeviceIndexById(route["device"].AsString()) : -1;
             if (idx >= 0)
                 _vibeRoutes.Add((idx, route["channel"].AsInt32(), route["source"].AsString()));
+        }
+
+        foreach (var c in plan["constrict"].AsGodotArray())
+        {
+            var route = c.AsGodotDictionary();
+            int idx = _buttplug != null ? _buttplug.GetDeviceIndexById(route["device"].AsString()) : -1;
+            if (idx >= 0)
+                _constrictRoutes.Add((idx, route["channel"].AsInt32()));
         }
     }
 
@@ -832,6 +1008,14 @@ public partial class FunscriptPlayer : Node
         // range to taste never costs points (range is comfort, not difficulty). Shop/curse effects are
         // already applied above and still count toward the score.
         int scoreAmplitude = Math.Abs(nextPos - currentPos);
+
+        // Track smoothed stroke activity (raw script units/sec) for the constrict state machine.
+        if (index + 1 < _actions.Count)
+        {
+            double segMs = _actions[index + 1].AtMs - _actions[index].AtMs;
+            double speed = segMs > 0.0 ? Math.Abs(_actions[index + 1].Pos - _actions[index].Pos) / (segMs / 1000.0) : 0.0;
+            _strokeActivity += (speed - _strokeActivity) * 0.5;
+        }
 
         // Apply the user-configured device range as a RESCALE (lerp 0–100 → [min,max]),
         // not a hard clamp: strokes keep their shape/rhythm at reduced amplitude rather
