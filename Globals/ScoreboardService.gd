@@ -75,9 +75,11 @@ func read_runs(journey_folder_name: String) -> Array:
 # Records one run for the journey. The caller supplies score / completed /
 # rounds_done / rounds_total; this stamps the date, ranks by score, and caps the
 # list to MAX_RUNS. Empty folder name is a no-op (e.g. a malformed journey).
-func add_run(journey_folder_name: String, entry: Dictionary) -> void:
+# Returns the run's 1-based rank on the board (1 = new best), or 0 when the run
+# didn't make the top MAX_RUNS — the end screen's high-score flash reads this.
+func add_run(journey_folder_name: String, entry: Dictionary) -> int:
 	if journey_folder_name.is_empty():
-		return
+		return 0
 	var dir_abs: String = ProjectSettings.globalize_path(SCOREBOARD_DIR)
 	if not DirAccess.dir_exists_absolute(dir_abs):
 		DirAccess.make_dir_recursive_absolute(dir_abs)
@@ -90,8 +92,16 @@ func add_run(journey_folder_name: String, entry: Dictionary) -> void:
 		func(a: Dictionary, b: Dictionary) -> bool:
 			return int(a.get("score", 0)) > int(b.get("score", 0))
 	)
+	# Rank by identity (is_same), before the cap trims the tail.
+	var rank: int = 0
+	for i: int in runs.size():
+		if is_same(runs[i], record):
+			rank = i + 1
+			break
 	if runs.size() > MAX_RUNS:
 		runs = runs.slice(0, MAX_RUNS)
+	if rank > MAX_RUNS:
+		rank = 0
 
 	var out: Dictionary = {
 		"version": SCHEMA_VERSION,
@@ -102,9 +112,10 @@ func add_run(journey_folder_name: String, entry: Dictionary) -> void:
 	var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
 	if f == null:
 		printerr("ScoreboardService: cannot open %s for write" % path)
-		return
+		return 0
 	f.store_string(JSON.stringify(out, "\t"))
 	f.close()
+	return rank
 
 
 # Wipes the journey's run history. Idempotent. Called when the player clears it

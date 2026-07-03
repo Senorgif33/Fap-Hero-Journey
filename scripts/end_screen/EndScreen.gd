@@ -10,6 +10,9 @@ extends Control
 const PANEL_HALF_W: int = 440
 const BORDER_WIDTH: int = 3
 const LOG_INDENT_PX: int = 14  # pixels of left indent per fork-nesting depth
+const ROUTE_PANE_HEIGHT: int = 220
+
+const GraphViewScene: PackedScene = preload("res://scenes/graph_view/GraphView.tscn")
 
 @onready var _bg: ColorRect = $Background
 @onready var _panel: PanelContainer = $Panel
@@ -31,6 +34,13 @@ const LOG_INDENT_PX: int = 14  # pixels of left indent per fork-nesting depth
 var _hero_box: VBoxContainer = null
 var _hero_score: Label = null
 var _confetti: CPUParticles2D = null
+
+# Route recap (the run's path on the journey map) + high-score flash.
+var _split: HBoxContainer = null  # two-column layout: details left, route right
+var _route_box: VBoxContainer = null
+var _route_view: Control = null  # GraphView in map_mode
+var _hs_label: Label = null
+var _run_rank: int = 0  # 1-based scoreboard rank of this run (0 = off-board)
 
 # Reveal targets — the final values the count-up animations climb to.
 var _score_target: int = 0
@@ -77,7 +87,45 @@ func _populate() -> void:
 	_stat_rounds.text = "0 ROUNDS"
 	_stat_actions.text = "0 ACTIONS"
 	_stat_time.text = "0:00"
+
+	# Scoreboard rank of this run, stashed by GameLoop._record_run. Read once.
+	_run_rank = int(GameState.get_meta("_run_rank", 0))
+	if GameState.has_meta("_run_rank"):
+		GameState.remove_meta("_run_rank")
+	if _run_rank == 1:
+		_hs_label.text = "★  NEW HIGH SCORE  ★"
+	elif _run_rank > 1:
+		_hs_label.text = "★  HIGH SCORE #%d" % _run_rank
+
+	_populate_route()
 	_populate_score()
+
+
+# Renders the journey graph with this run's path glowing (roads not taken
+# ghosted) and the ending marked. FULL reveal by design — the run is over, so
+# map-disabled / fogged journeys show their whole structure here and nowhere
+# else. Hides the section for empty trails (defensive) or single-node journeys.
+func _populate_route() -> void:
+	var trail: Array = GameState.get_meta("_route_trail", [])
+	var nodes: Dictionary = GameState.Journey.get("nodes", {}) as Dictionary
+	if trail.is_empty() or nodes.size() < 2:
+		_route_box.visible = false
+		return
+	# Same graph prep as GameLoop's map viewer: copy the nodes, seed positions
+	# for legacy (migrated) journeys that lack them.
+	var map_graph: Dictionary = {
+		"start": str(GameState.Journey.get("start", "")),
+		"nodes": nodes.duplicate(true),
+	}
+	for nid: String in map_graph["nodes"]:
+		if not (map_graph["nodes"][nid] as Dictionary).has("pos"):
+			GraphLayout.seed_positions(map_graph)
+			break
+	_route_view.set_graph(map_graph)
+	_route_view.set_route(trail)
+	_route_view.set_marker_at(str(trail[-1]))
+	# Frame the whole structure once the pane has its size.
+	_route_view.call_deferred("fit_to_view")
 
 
 # Wraps `row` in a MarginContainer with `depth * LOG_INDENT_PX` of left padding.
@@ -218,6 +266,7 @@ func _play_reveal() -> void:
 		_hero_box,
 		_divider,
 		_stats_row,
+		_route_box,
 		_score_divider,
 		_score_title,
 		_back_btn,
@@ -273,6 +322,27 @@ func _play_reveal() -> void:
 		Tween.TRANS_BACK
 	)
 
+	# 3b. High-score flash — pops in under the hero score when the run ranked,
+	# with a second confetti burst for a new best.
+	if _run_rank > 0:
+		_hs_label.modulate.a = 0.0
+		_hs_label.visible = true
+		await get_tree().process_frame  # let it get a size for the pivot
+		_hs_label.pivot_offset = _hs_label.size / 2.0
+		_hs_label.scale = Vector2(0.6, 0.6)
+		if _run_rank == 1:
+			_confetti.restart()
+		UISound.game_complete()
+		var t_hs: Tween = create_tween().set_parallel()
+		t_hs.tween_property(_hs_label, "modulate:a", 1.0, 0.2)
+		(
+			t_hs
+			. tween_property(_hs_label, "scale", Vector2.ONE, 0.35)
+			. set_ease(Tween.EASE_OUT)
+			. set_trans(Tween.TRANS_BACK)
+		)
+		await t_hs.finished
+
 	# 4. Stats — fade in, then tally each value up.
 	var t4: Tween = create_tween().set_parallel()
 	t4.tween_property(_divider, "modulate:a", 1.0, 0.25)
@@ -295,6 +365,14 @@ func _play_reveal() -> void:
 		func(v: float) -> void: _stat_time.text = _fmt(int(v)), 0.0, float(_time_target), 0.6
 	)
 	await t5.finished
+
+	# 4b. Route recap — the map fades in framed on the whole journey, the
+	# taken path glowing and the roads not taken ghosted.
+	if _route_box.visible:
+		_route_view.fit_to_view()
+		var t_route: Tween = create_tween()
+		t_route.tween_property(_route_box, "modulate:a", 1.0, 0.35)
+		await t_route.finished
 
 	# 5. Score section header, then cascade the breakdown rows.
 	var t6: Tween = create_tween().set_parallel()
@@ -386,8 +464,9 @@ func _apply_layout() -> void:
 	animated_bg.anchor_bottom = 1.0
 
 	# Viewport-bounded panel so it never overflows regardless of journey length.
-	_panel.anchor_left = 0.08
-	_panel.anchor_right = 0.92
+	# Wider than the old single-column layout — it now hosts the two-column split.
+	_panel.anchor_left = 0.05
+	_panel.anchor_right = 0.95
 	_panel.anchor_top = 0.04
 	_panel.anchor_bottom = 0.96
 	_panel.offset_left = 0.0
@@ -397,6 +476,17 @@ func _apply_layout() -> void:
 	_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_panel.custom_minimum_size = Vector2(PANEL_HALF_W * 2, 0)
+
+	# ── Two-column split: score/details on the left, the route map on the
+	# right at full height. The scene-defined VBox becomes the left column;
+	# when the route section hides (no trail), the left column takes it all.
+	_split = HBoxContainer.new()
+	_split.add_theme_constant_override("separation", 28)
+	_panel.remove_child(_vbox)
+	_split.add_child(_vbox)
+	_panel.add_child(_split)
+	_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_vbox.size_flags_stretch_ratio = 1.15
 
 	_vbox.add_theme_constant_override("separation", 16)
 	_stats_row.add_theme_constant_override("separation", 0)
@@ -421,16 +511,59 @@ func _apply_layout() -> void:
 	_hero_score.uppercase = true
 	_hero_box.add_child(_hero_score)
 
+	# High-score flash — revealed with a pop after the hero score lands, only
+	# when the run ranked on the journey's scoreboard.
+	_hs_label = Label.new()
+	_hs_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hs_label.add_theme_color_override("font_color", UITheme.AMBER)
+	_hs_label.add_theme_font_size_override("font_size", 20)
+	_hs_label.uppercase = true
+	_hs_label.visible = false
+	_hero_box.add_child(_hs_label)
+
 	_vbox.add_child(_hero_box)
 	_vbox.move_child(_hero_box, _journey_lbl.get_index() + 1)
 
-	var score_section: VBoxContainer = $Panel/VBox/ScoreSection
+	# ── Route recap — the journey map with this run's path glowing, filling
+	# the split's right column top to bottom.
+	_route_box = VBoxContainer.new()
+	_route_box.add_theme_constant_override("separation", 6)
+	_route_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_route_box.size_flags_stretch_ratio = 0.85
+	var route_caption: Label = Label.new()
+	route_caption.text = "YOUR ROUTE"
+	route_caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	route_caption.add_theme_color_override("font_color", UITheme.PURPLE_BRIGHT)
+	route_caption.add_theme_font_size_override("font_size", 15)
+	route_caption.uppercase = true
+	_route_box.add_child(route_caption)
+
+	var route_pane: PanelContainer = PanelContainer.new()
+	var rp_style: StyleBoxFlat = StyleBoxFlat.new()
+	rp_style.bg_color = UITheme.CARD_BG
+	rp_style.border_color = UITheme.PURPLE_DARK
+	rp_style.set_border_width_all(1)
+	rp_style.set_corner_radius_all(UITheme.CORNER_RADIUS)
+	route_pane.add_theme_stylebox_override("panel", rp_style)
+	route_pane.custom_minimum_size = Vector2(320, ROUTE_PANE_HEIGHT)
+	route_pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	route_pane.clip_contents = true
+	_route_box.add_child(route_pane)
+
+	_route_view = GraphViewScene.instantiate()
+	_route_view.map_mode = true
+	route_pane.add_child(_route_view)
+	_split.add_child(_route_box)
+
+	# NOTE: _vbox was reparented into the split above, so $Panel/VBox/... paths
+	# no longer resolve — look up relative to the moved node instead.
+	var score_section: VBoxContainer = _vbox.get_node("ScoreSection")
 	score_section.add_theme_constant_override("separation", 12)
 	score_section.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_round_breakdown.add_theme_constant_override("separation", 6)
 
 	# The hero block is now the headline total — hide the small footer row.
-	$Panel/VBox/ScoreSection/TotalScoreRow.visible = false
+	score_section.get_node("TotalScoreRow").visible = false
 
 	# Wrap the breakdown in a ScrollContainer so a long journey scrolls rather
 	# than growing the panel off screen.

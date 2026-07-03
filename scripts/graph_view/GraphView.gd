@@ -67,6 +67,11 @@ var warning_provider: Callable = Callable()  # builder hook → {node_id: warnin
 # Non-empty → editor edges are tinted/thickened by traffic share and nodes get a % chip.
 # Never rendered in map_mode (player map / image export). Set via set_traffic({}) to clear.
 var _traffic: Dictionary = {}
+# Route recap overlay (end-of-run ceremony): the run's taken path renders
+# bright + thick, everything off it ghosted. Unlike the traffic heatmap this
+# DOES render in map_mode — the end screen is a map-mode consumer.
+var _route_nodes: Dictionary = {}  # node_id -> true (visited)
+var _route_edges: Dictionary = {}  # "src_id>to_id" -> true (taken)
 var _connect_mode: bool = false  # builder is wiring an edge — a node click is a target, not a drag
 
 # Node-drag state. A plain press on a node arms a drag of the whole selection; _input tracks
@@ -320,6 +325,9 @@ func _layout_graph() -> void:
 			_attach_traffic_chip(
 				ctrl, float((_traffic.get("nodes", {}) as Dictionary).get(id, 0.0))
 			)
+		# Route recap: everything the run didn't visit is ghosted.
+		if not _route_nodes.is_empty() and not _route_nodes.has(id):
+			ctrl.modulate = Color(1, 1, 1, 0.35)
 	# Out-handles in a second pass so they're the topmost (always-clickable) children.
 	if not map_mode:
 		for id: String in nodes:
@@ -358,6 +366,13 @@ func _layout_graph() -> void:
 				)
 				color = _traffic_color(pct)
 				width = lerpf(1.5, 5.0, sqrt(clampf(pct / 100.0, 0.0, 1.0)))
+			if not _route_edges.is_empty():
+				# Route recap: the taken path glows; roads not taken go ghostly.
+				if _route_edges.has("%s>%s" % [id, to]):
+					color = UITheme.CYAN
+					width = 4.0
+				else:
+					color = Color(color, color.a * 0.22)
 			_add_edge_between(src_ctrl, tgt_ctrl, color, width)
 	_canvas.set_edges(_edges)
 	_resize_canvas_to_content(_graph_content_size(_node_ctrls))
@@ -1064,6 +1079,18 @@ func _add_edge_between(src: Control, tgt: Control, color: Color, width: float = 
 # {nodes: {id: pct}, edges: {"id:edge_idx": pct}}. Re-renders immediately.
 func set_traffic(traffic: Dictionary) -> void:
 	_traffic = traffic
+	_layout_graph()
+
+
+# Applies (or clears, with []) the route-recap overlay from an ordered trail
+# of visited node ids. Re-renders immediately.
+func set_route(trail: Array) -> void:
+	_route_nodes = {}
+	_route_edges = {}
+	for i: int in trail.size():
+		_route_nodes[str(trail[i])] = true
+		if i > 0:
+			_route_edges["%s>%s" % [str(trail[i - 1]), str(trail[i])]] = true
 	_layout_graph()
 
 

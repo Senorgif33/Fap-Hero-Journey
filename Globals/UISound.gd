@@ -147,14 +147,20 @@ func _wire_button(btn: BaseButton) -> void:
 	if _wired.has(id):
 		return
 	_wired[id] = true
-	btn.tree_exited.connect(func() -> void: _wired.erase(id))
+	# ONE_SHOT because tree_exited also fires on a REPARENT (remove_child +
+	# add_child) — the button then comes back through _on_node_added and gets
+	# re-wired, so the eviction hook must not accumulate one lambda per move.
+	btn.tree_exited.connect(func() -> void: _wired.erase(id), CONNECT_ONE_SHOT)
 	# Muted buttons play their own custom sound at the call site (e.g. Play /
 	# Resume play start_journey on embark), so skip the default click here.
 	if btn.has_meta("ui_sound_muted") and bool(btn.get_meta("ui_sound_muted")):
 		return
 	# `pressed` fires on enabled buttons only, so disabled controls stay silent.
-	# (hover() stays available for screens that want it explicitly.)
-	btn.pressed.connect(click)
+	# (hover() stays available for screens that want it explicitly.) The signal
+	# connection SURVIVES a reparent while the _wired guard resets with it, so
+	# re-wires must check before connecting.
+	if not btn.pressed.is_connected(click):
+		btn.pressed.connect(click)
 
 
 # Stops a button from auto-playing the default click — for buttons that trigger a

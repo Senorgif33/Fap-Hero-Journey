@@ -1012,6 +1012,12 @@ func _on_resume_pressed() -> void:
 	for n in save_data.get("round_names", []) as Array:
 		names.append(str(n))
 	GameState.set_meta("_round_names", names)
+	# Restore the route trail so the end-screen route recap spans the whole
+	# run, not just the resumed half (old saves load as an empty trail).
+	var trail: Array = []
+	for t in save_data.get("route_trail", []) as Array:
+		trail.append(str(t))
+	GameState.set_meta("_route_trail", trail)
 
 	# Consume the save NOW (before the transition). If the player quits at any
 	# point in the resumed run without writing a fresh save, the journey is

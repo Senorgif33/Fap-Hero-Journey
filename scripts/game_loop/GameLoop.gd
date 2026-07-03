@@ -232,6 +232,9 @@ func _ready() -> void:
 		# GameState so it survives the scene change. Cleared here so a new
 		# journey starts fresh.
 		GameState.set_meta("_round_names", PackedStringArray())
+		# Route trail (node ids in visit order) — drives the end-screen route
+		# recap. Same meta pattern; restored from the save record on resume.
+		GameState.set_meta("_route_trail", [])
 	# Apply test-play seeds after the run-state reset above (so they survive it),
 	# before any node loads — a Conditional fork at the start node then sees them.
 	if _test_mode:
@@ -296,6 +299,7 @@ func _apply_pause_penalty(delta: float) -> void:
 
 
 func _load_current_item() -> void:
+	_record_trail_node()
 	match GameState.CurrentItemType():
 		"fork":
 			_show_fork_screen(GameState.CurrentFork())
@@ -305,6 +309,19 @@ func _load_current_item() -> void:
 			_show_storyboard_screen(GameState.CurrentStoryboard())
 		_:
 			_load_current_round()
+
+
+# Appends the current node to the run's route trail (end-screen route recap).
+# Consecutive duplicates are skipped — a resumed run re-enters its saved node.
+func _record_trail_node() -> void:
+	var node_id: String = GameState.CurrentNodeId()
+	if node_id == "":
+		return
+	var trail: Array = GameState.get_meta("_route_trail", [])
+	if not trail.is_empty() and str(trail[-1]) == node_id:
+		return
+	trail.append(node_id)
+	GameState.set_meta("_route_trail", trail)
 
 
 func _show_storyboard_screen(sb_data: Dictionary) -> void:
@@ -496,6 +513,7 @@ func _load_current_round() -> void:
 	_progress.value = 0.0
 	_paused = false
 	_pause_btn.text = "|| PAUSE"
+	_update_muffle()  # a new round never starts muffled (e.g. paused → next round)
 
 	var rtype: String = round.get("round_type", "normal")
 	_is_boss_round = rtype == "boss"
@@ -1793,7 +1811,7 @@ func _record_run(completed: bool) -> void:
 		return
 	var total: int = GameState.TotalRounds()
 	var reached: int = total if completed else clampi(GameState.RoundNumber, 0, total)
-	(
+	var rank: int = (
 		ScoreboardService
 		. add_run(
 			folder,
@@ -1805,6 +1823,10 @@ func _record_run(completed: bool) -> void:
 			}
 		)
 	)
+	# The end screen's high-score flash reads this (completed runs only —
+	# an abandoned run's rank is never celebrated).
+	if completed:
+		GameState.set_meta("_run_rank", rank)
 
 
 # Returns from a test play to the builder, reloading the same journey so the
@@ -1874,6 +1896,7 @@ func _write_journey_save() -> bool:
 		"total_actions": score_data.get("strokes", 0),
 		"inventory": InventoryService.CaptureSaveData(),
 		"round_names": GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray,
+		"route_trail": GameState.get_meta("_route_trail", []),
 	}
 	return JourneySaveService.write_save(folder_name, payload)
 
@@ -1959,6 +1982,7 @@ func _on_options_pressed() -> void:
 	_options_open = true  # counts as an active pause for the score penalty
 	# Freeze the active-effect clock while the Options overlay is open.
 	InventoryService.SetPaused(true)
+	_update_muffle()  # before add_child so the overlay sits above the dim
 	var opts: Control = OptionsScene.instantiate()
 	opts.overlay_mode = true
 	opts.tree_exiting.connect(_on_options_closed)
@@ -1967,6 +1991,7 @@ func _on_options_pressed() -> void:
 
 func _on_options_closed() -> void:
 	_options_open = false
+	_update_muffle()
 	# Only resume if the round was not separately paused via the pause button —
 	# in that case the effect clock must stay frozen until the player resumes.
 	if not _paused:
@@ -2005,6 +2030,111 @@ func _toggle_pause() -> void:
 	else:
 		FunscriptPlayer.Resume()
 		_pause_btn.text = "|| PAUSE"
+	_update_muffle()
+
+
+# ---------------------------------------------------------------------------
+# Pause muffle — "stepping out of the room"
+# ---------------------------------------------------------------------------
+
+# An ACTIVE pause (pause button / Options overlay) low-passes and gently dips
+# the audio and dims the screen, tweened both ways. System gates (shops / forks
+# / storyboards / boss intros) set neither _paused nor _options_open, so they
+# keep their normal ambiance. The dip is a bus EFFECT (AudioEffectAmplify), not
+# a bus-volume write — the user's Master volume slider (live in the very
+# Options overlay that triggers this) must never be stomped. Both effects are
+# removed from the Master bus on scene exit so nothing leaks past the run.
+const MUFFLE_CUTOFF_HZ: float = 700.0
+const MUFFLE_OPEN_HZ: float = 20500.0
+const MUFFLE_DIP_DB: float = -6.0
+const MUFFLE_DIM_ALPHA: float = 0.22
+const MUFFLE_TWEEN_S: float = 0.22
+
+var _muffle_on: bool = false
+var _muffle_lp: AudioEffectLowPassFilter = null
+var _muffle_amp: AudioEffectAmplify = null
+var _muffle_dim: ColorRect = null
+var _muffle_tween: Tween = null
+
+
+func _update_muffle() -> void:
+	var want: bool = _paused or _options_open
+	if want == _muffle_on:
+		return
+	_muffle_on = want
+	_ensure_muffle_rig()
+	var master: int = AudioServer.get_bus_index("Master")
+	if want:
+		_set_muffle_fx_enabled(master, true)
+		_muffle_dim.visible = true
+	if _muffle_tween and _muffle_tween.is_valid():
+		_muffle_tween.kill()
+	_muffle_tween = create_tween().set_parallel(true)
+	(
+		_muffle_tween
+		. tween_property(
+			_muffle_lp, "cutoff_hz", MUFFLE_CUTOFF_HZ if want else MUFFLE_OPEN_HZ, MUFFLE_TWEEN_S
+		)
+		. set_trans(Tween.TRANS_SINE)
+	)
+	_muffle_tween.tween_property(
+		_muffle_amp, "volume_db", MUFFLE_DIP_DB if want else 0.0, MUFFLE_TWEEN_S
+	)
+	_muffle_tween.tween_property(
+		_muffle_dim, "color:a", MUFFLE_DIM_ALPHA if want else 0.0, MUFFLE_TWEEN_S
+	)
+	if not want:
+		# Fully open again — disable the effects so the bus is bit-identical to
+		# the pre-muffle state (a fully-open low-pass still costs DSP).
+		_muffle_tween.chain().tween_callback(
+			func() -> void:
+				_set_muffle_fx_enabled(AudioServer.get_bus_index("Master"), false)
+				_muffle_dim.visible = false
+		)
+
+
+# Lazily creates the two Master-bus effects (disabled) and the dim overlay.
+func _ensure_muffle_rig() -> void:
+	if _muffle_lp != null:
+		return
+	var master: int = AudioServer.get_bus_index("Master")
+	_muffle_lp = AudioEffectLowPassFilter.new()
+	_muffle_lp.cutoff_hz = MUFFLE_OPEN_HZ
+	_muffle_amp = AudioEffectAmplify.new()
+	_muffle_amp.volume_db = 0.0
+	AudioServer.add_bus_effect(master, _muffle_lp)
+	AudioServer.add_bus_effect(master, _muffle_amp)
+	_set_muffle_fx_enabled(master, false)
+	_muffle_dim = ColorRect.new()
+	_muffle_dim.color = Color(0, 0, 0, 0)
+	_muffle_dim.anchor_right = 1.0
+	_muffle_dim.anchor_bottom = 1.0
+	_muffle_dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_muffle_dim.visible = false
+	add_child(_muffle_dim)
+
+
+# Toggles OUR two effects by identity — index-safe even if something else has
+# added effects to the Master bus.
+func _set_muffle_fx_enabled(master: int, on: bool) -> void:
+	for i: int in AudioServer.get_bus_effect_count(master):
+		var fx: AudioEffect = AudioServer.get_bus_effect(master, i)
+		if fx == _muffle_lp or fx == _muffle_amp:
+			AudioServer.set_bus_effect_enabled(master, i, on)
+
+
+# The Master bus is global — strip our effects when the run scene goes away so
+# the menu (or the next run) starts clean. Mirrors SensoryFX's bus hygiene.
+func _exit_tree() -> void:
+	if _muffle_lp == null:
+		return
+	var master: int = AudioServer.get_bus_index("Master")
+	for i: int in range(AudioServer.get_bus_effect_count(master) - 1, -1, -1):
+		var fx: AudioEffect = AudioServer.get_bus_effect(master, i)
+		if fx == _muffle_lp or fx == _muffle_amp:
+			AudioServer.remove_bus_effect(master, i)
+	_muffle_lp = null
+	_muffle_amp = null
 
 
 func _show_hud(fade: bool = false) -> void:
