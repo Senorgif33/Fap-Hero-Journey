@@ -12,18 +12,23 @@ extends Node
 # and reverse the process on load. Keeping the schema opaque here means the
 # service doesn't need to change when game state evolves.
 #
-# Save schema:
+# Save schema (the position fields come straight from GameState.CaptureSaveData;
+# the runtime walks the journey GRAPH, so a save snapshots the current node id,
+# not the old spliced-sequence index):
 #   {
 #     "version":          int        — for forward-compat if we change shape
 #     "saved_at":         String     — ISO timestamp (display + sort)
 #     "journey_folder":   String     — sanity check on load
-#     "sequence_index":   int        — _seqIndex in GameState
-#     "sequence":         Array      — full spliced sequence snapshot
+#     "current_node":     String     — GameState._currentId (resume position)
+#     "rounds_entered":   int        — rounds walked so far (progress number)
+#     "flags":            Array      — journey flags set up to the save point
+#     "discovered":       Array      — fog-of-war discovered node ids
 #     "coins":            int        — CoinService balance
 #     "score":            int        — ScoreService cumulative score
 #     "total_actions":    int        — for end-screen stat
-#     "total_length_ms":  int        — for end-screen stat
+#     "inventory":        Array      — owned items (active effects NOT saved)
 #     "round_names":      Array      — round-name log for the end screen
+#     "route_trail":      Array      — visited node ids for the end-screen recap
 #   }
 #
 # C# callers reach this via the autoload node:

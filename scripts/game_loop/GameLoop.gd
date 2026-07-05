@@ -1885,12 +1885,8 @@ func _write_journey_save() -> bool:
 	# Stitch together one payload from each service that owns part of the run.
 	# Inventory carries through; active effects do NOT (clean modifier slate
 	# on resume — see InventoryService.LoadFromSave for the rationale).
-	var game_state_data: Dictionary = GameState.CaptureSaveData()
 	var score_data: Dictionary = ScoreService.CaptureSaveData()
 	var payload: Dictionary = {
-		"sequence_index": game_state_data.get("sequence_index", 0),
-		"sequence": game_state_data.get("sequence", []),
-		"fork_depth": game_state_data.get("fork_depth", 0),
 		"coins": CoinService.Balance,
 		"score": score_data.get("score", 0),
 		"total_actions": score_data.get("strokes", 0),
@@ -1898,6 +1894,12 @@ func _write_journey_save() -> bool:
 		"round_names": GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray,
 		"route_trail": GameState.get_meta("_route_trail", []),
 	}
+	# GameState owns the graph-native position fields (current_node,
+	# rounds_entered, flags, discovered) — merge them in under their own names so
+	# LoadFromSave finds them. (Re-keying these through the old tree-model names
+	# sequence_index/sequence/fork_depth silently dropped them, which reset every
+	# resume to the journey start and lost pre-save flags + fog discovery.)
+	payload.merge(GameState.CaptureSaveData())
 	return JourneySaveService.write_save(folder_name, payload)
 
 
