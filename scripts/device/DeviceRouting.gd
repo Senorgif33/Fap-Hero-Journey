@@ -10,13 +10,16 @@ extends RefCounted
 #
 # Actuator id: "<device_id>:<kind>:<channel>", where device_id = "<name>#<occ>",
 # kind is linear / vibrate / constrict, channel is 0-based. The stroke target is
-# either such an id (a Buttplug linear) or the sentinel "serial".
+# such an id (a Buttplug linear) or a backend sentinel: "serial" (T-code) or
+# "handy" (The Handy over its cloud API — GameLoop drives it, not FunscriptPlayer,
+# so the C# plan consumer leaves the stroke backend unset for it by design).
 #
 # Catalog entry (one connected Buttplug device):
 #   { "id": "Edge 2#0", "linear": bool, "vibrate_channels": int, "constrict_channels": int }
 # ---------------------------------------------------------------------------
 
 const SERIAL_TARGET: String = "serial"
+const HANDY_TARGET: String = "handy"
 const VIBE_SOURCES: Array = ["vibe1", "vibe2", "stroke"]  # "stroke" = follow the L0 envelope
 
 
@@ -52,9 +55,13 @@ static func resolve(
 
 	var plan: Dictionary = {"stroke": {}, "vibration": [], "constrict": []}
 
-	# Stroke — exactly one target, or none when it isn't available.
+	# Stroke — exactly one target, or none when it isn't available. Backend
+	# sentinels resolve unconditionally (availability is a runtime concern the
+	# device banner owns, same as serial).
 	if stroke_target == SERIAL_TARGET:
 		plan["stroke"] = {"backend": "serial"}
+	elif stroke_target == HANDY_TARGET:
+		plan["stroke"] = {"backend": "handy"}
 	elif stroke_target != "":
 		var s: Dictionary = parse_actuator_id(stroke_target)
 		if not s.is_empty() and s["kind"] == "linear" and by_id.has(s["device"]):

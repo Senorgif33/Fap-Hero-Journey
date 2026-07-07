@@ -267,6 +267,7 @@ func _process(delta: float) -> void:
 		# Re-fit every frame: cheap, and keeps the video covering the screen even
 		# if the viewport or UI scale changes mid-playback.
 		_fit_video_cover()
+		_handy_feed()  # top up the HSP buffer ahead of the clock (Handy-direct only)
 	_apply_pause_penalty(delta)
 	_update_chip_countdowns()
 	if _is_boss_round:
@@ -565,6 +566,10 @@ func _begin_round(round: Dictionary) -> void:
 		ScoreService.SetRoundActions(FunscriptPlayer.ActionCount)
 		if _beat_bar != null:
 			_beat_bar.set_beats(FunscriptPlayer.GetBeats())
+	# The Handy (direct WiFi) plays the script itself — fire-and-forget the
+	# upload/setup/synced-play chain; scoring and the beat bar stay on
+	# FunscriptPlayer's clock regardless.
+	_handy_begin_round(fs_path)
 
 	# Load secondary axis scripts (serial devices only; FunscriptPlayer ignores
 	# them if output mode is Buttplug). Clear first so stale axes from a prior
@@ -1484,6 +1489,7 @@ func _start_no_video_fallback() -> void:
 
 
 func _on_round_ended() -> void:
+	_handy_stop()  # the device would otherwise keep playing into the transition
 	# Extract the name here in GDScript where Dictionary access is reliable,
 	# then pass it explicitly so C# never needs to look up the key itself.
 	var _cur: Dictionary = GameState.CurrentRound()
@@ -1771,6 +1777,7 @@ func _set_overlay_input_enabled(enabled: bool) -> void:
 func _go_to_menu() -> void:
 	_video.stop()
 	FunscriptPlayer.Stop()
+	_handy_stop()
 	# In a test play, "back to menu" (button or Esc) returns to the builder the
 	# preview was launched from, not the main menu.
 	if _test_mode:
@@ -1984,6 +1991,7 @@ func _on_options_pressed() -> void:
 	_options_open = true  # counts as an active pause for the score penalty
 	# Freeze the active-effect clock while the Options overlay is open.
 	InventoryService.SetPaused(true)
+	_handy_pause()
 	_update_muffle()  # before add_child so the overlay sits above the dim
 	var opts: Control = OptionsScene.instantiate()
 	opts.overlay_mode = true
@@ -2000,6 +2008,7 @@ func _on_options_closed() -> void:
 		_video.paused = false
 		FunscriptPlayer.Resume()
 		InventoryService.SetPaused(false)
+		_handy_resume()
 	# Output mode may have changed in Options — re-evaluate the disconnect
 	# banner against whatever backend is now selected.
 	_refresh_device_warning()
@@ -2029,10 +2038,88 @@ func _toggle_pause() -> void:
 	if _paused:
 		FunscriptPlayer.Pause()
 		_pause_btn.text = "> RESUME"
+		_handy_pause()
 	else:
 		FunscriptPlayer.Resume()
 		_pause_btn.text = "|| PAUSE"
+		_handy_resume()
 	_update_muffle()
+
+
+# ---------------------------------------------------------------------------
+# The Handy (direct WiFi stroke)
+# ---------------------------------------------------------------------------
+
+# The Handy plays the round's script via Handy's v3 HSP streaming API — see
+# HandyService. GameLoop feeds the point buffer ahead of the video clock and
+# starts/pauses/resumes/stops around it; FunscriptPlayer keeps running
+# deviceless for scoring, the beat bar, and any routed vibes. Stroke-modifying
+# effects therefore never reach this device (disclosed in Options + run-start toast).
+var _handy_active: bool = false  # stroke target is the Handy (evaluated per round)
+var _handy_ready: bool = false  # this round's HSP session is live
+
+
+func _handy_stroke_selected() -> bool:
+	return SettingsService.get_stroke_target() == DeviceRouting.HANDY_TARGET
+
+
+# Per-round setup: reachability/clock sync → load the script as HSP points →
+# open a session and start streaming at the current video position → apply the
+# stroke range. Any failure drops to a toast; the round plays without the device.
+func _handy_begin_round(fs_path: String) -> void:
+	_handy_active = _handy_stroke_selected()
+	_handy_ready = false
+	if not _handy_active or fs_path == "":
+		return
+	if not await HandyService.connect_and_sync():
+		_show_save_toast("✕  THE HANDY IS UNREACHABLE — CHECK KEYS / WIFI")
+		return
+	HandyService.load_actions(JourneyData.read_funscript_actions(fs_path))
+	# Bake in this round's active stroke effects (boss/curse modifiers are added
+	# synchronously before this await resolves, so they're present here).
+	HandyService.set_effects(
+		InventoryService.GetActiveEffects(), SettingsService.get_home_position()
+	)
+	if not await HandyService.start(int(_video.stream_position * 1000.0)):
+		_show_save_toast("✕  HANDY SYNC FAILED — ROUND PLAYS WITHOUT IT")
+		return
+	_handy_ready = true
+	await HandyService.set_slider(SettingsService.get_range_min(), SettingsService.get_range_max())
+
+
+# Active stroke effects changed mid-round (item activated / expired, cleanse,
+# boss add) — rebuild the transformed stream and flush-refeed the device from
+# the current position so the change reaches the Handy (lands a fraction of a
+# second later via the flush). No-op unless the Handy is the live stroker.
+func _handy_effects_changed() -> void:
+	if not _handy_ready:
+		return
+	HandyService.set_effects(
+		InventoryService.GetActiveEffects(), SettingsService.get_home_position()
+	)
+	HandyService.seek(int(_video.stream_position * 1000.0))
+
+
+# Tops up the HSP buffer ahead of the video clock — called from _process while
+# the Handy drives this round. Fire-and-forget + self-throttled in HandyService.
+func _handy_feed() -> void:
+	if _handy_ready and _video.is_playing() and not _video.paused:
+		HandyService.feed(int(_video.stream_position * 1000.0))
+
+
+func _handy_pause() -> void:
+	if _handy_ready:
+		HandyService.pause()
+
+
+func _handy_resume() -> void:
+	if _handy_ready:
+		HandyService.resume()
+
+
+func _handy_stop() -> void:
+	if _handy_ready:
+		HandyService.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -2127,7 +2214,9 @@ func _set_muffle_fx_enabled(master: int, on: bool) -> void:
 
 # The Master bus is global — strip our effects when the run scene goes away so
 # the menu (or the next run) starts clean. Mirrors SensoryFX's bus hygiene.
+# The Handy is external and would keep stroking without this stop.
 func _exit_tree() -> void:
+	_handy_stop()
 	if _muffle_lp == null:
 		return
 	var master: int = AudioServer.get_bus_index("Master")
@@ -2366,6 +2455,7 @@ func _connect_signals() -> void:
 	ScoreService.ScoreChanged.connect(_on_score_changed)
 	CoinService.BalanceChanged.connect(_on_coin_balance_changed)
 	InventoryService.ActiveEffectsChanged.connect(_refresh_effect_chips)
+	InventoryService.ActiveEffectsChanged.connect(_handy_effects_changed)
 	# save_now utility item: writes a save mid-round so the player can resume
 	# from the start of this round if they quit later. Doesn't end the run.
 	InventoryService.connect("SaveRequested", _on_save_item_used)

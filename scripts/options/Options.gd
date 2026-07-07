@@ -122,6 +122,7 @@ var _hud_delay_value_lbl: Label = null
 var _ui_scale_slider: HSlider = null
 var _ui_scale_value_lbl: Label = null
 var _beat_bar_toggle: Button = null
+var _handy_status_lbl: Label = null
 var _update_check_toggle: Button = null
 var _ui_sound_toggle: Button = null
 var _ui_sound_slider: HSlider = null
@@ -142,6 +143,7 @@ var _filler_section: VBoxContainer = null
 # Device-routing section (built in code) — device cards + per-actuator source assignment.
 var _routing_section: VBoxContainer = null
 var _routing_cards_vbox: VBoxContainer = null
+var _handy_section: VBoxContainer = null  # The Handy (WiFi) connection block — lives on the CONNECTION tab
 var _stroker_summary_lbl: Label = null
 var _serial_delay_slider: HSlider = null
 var _serial_delay_lbl: Label = null
@@ -563,6 +565,9 @@ func _apply_layout() -> void:
 			_range_min_lbl.text = "MIN: %d" % roundi(lo)
 			_range_max_lbl.text = "MAX: %d" % roundi(hi)
 			FunscriptPlayer.SetRangeClamp(roundi(lo), roundi(hi))
+			# Handy-direct maps the range to the device slider zone (debounced).
+			if SettingsService.get_stroke_target() == DeviceRouting.HANDY_TARGET:
+				HandyService.set_slider_debounced(roundi(lo), roundi(hi))
 			_save_settings()
 	)
 
@@ -795,6 +800,7 @@ func _apply_layout() -> void:
 	_filler_section = filler_section
 
 	_build_routing_section()
+	_build_handy_section()
 
 	var filler_header: Label = Label.new()
 	filler_header.text = "STORYBOARD FILLER"
@@ -1006,7 +1012,12 @@ func _on_tab_changed(idx: int) -> void:
 			_transcode_section
 		],
 		# CONNECTION
-		[get_node(VBOX + "IntifaceSection"), get_node(VBOX + "SerialSection"), _routing_section],
+		[
+			get_node(VBOX + "IntifaceSection"),
+			get_node(VBOX + "SerialSection"),
+			_routing_section,
+			_handy_section,
+		],
 		# DEVICE
 		[_range_section, _filler_section],
 		# ABOUT
@@ -2101,6 +2112,89 @@ func _build_routing_section() -> void:
 	_refresh_routing_cards()
 
 
+# ── The Handy (direct WiFi) ──────────────────────────────────────────────────
+
+
+# Connection-key setup for driving The Handy through its official v3 streaming
+# API (HSP) — no Intiface needed. Includes the plain-language disclosure this
+# mode demands: motion routes through Handy's cloud (needs internet, FW4+).
+func _build_handy_section() -> void:
+	var section: VBoxContainer = VBoxContainer.new()
+	section.add_theme_constant_override("separation", 10)
+	_content_vbox.add_child(section)
+	_handy_section = section  # tracked so _on_tab_changed can scope it to CONNECTION
+
+	var header: Label = Label.new()
+	header.text = "THE HANDY (WIFI — NO INTIFACE)"
+	_style_label(header, UITheme.PURPLE_BRIGHT, 13, true)
+	section.add_child(header)
+
+	var divider: HSeparator = HSeparator.new()
+	divider.add_theme_stylebox_override("separator", _make_separator_style())
+	section.add_child(divider)
+
+	var key_row: HBoxContainer = HBoxContainer.new()
+	key_row.add_theme_constant_override("separation", 16)
+	section.add_child(key_row)
+
+	var key_lbl: Label = Label.new()
+	key_lbl.text = "Connection key"
+	key_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(key_lbl, UITheme.WHITE_SOFT, 14, false)
+	key_row.add_child(key_lbl)
+
+	var key_edit: LineEdit = LineEdit.new()
+	key_edit.placeholder_text = "From the Handy app: Settings → Connection Key"
+	key_edit.text = SettingsService.get_handy_connection_key()
+	key_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_line_edit(key_edit)
+	key_row.add_child(key_edit)
+
+	_handy_status_lbl = Label.new()
+	_handy_status_lbl.text = (
+		"Not checked" if SettingsService.get_handy_connection_key() != "" else "No key set"
+	)
+	_style_label(_handy_status_lbl, UITheme.PURPLE_MID, 11, true)
+	key_row.add_child(_handy_status_lbl)
+
+	var connect_btn: Button = UITheme.make_icon_btn("⟳ CONNECT", false, UITheme.CYAN)
+	connect_btn.tooltip_text = "Save the key and check the device through Handy's servers"
+	key_row.add_child(connect_btn)
+	connect_btn.pressed.connect(
+		func() -> void:
+			SettingsService.set_handy_connection_key(key_edit.text)
+			SettingsService.save()
+			_refresh_routing_cards()  # the routing card appears once a key exists
+			_handy_status_lbl.text = "Checking…"
+			var ok: bool = await HandyService.connect_and_sync()
+			_handy_status_lbl.text = "✔ Connected" if ok else "✕ Not reachable"
+	)
+
+	var d_handy: Dictionary = _add_delay_row(section, "Handy delay")
+	var handy_slider: HSlider = d_handy["slider"]
+	var handy_lbl: Label = d_handy["value"]
+	handy_slider.value = SettingsService.get_handy_delay_ms()
+	handy_lbl.text = "%d ms" % SettingsService.get_handy_delay_ms()
+	handy_slider.value_changed.connect(
+		func(v: float) -> void:
+			handy_lbl.text = "%d ms" % roundi(v)
+			SettingsService.set_handy_delay_ms(roundi(v))
+			SettingsService.save()
+	)
+
+	var disclosure: Label = Label.new()
+	disclosure.text = (
+		"Direct Handy mode streams motion through Handy's cloud service "
+		+ "(handyfeeling.com) and needs an internet connection. Requires Handy "
+		+ "firmware 4+. Stroke-modifying items, curses, boss effects, and your "
+		+ "stroke range all reach the device; a change made mid-round takes effect "
+		+ "a fraction of a second later."
+	)
+	disclosure.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(disclosure, UITheme.SEPARATOR, 11, false)
+	section.add_child(disclosure)
+
+
 func _add_delay_row(parent: VBoxContainer, label_text: String) -> Dictionary:
 	var row: HBoxContainer = HBoxContainer.new()
 	row.add_theme_constant_override("separation", 16)
@@ -2139,6 +2233,17 @@ func _refresh_routing_cards() -> void:
 	# Serial (T-code) — a single-device stroker option, always offered.
 	var serial_body: VBoxContainer = _make_routing_card("SERIAL (T-CODE)", UITheme.AMBER)
 	_add_stroker_row(serial_body, DeviceRouting.SERIAL_TARGET, "Linear (T-code stroke)")
+
+	# The Handy (direct WiFi) — offered once a connection key is configured in
+	# its section below. Stroke role only (single-axis device, cloud-synced).
+	if SettingsService.get_handy_connection_key() != "":
+		var handy_body: VBoxContainer = _make_routing_card("THE HANDY (WIFI)", UITheme.CYAN)
+		_add_stroker_row(handy_body, DeviceRouting.HANDY_TARGET, "Linear (cloud sync)")
+		var handy_note: Label = Label.new()
+		handy_note.text = "Stroke items, curses & range all reach this device."
+		handy_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_style_label(handy_note, UITheme.SEPARATOR, 10, false)
+		handy_body.add_child(handy_note)
 
 	var catalog: Array = ButtplugService.GetDeviceCatalog()
 	if catalog.is_empty():
@@ -2350,6 +2455,8 @@ func _update_stroker_summary() -> void:
 	var target: String = SettingsService.get_stroke_target()
 	if target == DeviceRouting.SERIAL_TARGET:
 		_stroker_summary_lbl.text = "Stroker: Serial (T-code)"
+	elif target == DeviceRouting.HANDY_TARGET:
+		_stroker_summary_lbl.text = "Stroker: The Handy (WiFi)"
 	elif target != "":
 		_stroker_summary_lbl.text = (
 			"Stroker: %s" % str(DeviceRouting.parse_actuator_id(target).get("device", target))

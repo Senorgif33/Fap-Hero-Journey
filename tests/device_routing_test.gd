@@ -35,6 +35,18 @@ func test_serial_stroke_target() -> void:
 	assert_str(str((plan["stroke"] as Dictionary).get("backend", ""))).is_equal("serial")
 
 
+# The Handy resolves like serial — a backend sentinel, not a catalog device
+# (GameLoop drives it over the cloud API; FunscriptPlayer ignores the backend).
+func test_handy_stroke_target() -> void:
+	var plan: Dictionary = DeviceRouting.resolve("handy", {}, {}, _catalog())
+	assert_str(str((plan["stroke"] as Dictionary).get("backend", ""))).is_equal("handy")
+	# Vibration routing is unaffected by a handy stroke target.
+	var plan2: Dictionary = DeviceRouting.resolve(
+		"handy", {"Edge 2#0:vibrate:0": "vibe1"}, {}, _catalog()
+	)
+	assert_int((plan2["vibration"] as Array).size()).is_equal(1)
+
+
 func test_buttplug_stroke_present() -> void:
 	var plan: Dictionary = DeviceRouting.resolve("Solace Pro#0:linear:0", {}, {}, _catalog())
 	assert_str(str((plan["stroke"] as Dictionary).get("backend", ""))).is_equal("bp")

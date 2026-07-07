@@ -195,6 +195,25 @@ func get_constrict_routes() -> Dictionary:
 
 # Per-backend output delay (ms). Both default to the legacy single latency_offset_ms, so a
 # setup's tuned value carries forward until the user overrides a backend explicitly.
+# The Handy (direct WiFi) — cloud-API connection key + its own latency offset
+# (applied as a script-time shift when starting synced playback).
+func get_handy_connection_key() -> String:
+	return str(_config.get_value("handy", "connection_key", ""))
+
+
+# Handy API v3 APPLICATION ID — the X-Api-Key value that authenticates device
+# calls (distinct from the user's per-device connection key, and from the
+# "application key" which only mints tokens). Ships baked into the build; this
+# override lets the dev supply it via settings instead of source. Empty falls
+# back to HandyService.DEFAULT_APP_ID.
+func get_handy_app_id() -> String:
+	return str(_config.get_value("handy", "app_id", ""))
+
+
+func get_handy_delay_ms() -> int:
+	return int(_config.get_value("handy", "delay_ms", 0))
+
+
 func get_serial_delay_ms() -> int:
 	return int(_config.get_value("device", "serial_delay_ms", get_latency_offset_ms()))
 
@@ -437,6 +456,14 @@ func set_vibration_routes(value: Dictionary) -> void:
 
 func set_constrict_routes(value: Dictionary) -> void:
 	_config.set_value("routing", "constrict_routes", value)
+
+
+func set_handy_connection_key(value: String) -> void:
+	_config.set_value("handy", "connection_key", value.strip_edges())
+
+
+func set_handy_delay_ms(value: int) -> void:
+	_config.set_value("handy", "delay_ms", value)
 
 
 func set_serial_delay_ms(value: int) -> void:

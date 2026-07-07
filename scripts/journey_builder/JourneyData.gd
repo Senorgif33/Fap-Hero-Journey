@@ -313,7 +313,7 @@ const BLESSING_CATALOG: Array = [
 #   1. Guarantee the BASELINE fields a node always carries (a never-edited new node has only
 #      a couple of keys; the runtime should still get a complete, fully-populated record).
 #   2. Re-coerce numerics: JSON loads every number as float, so coins/costs round-trip as 5.0
-#      unless re-coerced to int here — the "coins lesson" (HANDOFF §1a).
+#      unless re-coerced to int here — the "coins lesson".
 # Any EXTRA keys already on `data` (e.g. boss_modifiers, future fields) pass through via the
 # initial deep copy. The save walk rewrites the MEDIA-path fields AFTER this. Pure → unit-tested.
 static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
