@@ -42,10 +42,16 @@ const DEFAULT_APP_ID: String = "YGD4P0FfNHPeqgAskoT-4aRfK~zdEWhm"
 
 const LOOKAHEAD_MS: int = 8000  # keep the buffer filled this far ahead of the clock
 const FEED_INTERVAL_MS: int = 1000  # min gap between refill calls (GameLoop drives feed)
+const SERVERTIME_SAMPLES: int = 5  # /servertime probes for the client-clock estimate
 const REQUEST_TIMEOUT_S: float = 10.0
 
 var _connected: bool = false
 var _clock_offset_ms: int = 0  # device/server clock offset from /hstp/clocksync
+# CLIENT→server clock offset (server_now ≈ local_ticks + this), from /servertime.
+# Distinct from _clock_offset_ms (device↔server): this is OUR estimate of server
+# time, sent as /hsp/play's server_time so the device can compensate transit lag.
+var _server_offset_ms: int = 0
+var _server_synced: bool = false
 # Current round's RAW script as HSP points [{t:int ms, x:int 0-100}], time-sorted.
 var _points: Array = []
 # The script with active stroke effects (items / curses / boss) baked in — this
@@ -94,7 +100,8 @@ func connect_and_sync() -> bool:
 	var res: Dictionary = await _api_get("/connected")
 	var ok: bool = bool((res.get("result", res) as Dictionary).get("connected", false))
 	if ok:
-		await _clocksync()
+		await _clocksync()  # syncs the DEVICE clock to the server
+		await _estimate_server_offset()  # syncs OUR clock to the server (for server_time)
 	_set_connected(ok)
 	return ok
 
@@ -114,6 +121,30 @@ func _clocksync() -> void:
 	var r: Dictionary = res.get("result", res)
 	if r.has("clock_offset"):
 		_clock_offset_ms = int(r["clock_offset"])
+
+
+# Samples /servertime a few times to estimate the CLIENT→server clock offset
+# (lowest-RTT sample wins; pure math in HandyPoints.best_offset_from_samples).
+# Feeds _server_now(), which fills /hsp/play's server_time so the device can
+# compensate transit latency instead of treating "command received" as t=now
+# (the cause of a consistent ~0.5–1s lag when server_time is omitted).
+func _estimate_server_offset() -> void:
+	var samples: Array = []
+	for _i: int in SERVERTIME_SAMPLES:
+		var sent: int = Time.get_ticks_msec()
+		var res: Dictionary = await _api_get("/servertime")
+		var recv: int = Time.get_ticks_msec()
+		var r: Dictionary = res.get("result", res)
+		if r.has("server_time"):
+			samples.append({"sent": sent, "recv": recv, "server_time": int(r["server_time"])})
+	if not samples.is_empty():
+		_server_offset_ms = HandyPoints.best_offset_from_samples(samples)
+		_server_synced = true
+
+
+# Our current estimate of the server clock (ms), for /hsp/play's server_time.
+func _server_now() -> int:
+	return Time.get_ticks_msec() + _server_offset_ms
 
 
 # ── Script → HSP points ──────────────────────────────────────────────────────
@@ -158,21 +189,23 @@ func start(video_ms: int) -> bool:
 	_last_video_ms = video_ms
 	var win: Dictionary = HandyPoints.points_in_window(_transformed, 0, video_ms + LOOKAHEAD_MS)
 	_send_idx = int(win["next_idx"])
-	await _api_put(
-		"/hsp/play",
+	var play: Dictionary = {
+		"start_time": _anchor(video_ms),
+		"playback_rate": 1.0,
+		"pause_on_starving": true,
+		"loop": false,
+		"add":
 		{
-			"start_time": _anchor(video_ms),
-			"playback_rate": 1.0,
-			"pause_on_starving": true,
-			"loop": false,
-			"add":
-			{
-				"points": win["batch"],
-				"flush": true,
-				"tail_point_stream_index": maxi(1, _send_idx),
-			},
-		}
-	)
+			"points": win["batch"],
+			"flush": true,
+			"tail_point_stream_index": maxi(1, _send_idx),
+		},
+	}
+	# Anchor the play to the server clock so the device compensates transit lag.
+	# Only when synced — a bad estimate would desync worse than omitting it.
+	if _server_synced:
+		play["server_time"] = _server_now()
+	await _api_put("/hsp/play", play)
 	return true
 
 
@@ -216,10 +249,11 @@ func stop() -> void:
 		await _api_put("/hsp/stop", {})
 
 
-# The device-clock anchor for a play/seek at video position `video_ms`, shifted
-# by the user's Handy delay (positive = device acts earlier, matching the serial
-# / intiface delay convention). The delay is small (±500ms) vs the lookahead, so
-# the fed buffer always covers the shifted position.
+# The playback anchor for a play/seek at video position `video_ms`, shifted by
+# the user's Handy delay (positive = device acts earlier, matching the serial /
+# intiface convention). With server_time sync the base lag is compensated, so
+# the delay is a fine trim; the shift stays well under LOOKAHEAD_MS so the fed
+# buffer always covers the anchored position.
 func _anchor(video_ms: int) -> int:
 	return maxi(0, video_ms + SettingsService.get_handy_delay_ms())
 
@@ -235,19 +269,19 @@ func seek(video_ms: int) -> void:
 	# skipped by start_time; the batch covers the lookahead).
 	_send_idx = int(win["next_idx"])
 	_last_feed_ms = Time.get_ticks_msec()
-	await _api_put(
-		"/hsp/play",
+	var play: Dictionary = {
+		"start_time": _anchor(video_ms),
+		"pause_on_starving": true,
+		"add":
 		{
-			"start_time": _anchor(video_ms),
-			"pause_on_starving": true,
-			"add":
-			{
-				"points": win["batch"],
-				"flush": true,
-				"tail_point_stream_index": maxi(1, _send_idx),
-			},
-		}
-	)
+			"points": win["batch"],
+			"flush": true,
+			"tail_point_stream_index": maxi(1, _send_idx),
+		},
+	}
+	if _server_synced:
+		play["server_time"] = _server_now()
+	await _api_put("/hsp/play", play)
 
 
 # Re-anchors playback at the current video position so a live delay change

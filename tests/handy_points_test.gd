@@ -112,3 +112,23 @@ func test_apply_effects_ignores_non_stroke() -> void:
 		PTS, [{"kind": "score_multiplier", "factor": 2.0}, {"kind": "coin_penalty", "factor": 0.5}]
 	)
 	assert_array(_xs(out)).is_equal([0, 100, 0])
+
+
+# ── server-clock offset (transit-lag compensation) ───────────────────────────
+
+
+# The lowest round-trip sample wins; offset = server_time + rtt/2 − recv.
+func test_best_offset_lowest_rtt_wins() -> void:
+	var samples := [
+		{"sent": 0, "recv": 200, "server_time": 5000},  # rtt 200 → offset 5000+100-200=4900
+		{"sent": 300, "recv": 340, "server_time": 5220},  # rtt 40 → offset 5220+20-340=4900 (wins)
+		{"sent": 500, "recv": 900, "server_time": 5300},  # rtt 400, noisier
+	]
+	# server_now ≈ local_now + 4900
+	assert_int(HandyPoints.best_offset_from_samples(samples)).is_equal(4900)
+
+
+func test_best_offset_single_sample() -> void:
+	var samples := [{"sent": 1000, "recv": 1080, "server_time": 999040}]
+	# offset = 999040 + 40 − 1080 = 998000
+	assert_int(HandyPoints.best_offset_from_samples(samples)).is_equal(998000)

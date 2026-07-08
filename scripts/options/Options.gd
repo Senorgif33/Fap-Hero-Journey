@@ -2207,8 +2207,8 @@ func _add_delay_row(parent: VBoxContainer, label_text: String) -> Dictionary:
 	row.add_child(lbl)
 
 	var slider: HSlider = HSlider.new()
-	slider.min_value = -500
-	slider.max_value = 500
+	slider.min_value = -2000
+	slider.max_value = 2000
 	slider.step = 10
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_style_slider(slider)

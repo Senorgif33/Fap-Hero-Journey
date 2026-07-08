@@ -138,8 +138,8 @@ func _hint_label(text: String) -> Label:
 func _add_delay(vb: VBoxContainer, title: String) -> Dictionary:
 	vb.add_child(_section_label(title))
 	var slider: HSlider = HSlider.new()
-	slider.min_value = -500
-	slider.max_value = 500
+	slider.min_value = -2000
+	slider.max_value = 2000
 	slider.step = 10
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vb.add_child(slider)

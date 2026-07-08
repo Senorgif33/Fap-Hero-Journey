@@ -84,6 +84,22 @@ static func _mirror(v: float, mirrored: bool) -> float:
 	return 100.0 - v if mirrored else v
 
 
+# Estimates the client→server clock offset from a set of /servertime samples
+# (each {sent, recv, server_time}, all ms). Keeps the lowest-round-trip sample
+# (least queueing noise) and assumes the server stamped at the round-trip
+# midpoint. Returns `offset` such that server_time_now ≈ local_now + offset —
+# used to fill /hsp/play's server_time so the device can compensate transit lag.
+static func best_offset_from_samples(samples: Array) -> int:
+	var best_rtt: int = 1 << 62
+	var best_offset: int = 0
+	for s: Dictionary in samples:
+		var rtt: int = int(s["recv"]) - int(s["sent"])
+		if rtt < best_rtt:
+			best_rtt = rtt
+			best_offset = int(s["server_time"]) + rtt / 2 - int(s["recv"])
+	return best_offset
+
+
 static func _has_kind(effects: Array, kind: String) -> bool:
 	for e: Dictionary in effects:
 		if str(e.get("kind", "")) == kind:
