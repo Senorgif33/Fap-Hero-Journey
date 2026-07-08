@@ -15,6 +15,11 @@ indent_style = tab
 indent_style = space
 indent_size = 4
 
+# YAML — spaces only (YAML forbids tab indentation; pre-commit config lives here).
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
 # Godot-generated files — leave them as Godot writes them.
 [*.{tscn,tres,godot,import}]
 trim_trailing_whitespace = false
