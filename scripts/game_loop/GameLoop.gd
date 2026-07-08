@@ -19,6 +19,12 @@ const GraphViewScene = preload("res://scenes/graph_view/GraphView.tscn")
 # ---------------------------------------------------------------------------
 
 const HUD_BAR_HEIGHT: int = 68
+# Minimum real cursor travel (px) for a mouse-motion event to count as "activity"
+# that reveals the HUD / cursor. Windows and some touchpads emit phantom
+# InputEventMouseMotion events with (near-)zero relative movement even when nothing
+# is touched — those used to pop the HUD in at random during playback. Any deliberate
+# movement is well above this; raise it if a jittery touchpad still triggers reveals.
+const MOUSE_MOTION_DEADZONE_PX: float = 1.0
 # Playback-capable formats. Intentionally distinct from JourneyData.VIDEO_EXTENSIONS
 # (the import/transcode set): includes "ogv" (Godot-native, no FFmpeg needed) and
 # omits container types that only matter at import time.
@@ -328,6 +334,9 @@ func _show_storyboard_screen(sb_data: Dictionary) -> void:
 	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
+	# An overlay can open with no prior input (e.g. a shop right after a round), so
+	# actively restore the cursor — it may have been hidden mid-playback.
+	_set_cursor_hidden(false)
 	_start_storyboard_filler()
 	var storyboard: Control = StoryboardScene.instantiate()
 	storyboard.show_map_button = _map_enabled
@@ -375,6 +384,9 @@ func _show_shop_screen(shop_data: Dictionary) -> void:
 	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
+	# An overlay can open with no prior input (e.g. a shop right after a round), so
+	# actively restore the cursor — it may have been hidden mid-playback.
+	_set_cursor_hidden(false)
 	var shop: Control = ShopScene.instantiate()
 	shop.show_map_button = _map_enabled
 	shop.closed.connect(_on_shop_closed)
@@ -404,6 +416,9 @@ func _show_fork_screen(fork_data: Dictionary) -> void:
 	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
+	# An overlay can open with no prior input (e.g. a shop right after a round), so
+	# actively restore the cursor — it may have been hidden mid-playback.
+	_set_cursor_hidden(false)
 	var fork_screen = ForkScene.instantiate()
 	fork_screen.show_map_button = _map_enabled
 	fork_screen.path_chosen.connect(_on_fork_path_chosen)
@@ -2128,6 +2143,10 @@ func _set_muffle_fx_enabled(master: int, on: bool) -> void:
 # The Master bus is global — strip our effects when the run scene goes away so
 # the menu (or the next run) starts clean. Mirrors SensoryFX's bus hygiene.
 func _exit_tree() -> void:
+	# Input.mouse_mode is global and survives scene changes, so always hand the
+	# cursor back visible when the run scene goes away (menu / end screen / builder),
+	# no matter which exit path got us here.
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if _muffle_lp == null:
 		return
 	var master: int = AudioServer.get_bus_index("Master")
@@ -2140,6 +2159,9 @@ func _exit_tree() -> void:
 
 
 func _show_hud(fade: bool = false) -> void:
+	# Bringing the HUD back always brings the cursor back with it — real activity
+	# reveals both together.
+	_set_cursor_hidden(false)
 	# A "Fog" curse hides the HUD for the whole round — don't let hover / timers
 	# reveal it.
 	if _curse_hud_hidden:
@@ -2158,6 +2180,27 @@ func _show_hud(fade: bool = false) -> void:
 
 func _on_hide_timer_timeout() -> void:
 	_hud.visible = false
+	# Hide the mouse cursor during uninterrupted playback so it stops covering the
+	# video — but only when there's nothing the player might need to click. If a
+	# menu/overlay/panel/map is up or the round is paused, keep it visible.
+	if _can_hide_cursor():
+		_set_cursor_hidden(true)
+
+
+# True only during active, unobstructed playback — the one state where hiding the
+# cursor is safe (nothing to click). Any interactive surface keeps it visible.
+func _can_hide_cursor() -> bool:
+	if _paused or _is_overlay_open or _map_open:
+		return false
+	if is_instance_valid(_session_panel) or is_instance_valid(_inventory_panel):
+		return false
+	return true
+
+
+func _set_cursor_hidden(hidden: bool) -> void:
+	var want: int = Input.MOUSE_MODE_HIDDEN if hidden else Input.MOUSE_MODE_VISIBLE
+	if Input.mouse_mode != want:
+		Input.mouse_mode = want
 
 
 # Toggles the in-play Quick Settings drawer (stroke range + delay). Mutually exclusive with the
@@ -2184,9 +2227,15 @@ func _on_session_settings_closed() -> void:
 
 
 func _input(event: InputEvent) -> void:
-	# Any activity shows the HUD.
-	if event is InputEventMouseMotion or event is InputEventMouseButton or event is InputEventKey:
+	# Any *real* activity shows the HUD. Mouse-motion is filtered through a deadzone
+	# because the OS/touchpad can emit InputEventMouseMotion with (near-)zero relative
+	# movement when the user isn't touching anything — those phantom events used to
+	# reveal the HUD at random during playback.
+	if event is InputEventMouseButton or event is InputEventKey:
 		_show_hud()
+	elif event is InputEventMouseMotion:
+		if (event as InputEventMouseMotion).relative.length() >= MOUSE_MOTION_DEADZONE_PX:
+			_show_hud()
 
 	# Keyboard hotkeys — evaluated in order of specificity.
 	if event is InputEventKey:
