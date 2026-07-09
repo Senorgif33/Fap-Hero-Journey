@@ -16,6 +16,8 @@ var _intiface_delay_slider: HSlider = null
 var _intiface_delay_lbl: Label = null
 var _serial_delay_slider: HSlider = null
 var _serial_delay_lbl: Label = null
+var _handy_delay_slider: HSlider = null
+var _handy_delay_lbl: Label = null
 
 
 func _ready() -> void:
@@ -97,11 +99,18 @@ func _build() -> void:
 	_serial_delay_lbl.text = "%d ms" % SettingsService.get_serial_delay_ms()
 	_serial_delay_slider.value_changed.connect(_on_serial_delay_changed)
 
+	var d_handy: Dictionary = _add_delay(vb, "HANDY DELAY")
+	_handy_delay_slider = d_handy["slider"]
+	_handy_delay_lbl = d_handy["value"]
+	_handy_delay_slider.set_value_no_signal(SettingsService.get_handy_delay_ms())
+	_handy_delay_lbl.text = "%d ms" % SettingsService.get_handy_delay_ms()
+	_handy_delay_slider.value_changed.connect(_on_handy_delay_changed)
+
 	(
 		vb
 		. add_child(
 			_hint_label(
-				"Shifts each backend's output for device / Bluetooth / serial lag. Positive = acts earlier."
+				"Shifts each backend's output for device / Bluetooth / serial lag. Positive = adds delay (acts later); negative = fires ahead."
 			)
 		)
 	)
@@ -129,8 +138,8 @@ func _hint_label(text: String) -> Label:
 func _add_delay(vb: VBoxContainer, title: String) -> Dictionary:
 	vb.add_child(_section_label(title))
 	var slider: HSlider = HSlider.new()
-	slider.min_value = -500
-	slider.max_value = 500
+	slider.min_value = -2000
+	slider.max_value = 2000
 	slider.step = 10
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vb.add_child(slider)
@@ -149,6 +158,10 @@ func _on_range_changed(lo: float, hi: float) -> void:
 	SettingsService.set_range_max(int(hi))
 	SettingsService.save()
 	FunscriptPlayer.SetRangeClamp(int(lo), int(hi))
+	# Handy-direct: the stroke range is the one modifier that DOES reach the
+	# device — it maps to the slide zone (debounced; drags spam this handler).
+	if SettingsService.get_stroke_target() == DeviceRouting.HANDY_TARGET:
+		HandyService.set_slider_debounced(int(lo), int(hi))
 
 
 func _on_intiface_delay_changed(v: float) -> void:
@@ -163,6 +176,16 @@ func _on_serial_delay_changed(v: float) -> void:
 	SettingsService.set_serial_delay_ms(int(v))
 	SettingsService.save()
 	FunscriptPlayer.SetSerialDelay(int(v))
+
+
+func _on_handy_delay_changed(v: float) -> void:
+	_handy_delay_lbl.text = "%d ms" % int(v)
+	SettingsService.set_handy_delay_ms(int(v))
+	SettingsService.save()
+	# Handy-direct: the delay shifts the play anchor — re-seat the live session
+	# so the change takes effect now (no-op unless the Handy is the stroker).
+	if SettingsService.get_stroke_target() == DeviceRouting.HANDY_TARGET:
+		HandyService.resync_timing()
 
 
 # Nudge the stroke range from GameLoop's arrow-key hotkeys (active only while this panel is open).
@@ -185,6 +208,9 @@ func resync() -> void:
 	if _serial_delay_slider != null:
 		_serial_delay_slider.set_value_no_signal(SettingsService.get_serial_delay_ms())
 		_serial_delay_lbl.text = "%d ms" % SettingsService.get_serial_delay_ms()
+	if _handy_delay_slider != null:
+		_handy_delay_slider.set_value_no_signal(SettingsService.get_handy_delay_ms())
+		_handy_delay_lbl.text = "%d ms" % SettingsService.get_handy_delay_ms()
 
 
 # ── Slide animation (mirrors InventoryPanel) ───────────────────────────────────
