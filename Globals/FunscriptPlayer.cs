@@ -189,7 +189,8 @@ public partial class FunscriptPlayer : Node
 
     /// Current playback clock in milliseconds — used by the beat-bar HUD so it
     /// stays in sync with the device whether video-driven or free-running.
-    public double PositionMs => _positionMs + StrokeDelay();
+    /// A positive delay pushes the device (and this reported position) LATER.
+    public double PositionMs => _positionMs - StrokeDelay();
 
     // Cached autoload references — resolved once instead of looked up per-call
     // (some were hit every frame, per axis, inside _Process). FunscriptPlayer is
@@ -664,10 +665,11 @@ public partial class FunscriptPlayer : Node
             else
                 _positionMs += delta * 1000.0;
 
+            // A positive delay holds each action back (fires it LATER); negative fires it ahead.
             double strokeDelay = StrokeDelay();
             while (_actionIndex < _actions.Count)
             {
-                if (_actions[_actionIndex].AtMs > _positionMs + strokeDelay)
+                if (_actions[_actionIndex].AtMs > _positionMs - strokeDelay)
                     break;
 
                 SendCommand(_actionIndex);
@@ -697,7 +699,7 @@ public partial class FunscriptPlayer : Node
                         AxisState state = multiaxis.Value;
                         while (state.Index < state.Actions.Count)
                         {
-                            if (state.Actions[state.Index].AtMs > _positionMs + _serialDelayMs)
+                            if (state.Actions[state.Index].AtMs > _positionMs - _serialDelayMs)
                                 break;
 
                             int idx = state.Index;
@@ -735,7 +737,7 @@ public partial class FunscriptPlayer : Node
                     var vstate = vibEntry.Value;
                     while (vstate.Index < vstate.Actions.Count)
                     {
-                        if (vstate.Actions[vstate.Index].AtMs > _positionMs + _intifaceDelayMs)
+                        if (vstate.Actions[vstate.Index].AtMs > _positionMs - _intifaceDelayMs)
                             break;
 
                         double intensity = vstate.Actions[vstate.Index].Pos / 100.0 * _vibeIntensity;

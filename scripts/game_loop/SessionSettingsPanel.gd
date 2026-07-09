@@ -110,7 +110,7 @@ func _build() -> void:
 		vb
 		. add_child(
 			_hint_label(
-				"Shifts each backend's output for device / Bluetooth / serial lag. Positive = acts earlier."
+				"Shifts each backend's output for device / Bluetooth / serial lag. Positive = adds delay (acts later); negative = fires ahead."
 			)
 		)
 	)

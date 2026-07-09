@@ -249,13 +249,15 @@ func stop() -> void:
 		await _api_put("/hsp/stop", {})
 
 
-# The playback anchor for a play/seek at video position `video_ms`, shifted by
-# the user's Handy delay (positive = device acts earlier, matching the serial /
-# intiface convention). With server_time sync the base lag is compensated, so
-# the delay is a fine trim; the shift stays well under LOOKAHEAD_MS so the fed
-# buffer always covers the anchored position.
+# The playback anchor for a play/seek at video position `video_ms`, shifted by the
+# user's Handy delay. A POSITIVE delay anchors playback to an EARLIER script position,
+# so the device lands LATER relative to the video — i.e. positive = more delay (the
+# intuitive "delay" direction; a device that runs ahead of its own accord is pulled back
+# with a negative value). With server_time sync the base lag is compensated, so the delay
+# is a fine trim; the shift stays well under LOOKAHEAD_MS so the fed buffer always covers
+# the anchored position.
 func _anchor(video_ms: int) -> int:
-	return maxi(0, video_ms + SettingsService.get_handy_delay_ms())
+	return maxi(0, video_ms - SettingsService.get_handy_delay_ms())
 
 
 # Re-seats playback at a new position: flush the buffer and replay from
