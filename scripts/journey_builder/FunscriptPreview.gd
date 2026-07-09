@@ -337,7 +337,19 @@ func _build_tuning_strip() -> Control:
 		group.add_child(row)
 		strip.add_child(group)
 
-	return strip if any else null
+	if not any:
+		return null
+
+	# Wrap the controls with a caption so the strip reads as interactive, not decorative.
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
+	box.add_child(strip)
+	var caption: Label = Label.new()
+	caption.text = "Drag to reshape the strokes — the curve updates live and saves to the round."
+	caption.add_theme_font_size_override("font_size", 10)
+	caption.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	box.add_child(caption)
+	return box
 
 
 # One SpinBox editing `m[spec.key]` in place: rewrites the modifier params, redraws the

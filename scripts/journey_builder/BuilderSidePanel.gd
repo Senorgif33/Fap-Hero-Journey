@@ -1216,12 +1216,19 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	_update_funscript_readout(fs_stats_lbl, round_data.get("funscript_path", ""))
 	col.add_child(fs_stats_lbl)
 
-	# Preview the funscript curve (and any stroke modifiers a boss / cursed /
-	# blessed round applies to it) in a graph overlay. Enabled once a funscript
-	# is attached.
-	var preview_btn: Button = UITheme.make_icon_btn(
-		"📈 PREVIEW FUNSCRIPT", round_data.get("funscript_path", "") == "", UITheme.CYAN
+	# Preview the funscript curve (and any stroke modifiers the round applies to it) in a
+	# graph overlay. Effect rounds also tune scale/clamp magnitudes live in there, so the
+	# button advertises it. Enabled once a funscript is attached.
+	var is_effect_round: bool = (
+		JourneyData.normalize_effect_round(arr[idx]).get("round_type", "") == "effect"
 	)
+	var preview_btn: Button = UITheme.make_icon_btn(
+		"📈 PREVIEW & TUNE FUNSCRIPT" if is_effect_round else "📈 PREVIEW FUNSCRIPT",
+		round_data.get("funscript_path", "") == "",
+		UITheme.CYAN
+	)
+	if is_effect_round:
+		preview_btn.tooltip_text = "Preview the strokes and drag scale/clamp effects to tune them live."
 	preview_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	preview_btn.pressed.connect(
 		func() -> void:
@@ -2479,6 +2486,13 @@ func _make_effect_expander(arr: Array, idx: int, reselect: Callable) -> Control:
 	wrapper.add_child(rand_toggle)
 
 	var selected: Array = arr[idx].get("effects", [])
+	var custom_hint: Label = Label.new()
+	custom_hint.text = "Tick an effect to rename it, reflavor it, or tune its strength."
+	custom_hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	custom_hint.add_theme_font_size_override("font_size", 10)
+	custom_hint.uppercase = true
+	custom_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrapper.add_child(custom_hint)
 	wrapper.add_child(_side_field_label("HINDRANCES  (NONE TICKED = NO EFFECT)"))
 	for entry: Dictionary in JourneyData.CURSE_CATALOG:
 		wrapper.add_child(_make_effect_row(arr, idx, entry, selected))
