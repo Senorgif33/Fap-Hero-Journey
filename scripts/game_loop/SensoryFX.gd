@@ -10,7 +10,7 @@ extends Node
 # Fracture / Swoon), the Tremor shake, the Silence mute, and the dedicated
 # VideoFX audio bus (Muffled / Cavern / Distorted / Faltering).
 #
-# GameLoop creates one in _build_curse_overlay and routes every hex through
+# GameLoop creates one in _build_effect_overlay and routes every hex through
 # apply(); kinds this component doesn't own (gameplay hexes — Fog / Toll /
 # Restless / Blinded) return false and stay GameLoop's problem. clear_all()
 # tears every effect down; _exit_tree cleans the global audio bus so nothing

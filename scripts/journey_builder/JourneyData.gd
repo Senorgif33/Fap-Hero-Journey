@@ -85,7 +85,7 @@ const CURSE_CATALOG: Array = [
 		"name": "Pauper",
 		"desc": "No coins are earned this round."
 	},
-	{"kind": "toll", "name": "Toll", "desc": "Lose 40 coins immediately."},
+	{"kind": "toll", "amount": 40, "name": "Toll", "desc": "Lose 40 coins immediately."},
 	{"kind": "hud_hide", "name": "Fog", "desc": "The HUD is hidden for the whole round."},
 	{"kind": "no_pause", "name": "Restless", "desc": "You can't pause this round."},
 ]
@@ -296,14 +296,275 @@ const BLESSING_CATALOG: Array = [
 	},
 	{"kind": "scale", "factor": 1.35, "name": "Surge", "desc": "Stronger, longer strokes."},
 	{"kind": "gift", "name": "Gift", "desc": "Start the round holding a free item."},
-	{"kind": "ward", "name": "Ward", "desc": "The next curse is repelled automatically."},
 	{
 		"kind": "lingering",
 		"name": "Lingering",
 		"desc": "Your active item effects don't run out this round."
 	},
-	{"kind": "interest", "name": "Interest", "desc": "Gain coins equal to 25% of your balance."},
+	{
+		"kind": "interest",
+		"pct": 0.25,
+		"name": "Interest",
+		"desc": "Gain coins equal to 25% of your balance."
+	},
 ]
+
+# ── Effect rounds (unified cursed/blessed) ───────────────────────────────────
+# An Effect Round applies a mix of gameplay effects (hindrances and/or boons) plus
+# an optional always-on sensory layer, framed by author-set visuals (border colour,
+# card accent, header text, icon glyph — no theme indirection), with an optional
+# "resolvable" layer (pay to cleanse / endure for a reward). It replaces the retired
+# cursed/blessed round types; legacy rounds migrate via normalize_effect_round (below)
+# on load and re-save.
+
+# Default effect-round colours (concrete hex, so every effect round carries real values).
+# New rounds get the neutral look; migrated legacy rounds keep their old colour + label.
+const EFFECT_COLOR_NEUTRAL: String = "#99bfff"  # cool blue
+const EFFECT_COLOR_HINDER: String = "#73f24d"  # toxic green (old cursed)
+const EFFECT_COLOR_BOON: String = "#ffd64d"  # gold (old blessed)
+
+
+# The gameplay effects an Effect Round can apply: the hindrance (negative) and boon
+# (positive) catalogs merged. Sensory modifiers are a separate always-apply layer
+# (SENSORY_CATALOG) with their own picker + intensity — not part of this list.
+static func gameplay_effects() -> Array:
+	return CURSE_CATALOG + BLESSING_CATALOG
+
+
+# True when `name` is a positive (boon) effect — drives the green-vs-red chip / card colour.
+static func effect_is_benefit(name: String) -> bool:
+	for e: Dictionary in BLESSING_CATALOG:
+		if str(e.get("name", "")) == name:
+			return true
+	return false
+
+
+# Looks up an effect entry by name across every catalog (gameplay + sensory). {} if unknown.
+static func effect_entry(name: String) -> Dictionary:
+	for cat: Array in [CURSE_CATALOG, BLESSING_CATALOG, SENSORY_CATALOG]:
+		for e: Dictionary in cat:
+			if str(e.get("name", "")) == name:
+				return e
+	return {}
+
+
+# Stroke-modifier kinds — these change the funscript curve, so their magnitude is tuned
+# live in the funscript preview (where the author can watch the strokes), not the side
+# panel. reverse/block are stroke kinds but carry no magnitude.
+const STROKE_EFFECT_KINDS: Array = ["scale", "clamp", "reverse", "block"]
+
+
+static func is_stroke_effect(kind: String) -> bool:
+	return kind in STROKE_EFFECT_KINDS
+
+
+# The tunable numeric parameter(s) for an effect kind, each a spec the authoring controls
+# read: {key, label, ctl, min, max, step}. `ctl` picks the control style — "pct" (0–1 shown
+# as %), "mult" (× multiplier), "coins" (whole coins), "pos" (0–100 stroke position). Empty
+# for binary kinds (reverse/block/hud_hide/no_pause/gift/lingering).
+static func effect_param_specs(kind: String) -> Array:
+	match kind:
+		"scale":
+			return [
+				{
+					"key": "factor",
+					"label": "Stroke length",
+					"ctl": "pct",
+					"min": 0.1,
+					"max": 2.0,
+					"step": 0.05
+				}
+			]
+		"clamp":
+			return [
+				{"key": "min", "label": "Range min", "ctl": "pos", "min": 0, "max": 100, "step": 1},
+				{"key": "max", "label": "Range max", "ctl": "pos", "min": 0, "max": 100, "step": 1},
+			]
+		"coin_penalty":
+			return [
+				{
+					"key": "factor",
+					"label": "Coins kept",
+					"ctl": "pct",
+					"min": 0.0,
+					"max": 1.0,
+					"step": 0.05
+				}
+			]
+		"coin_jackpot":
+			return [
+				{
+					"key": "factor",
+					"label": "Coin ×",
+					"ctl": "mult",
+					"min": 1.0,
+					"max": 10.0,
+					"step": 0.25
+				}
+			]
+		"score_multiplier":
+			return [
+				{
+					"key": "factor",
+					"label": "Score ×",
+					"ctl": "mult",
+					"min": 1.0,
+					"max": 10.0,
+					"step": 0.25
+				}
+			]
+		"toll":
+			return [
+				{
+					"key": "amount",
+					"label": "Coins taken",
+					"ctl": "coins",
+					"min": 0,
+					"max": 100000,
+					"step": 5
+				}
+			]
+		"interest":
+			return [
+				{
+					"key": "pct",
+					"label": "Balance %",
+					"ctl": "pct",
+					"min": 0.0,
+					"max": 1.0,
+					"step": 0.05
+				}
+			]
+		_:
+			return []
+
+
+# A catalog effect entry merged with the round's per-effect override diff. `overrides` is the
+# round's effect_overrides map (name → {changed params/name/desc}); only present keys win, so
+# untouched params keep the catalog default. Stamps `_ref` = the original catalog name so
+# valence (effect_is_benefit) and re-lookup still work after a custom rename. {} if unknown.
+static func resolved_effect(name: String, overrides: Dictionary) -> Dictionary:
+	var base: Dictionary = effect_entry(name)
+	if base.is_empty():
+		return {}
+	var out: Dictionary = base.duplicate(true)
+	var ov: Dictionary = overrides.get(name, {})
+	for k: String in ov:
+		out[k] = ov[k]
+	out["_ref"] = name
+	return out
+
+
+# All names in `catalog`, in order. Used to bake a legacy round's "empty = full random
+# pool" into an explicit effects list at migration, so the roll scope (hindrances-only /
+# boons-only) survives the drop of the theme concept.
+static func _catalog_names(catalog: Array) -> Array:
+	var out: Array = []
+	for e: Dictionary in catalog:
+		out.append(str(e.get("name", "")))
+	return out
+
+
+static func _nonblank(value: String, fallback: String) -> String:
+	return value if value != "" else fallback
+
+
+# Canonical Effect-Round field set + legacy migration. Given any round-shaped dict that
+# carries either the new generic fields (round_type "effect") or the retired cursed/blessed
+# schema, returns the fully-typed generic effect fields (visuals always concrete). Non-effect
+# rounds (normal/boss) pass their round_type through and still receive defaulted effect fields.
+#
+# This is the single migration point: coerce_node_save_data merges it in on SAVE (so re-saving
+# a legacy journey rewrites it as generic — "migrate on next save"), and the runtime / scanners
+# merge it in on LOAD (so an un-re-saved legacy journey still plays). Pure → unit-tested.
+static func normalize_effect_round(src: Dictionary) -> Dictionary:
+	var rtype: String = str(src.get("round_type", "normal")).to_lower()
+	var effects: Array = []
+	var effect_random: bool
+	var resolvable: bool
+	var endure_reward: int
+	var frame_color: String
+	var card_accent: String
+	var card_header: String
+	var card_icon: String
+	var show_border: bool
+
+	match rtype:
+		"cursed":
+			var curses: Array = src.get("curses", [])
+			if curses.is_empty():
+				effects = _catalog_names(CURSE_CATALOG)  # was "empty = full curse pool"
+			else:
+				for n: Variant in curses:
+					effects.append(str(n))
+			effect_random = bool(src.get("curse_random", true))
+			resolvable = true
+			endure_reward = int(src.get("curse_reward", 0))
+			frame_color = EFFECT_COLOR_HINDER
+			card_accent = EFFECT_COLOR_HINDER
+			card_header = "CURSED"
+			card_icon = "☠"
+			show_border = true  # legacy cursed rounds had a frame — keep it (tint-free now)
+			rtype = "effect"
+		"blessed":
+			for n: Variant in src.get("boons", []):
+				if str(n) != "Ward":  # retired boon — dropped on migration
+					effects.append(str(n))
+			if effects.is_empty():
+				effects = _catalog_names(BLESSING_CATALOG)  # was "empty = full boon pool"
+			effect_random = bool(src.get("boon_random", true))
+			resolvable = false
+			endure_reward = 0
+			frame_color = EFFECT_COLOR_BOON
+			card_accent = EFFECT_COLOR_BOON
+			card_header = "BLESSED"
+			card_icon = "✦"
+			show_border = true  # legacy blessed rounds had a frame — keep it (tint-free now)
+			rtype = "effect"
+		"effect":
+			for n: Variant in src.get("effects", []):
+				effects.append(str(n))
+			effect_random = bool(src.get("effect_random", true))
+			resolvable = bool(src.get("resolvable", false))
+			endure_reward = int(src.get("endure_reward", 0))
+			frame_color = _nonblank(str(src.get("frame_color", "")), EFFECT_COLOR_NEUTRAL)
+			card_accent = _nonblank(str(src.get("card_accent", "")), EFFECT_COLOR_NEUTRAL)
+			card_header = _nonblank(str(src.get("card_header", "")), "EFFECT")
+			card_icon = _nonblank(str(src.get("card_icon", "")), "✦")
+			show_border = bool(src.get("show_border", false))  # new rounds: border off by default
+		_:  # normal / boss — effect fields defaulted (unused).
+			effect_random = bool(src.get("effect_random", true))
+			resolvable = bool(src.get("resolvable", false))
+			endure_reward = int(src.get("endure_reward", 0))
+			frame_color = _nonblank(str(src.get("frame_color", "")), EFFECT_COLOR_NEUTRAL)
+			card_accent = _nonblank(str(src.get("card_accent", "")), EFFECT_COLOR_NEUTRAL)
+			card_header = _nonblank(str(src.get("card_header", "")), "EFFECT")
+			card_icon = _nonblank(str(src.get("card_icon", "")), "✦")
+			show_border = false
+
+	return {
+		"round_type": rtype,
+		"effects": effects,
+		"effect_random": effect_random,
+		"resolvable": resolvable,
+		"cleanse_cost": int(src.get("cleanse_cost", 50)),
+		"endure_reward": endure_reward,
+		"frame_color": frame_color,
+		"card_accent": card_accent,
+		"card_header": card_header,
+		"card_icon": card_icon,
+		"show_border": show_border,
+		# Per-effect tuning + custom name/flavor (name → diff of changed params). Legacy
+		# rounds carry none → catalog defaults; deep-copied so edits never alias the source.
+		"effect_overrides": (src.get("effect_overrides", {}) as Dictionary).duplicate(true),
+		# Sensory layer (shared with boss rounds) — kept as-is.
+		"sensory": (src.get("sensory", []) as Array).duplicate(),
+		"sensory_in_pool": bool(src.get("sensory_in_pool", false)),
+		"sensory_intensity": (src.get("sensory_intensity", {}) as Dictionary).duplicate(),
+		"gift_item": str(src.get("gift_item", "")),
+		"show_reveal": bool(src.get("show_reveal", true)),
+	}
+
 
 # ── Round serialization ──────────────────────────────────────────────────────
 
@@ -334,21 +595,18 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			# The full round field set, lowercase. Media paths (funscript/video/boss/axis/vib) +
 			# action_count/length_ms + folder are overwritten afterwards by _save_round_node_media.
 			out["coins"] = int(data.get("coins", 0))
-			out["round_type"] = str(data.get("round_type", "normal"))
 			out["is_checkpoint"] = bool(data.get("is_checkpoint", false))
-			out["curse_reward"] = int(data.get("curse_reward", 0))
-			out["cleanse_cost"] = int(data.get("cleanse_cost", 50))
-			out["curse_random"] = bool(data.get("curse_random", true))
-			out["boon_random"] = bool(data.get("boon_random", true))
-			out["gift_item"] = str(data.get("gift_item", ""))
 			out["boss_tagline"] = str(data.get("boss_tagline", ""))
-			out["sensory_in_pool"] = bool(data.get("sensory_in_pool", false))
-			out["show_reveal"] = bool(data.get("show_reveal", true))
-			_fill_default(out, "curses", [])
-			_fill_default(out, "boons", [])
 			_fill_default(out, "boss_modifiers", [])  # lowercase {kind,…}; deep-copied pass-through
-			_fill_default(out, "sensory", [])
-			_fill_default(out, "sensory_intensity", {})
+			# Effect-round fields, migrated from any legacy cursed/blessed schema. Drop the retired
+			# keys first so re-saving a legacy round actually rewrites them out (migrate-on-save);
+			# normalize_effect_round then supplies the canonical set (round_type, effects,
+			# resolvable, sensory layer, framing colours, …). "theme" is a retired interim key.
+			for legacy: String in [
+				"curses", "boons", "curse_random", "boon_random", "curse_reward", "theme"
+			]:
+				out.erase(legacy)
+			out.merge(normalize_effect_round(data), true)
 		"shop":
 			out["title"] = str(data.get("title", ""))
 			out["mode"] = str(data.get("mode", "pool"))
@@ -566,43 +824,24 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 	# order is preserved after a round-trip through disk.
 	var seq: Array = []
 	for r: Dictionary in rounds:
-		(
-			seq
-			. append(
-				{
-					"key": (r.get("order", 0) as int) * 3,
-					"data":
-					{
-						"type": "round",
-						"name": r.get("name", ""),
-						"funscript_path": r.get("funscript_path", ""),
-						"axis_scripts": r.get("axis_scripts", {}),
-						"vib_scripts": r.get("vib_scripts", {}),
-						"round_type": r.get("round_type", "normal"),
-						"is_checkpoint": bool(r.get("is_checkpoint", false)),
-						"curse_reward": int(r.get("curse_reward", 0)),
-						"cleanse_cost": int(r.get("cleanse_cost", 50)),
-						"curse_random": bool(r.get("curse_random", true)),
-						"curses": (r.get("curses", []) as Array).duplicate(),
-						"boon_random": bool(r.get("boon_random", true)),
-						"boons": (r.get("boons", []) as Array).duplicate(),
-						"gift_item": r.get("gift_item", ""),
-						"boss_image": r.get("boss_image", ""),
-						"boss_tagline": r.get("boss_tagline", ""),
-						"boss_modifiers": r.get("boss_modifiers", []),
-						"sensory": (r.get("sensory", []) as Array).duplicate(),
-						"sensory_in_pool": bool(r.get("sensory_in_pool", false)),
-						"sensory_intensity":
-						(r.get("sensory_intensity", {}) as Dictionary).duplicate(),
-						"show_reveal": bool(r.get("show_reveal", true)),
-						"video_path": _round_video(r),
-						"coins": r.get("coins", 0),
-						"original_folder": r.get("folder", ""),
-						"node_id": r.get("node_id", ""),
-					},
-				}
-			)
-		)
+		var rd: Dictionary = {
+			"type": "round",
+			"name": r.get("name", ""),
+			"funscript_path": r.get("funscript_path", ""),
+			"axis_scripts": r.get("axis_scripts", {}),
+			"vib_scripts": r.get("vib_scripts", {}),
+			"is_checkpoint": bool(r.get("is_checkpoint", false)),
+			"boss_image": r.get("boss_image", ""),
+			"boss_tagline": r.get("boss_tagline", ""),
+			"boss_modifiers": r.get("boss_modifiers", []),
+			"video_path": _round_video(r),
+			"coins": r.get("coins", 0),
+			"original_folder": r.get("folder", ""),
+			"node_id": r.get("node_id", ""),
+		}
+		# Effect-round + sensory fields (migrates legacy cursed/blessed → generic).
+		rd.merge(normalize_effect_round(r), true)
+		seq.append({"key": (r.get("order", 0) as int) * 3, "data": rd})
 	for sb: Dictionary in storyboards:
 		(
 			seq
@@ -726,43 +965,24 @@ static func _build_fork_item(f: Dictionary) -> Dictionary:
 static func _build_path_items(p: Dictionary) -> Array:
 	var sub: Array = []
 	for pr: Dictionary in p.get("rounds", []):
-		(
-			sub
-			. append(
-				{
-					"key": (pr.get("order", 0) as int) * 3,
-					"data":
-					{
-						"type": "round",
-						"name": pr.get("name", ""),
-						"funscript_path": pr.get("funscript_path", ""),
-						"axis_scripts": pr.get("axis_scripts", {}),
-						"vib_scripts": pr.get("vib_scripts", {}),
-						"round_type": pr.get("round_type", "normal"),
-						"is_checkpoint": bool(pr.get("is_checkpoint", false)),
-						"curse_reward": int(pr.get("curse_reward", 0)),
-						"cleanse_cost": int(pr.get("cleanse_cost", 50)),
-						"curse_random": bool(pr.get("curse_random", true)),
-						"curses": (pr.get("curses", []) as Array).duplicate(),
-						"boon_random": bool(pr.get("boon_random", true)),
-						"boons": (pr.get("boons", []) as Array).duplicate(),
-						"gift_item": pr.get("gift_item", ""),
-						"boss_image": pr.get("boss_image", ""),
-						"boss_tagline": pr.get("boss_tagline", ""),
-						"boss_modifiers": pr.get("boss_modifiers", []),
-						"sensory": (pr.get("sensory", []) as Array).duplicate(),
-						"sensory_in_pool": bool(pr.get("sensory_in_pool", false)),
-						"sensory_intensity":
-						(pr.get("sensory_intensity", {}) as Dictionary).duplicate(),
-						"show_reveal": bool(pr.get("show_reveal", true)),
-						"video_path": _round_video(pr),
-						"coins": pr.get("coins", 0),
-						"original_folder": pr.get("folder", ""),
-						"node_id": pr.get("node_id", ""),
-					},
-				}
-			)
-		)
+		var rd: Dictionary = {
+			"type": "round",
+			"name": pr.get("name", ""),
+			"funscript_path": pr.get("funscript_path", ""),
+			"axis_scripts": pr.get("axis_scripts", {}),
+			"vib_scripts": pr.get("vib_scripts", {}),
+			"is_checkpoint": bool(pr.get("is_checkpoint", false)),
+			"boss_image": pr.get("boss_image", ""),
+			"boss_tagline": pr.get("boss_tagline", ""),
+			"boss_modifiers": pr.get("boss_modifiers", []),
+			"video_path": _round_video(pr),
+			"coins": pr.get("coins", 0),
+			"original_folder": pr.get("folder", ""),
+			"node_id": pr.get("node_id", ""),
+		}
+		# Effect-round + sensory fields (migrates legacy cursed/blessed → generic).
+		rd.merge(normalize_effect_round(pr), true)
+		sub.append({"key": (pr.get("order", 0) as int) * 3, "data": rd})
 	for psb: Dictionary in p.get("storyboards", []):
 		(
 			sub
@@ -1211,9 +1431,19 @@ static func graph_video_sources(graph: Dictionary) -> Array:
 # (Moved from JourneyBuilder.gd — used by the save flow.)
 static func sanitize_folder_name(name: String) -> String:
 	const INVALID: String = '\\/:*?"<>|'
+	# Trim surrounding whitespace FIRST — otherwise leading/trailing spaces become
+	# underscores below and can no longer be stripped.
 	var result: String = ""
-	for ch: String in name:
+	for ch: String in name.strip_edges():
 		if ch in INVALID:
 			continue
 		result += "_" if ch == " " else ch
+	# Windows forbids folder names ending in a dot or space — NTFS lets Godot create them
+	# via native paths, but Win32/Explorer then can't open or delete them ("location is not
+	# available"). And a LEADING dot makes JourneyScanner.scan_all skip the folder (it hides
+	# ".~save_*" staging), so the journey would save yet never appear in the catalogue.
+	while result.length() > 0 and (result.ends_with(".") or result.ends_with(" ")):
+		result = result.substr(0, result.length() - 1)
+	while result.begins_with("."):
+		result = result.substr(1)
 	return result if result != "" else "Journey"

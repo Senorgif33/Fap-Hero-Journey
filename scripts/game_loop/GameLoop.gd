@@ -128,48 +128,43 @@ var _boss_frame: Panel = null
 # boss round — items stay usable (the player can fight back), it hits mid-flow
 # with no telegraph, and it has its own sickly "hex" identity (see below). Set
 # when the round loads, cleared at round end.
-var _is_cursed_round: bool = false
-# Gameplay curses come from JourneyData.CURSE_CATALOG; non-gameplay visual/audio
-# modifiers from JourneyData.SENSORY_CATALOG. A cursed round rolls a gameplay
-# curse (random) or applies an author-selected set, plus any ticked sensory
-# modifiers (and, if enabled, random sensory ones from the pool). Stroke curses
-# are applied by FunscriptPlayer; the rest (coin/hud/sensory) by GameLoop. All go
-# into the boss-effects list so they also surface as named HUD chips and are
-# lifted together on cleanse.
-#
-# Chance a *random* cursed round rolls TWO curses instead of one ("double-cursed").
-const DOUBLE_CURSE_CHANCE: float = 0.22
+# Effect round — the unified "twist" round (replaces the retired cursed/blessed
+# types). Applies a mix of gameplay effects (hindrances and/or boons, from
+# CURSE_CATALOG + BLESSING_CATALOG) plus an optional always-on sensory layer
+# (SENSORY_CATALOG), framed by author-set visuals (border/accent colour, header, icon),
+# with an optional "resolvable" layer (pay to cleanse / endure for a reward). Stroke
+# effects are applied by
+# FunscriptPlayer; the rest (coin/hud/sensory/boon behaviours) by GameLoop. All go
+# into the boss-effects list so they surface as named HUD chips and lift together on
+# cleanse. Set when the round loads, cleared at round end.
+var _is_effect_round: bool = false
+var _effect_resolvable: bool = false  # the round carries the cleanse/endure layer
+
+# Chance a *random* effect round rolls TWO effects instead of one.
+const DOUBLE_EFFECT_CHANCE: float = 0.22
 const CLEANSE_COST_DEFAULT: int = 50
 
-var _curse_frame: Panel = null  # green "hex" border (cursed counterpart to _boss_frame)
-var _curse_tint: ColorRect = null  # faint sickly tint over the play area
+var _effect_frame: Panel = null  # optional coloured edge border (author-toggled per round)
 # The non-gameplay (visual/audio) modifier engine — overlays, video shader,
-# audio bus, tremor, mute. Built in _build_curse_overlay; every hex routes
+# audio bus, tremor, mute. Built in _build_effect_overlay; every hex routes
 # through it first (see _apply_hex). Gameplay hexes below stay here.
 var _sensory: SensoryFX = null
-var _curse_hud_hidden: bool = false  # a "Fog" hex hid the HUD for this round
-var _curse_no_pause: bool = false  # a "Restless" hex disabled pausing this round
-const TOLL_AMOUNT: int = 40  # coins a "Toll" hex takes immediately
+var _curse_hud_hidden: bool = false  # a "Fog" effect hid the HUD for this round
+var _curse_no_pause: bool = false  # a "Restless" effect disabled pausing this round
+const TOLL_AMOUNT: int = 40  # coins a "Toll" effect takes immediately
 
-# Blessed round — the positive mirror of cursed. Applies boon(s) from
-# JourneyData.BLESSING_CATALOG (gold frame, no cleanse/cost). Some boons carry
-# state: Ward shields the next curse, Lingering freezes the effect clock.
-var _is_blessed_round: bool = false
-var _blessing_frame: Panel = null  # gold frame
-var _blessing_tint: ColorRect = null  # faint gold tint
-var _ward_next_curse: bool = false  # a "Ward" boon repels the next curse
-var _blessing_lingering: bool = false  # a "Lingering" boon froze the effect clock
+var _effect_lingering: bool = false  # a "Lingering" boon froze the effect clock
 const INTEREST_PCT: float = 0.25  # "Interest" boon pays this fraction of the coin balance
-# Effects to show on the pre-round reveal card for a cursed/blessed round. Each:
-# {name, desc, benefit:bool}. Empty = no card (normal/boss rounds, warded curse).
+# Effects to show on the pre-round reveal card. Each: {name, desc, benefit:bool}.
+# Empty = no card (normal/boss rounds).
 var _reveal_effects: Array = []
 const REVEAL_HOLD_SECS: float = 2.6
-# Cleanse / endure decision: pay to lift the curse mid-round, or endure it to the
-# end for the round's curse_reward bonus. Its own floating button (not in the HUD,
-# so a Fog hex can't lock the player out of cleansing).
-var _curse_cleansed: bool = false
-var _curse_cleanse_btn: Button = null
-var _curse_cleanse_cost: int = CLEANSE_COST_DEFAULT  # per-round, set on curse enter
+# Cleanse / endure decision (only when the round is resolvable): pay to lift the
+# effects mid-round, or endure to the end for the round's endure_reward bonus. Its
+# own floating button (not in the HUD, so a Fog effect can't lock the player out).
+var _effect_resolved: bool = false
+var _effect_cleanse_btn: Button = null
+var _effect_cleanse_cost: int = CLEANSE_COST_DEFAULT  # per-round, set on enter
 
 # Optional beat-bar visualiser — created only when the setting is enabled.
 var _beat_bar: Control = null
@@ -197,7 +192,7 @@ func _ready() -> void:
 	_apply_layout()
 	_apply_theme()
 	_build_boss_frame()
-	_build_curse_overlay()
+	_build_effect_overlay()
 	_build_beat_bar()
 	# Journey-level: the author can disable the player map to enforce surprise.
 	_map_enabled = bool(GameState.Journey.get("map_enabled", true))
@@ -277,10 +272,8 @@ func _process(delta: float) -> void:
 	_update_chip_countdowns()
 	if _is_boss_round:
 		_update_boss_frame()
-	elif _is_cursed_round:
-		_update_curse_frame()
-	elif _is_blessed_round:
-		_update_blessing_frame()
+	elif _is_effect_round:
+		_update_effect_frame()
 	if _beat_bar != null:
 		_beat_bar.set_time(FunscriptPlayer.PositionMs)
 
@@ -516,11 +509,14 @@ func _on_fork_path_chosen(path_index: int) -> void:
 
 
 func _load_current_round() -> void:
-	var round: Dictionary = GameState.CurrentRound()
+	var round: Dictionary = GameState.CurrentRound().duplicate(true)
 	if round.is_empty():
 		push_error("GameLoop: GameState has no current round — returning to menu")
 		_go_to_menu()
 		return
+	# Migrate any legacy cursed/blessed round to the generic effect schema here, once,
+	# so every downstream reader (label, enter mode, reveal card) sees generic fields.
+	round.merge(JourneyData.normalize_effect_round(round), true)
 
 	var total: int = GameState.TotalRounds()
 	var num: int = GameState.RoundNumber
@@ -532,18 +528,16 @@ func _load_current_round() -> void:
 
 	var rtype: String = round.get("round_type", "normal")
 	_is_boss_round = rtype == "boss"
-	_is_cursed_round = rtype == "cursed"
-	_is_blessed_round = rtype == "blessed"
+	_is_effect_round = rtype == "effect"
 	if _is_boss_round:
 		_round_lbl.text = (
 			"⚔  BOSS  %d / %d  —  %s" % [num, total, (round.get("name", "") as String).to_upper()]
 		)
 	else:
 		var prefix: String = "ROUND"
-		if _is_cursed_round:
-			prefix = "☠  CURSED"
-		elif _is_blessed_round:
-			prefix = "✦  BLESSED"
+		if _is_effect_round:
+			var v: Dictionary = _effect_visuals(round)
+			prefix = "%s  %s" % [v["icon"], v["header"]]
 		_round_lbl.text = (
 			"%s %d / %d  —  %s" % [prefix, num, total, (round.get("name", "") as String).to_upper()]
 		)
@@ -602,22 +596,20 @@ func _begin_round(round: Dictionary) -> void:
 			var channel: int = 0 if ch_key == "vib1" else 1
 			FunscriptPlayer.LoadVibScript(channel, vib_path)
 
-	# Boss / curse setup must run before _load_video → FunscriptPlayer.Play() so
+	# Boss / effect setup must run before _load_video → FunscriptPlayer.Play() so
 	# the forced modifier is already active on the first dispatched stroke. Each
 	# enter_*_mode populates _reveal_effects for the pre-round card.
 	_reveal_effects = []
 	if _is_boss_round:
 		_enter_boss_mode(round)
-	elif _is_cursed_round:
-		_enter_cursed_mode()
-	elif _is_blessed_round:
-		_enter_blessed_mode()
+	elif _is_effect_round:
+		_enter_effect_mode(round)
 
-	# Cursed / blessed rounds get an animated reveal card naming the effect(s)
-	# before playback starts (auto-advances; the cleanse choice stays in-round) —
-	# unless the author turned the intro card off for this round.
-	if not _reveal_effects.is_empty() and bool(round.get("show_reveal", true)):
-		await _show_reveal_card(_is_blessed_round)
+	# Effect rounds get an animated intro card before playback starts (auto-advances; any
+	# cleanse choice stays in-round) — whenever the author left it on, even with no effects
+	# (a pure-visual round shows just the header). Normal/boss rounds never show it.
+	if _is_effect_round and bool(round.get("show_reveal", true)):
+		await _show_reveal_card(round)
 
 	# Prefer the explicit video_path (set by the scanner from VideoPath, or by
 	# JourneyData._round_video); fall back to a folder-scan for pre-VideoPath
@@ -833,36 +825,74 @@ func _enter_boss_mode(round: Dictionary) -> void:
 		_boss_frame.modulate.a = 0.5
 
 
-# Applies this round's curse(s) as boss effects — author-selected/fixed, or rolled
-# from the catalog. Unlike a boss round, items stay usable so the player can
-# counter (or cleanse) it.
-# Applies this round's boon(s) — author-selected/fixed or rolled from the
-# catalog. Pure upside: no cleanse, no cost. score_multiplier/coin_jackpot/scale
-# ride the existing pipelines; gift/ward/lingering/interest are applied here.
-func _enter_blessed_mode() -> void:
-	var round: Dictionary = GameState.CurrentRound()
-	var selected: Array = round.get("boons", [])
-	var random_mode: bool = bool(round.get("boon_random", true))
-	var to_apply: Array
-	if selected.is_empty():
-		to_apply = _roll_from(JourneyData.BLESSING_CATALOG)
-	elif random_mode:
-		to_apply = _roll_from(_catalog_subset(JourneyData.BLESSING_CATALOG, selected))
-	else:
-		to_apply = _catalog_subset(JourneyData.BLESSING_CATALOG, selected)
+# Applies this round's effect(s) as boss effects — author-selected/fixed, or rolled
+# from the merged pool. Unlike a boss round, items stay usable so the player can
+# counter (or, when the round is resolvable, cleanse) them. Hindrances and boons mix
+# freely; each effect's valence (its source catalog) colours its chip / card line.
+func _enter_effect_mode(round: Dictionary) -> void:
+	_effect_resolvable = bool(round.get("resolvable", false))
+	_effect_cleanse_cost = int(round.get("cleanse_cost", CLEANSE_COST_DEFAULT))
+
+	var selected: Array = round.get("effects", [])
+	var random_mode: bool = bool(round.get("effect_random", true))
+	var sensory_in_pool: bool = bool(round.get("sensory_in_pool", false))
+
+	# GAMEPLAY effects (hindrances + boons) come only from the author's ticked list. NONE
+	# ticked = no gameplay effect — the round is then a pure visual (intro card + optional
+	# border). Random rolls one from the ticked set; fixed applies them all.
+	var to_apply: Array = []
+	if not selected.is_empty():
+		if random_mode:
+			var pool: Array = _catalog_subset(JourneyData.gameplay_effects(), selected)
+			if sensory_in_pool:
+				pool = pool + JourneyData.SENSORY_CATALOG
+			to_apply = _roll_from(pool)
+		else:
+			to_apply = _catalog_subset(JourneyData.gameplay_effects(), selected)
+
+	# Ticked non-gameplay (sensory) modifiers always apply (deduped against the roll).
+	for s: Dictionary in _catalog_subset(JourneyData.SENSORY_CATALOG, round.get("sensory", [])):
+		if s not in to_apply:
+			to_apply.append(s)
+
+	# Fold each catalog entry together with the round's per-effect override (tuned magnitude
+	# + custom name/flavor). Keeps `_ref` = the original name so valence stays correct after
+	# a rename. Sensory entries pass through unchanged (no gameplay overrides apply to them).
+	var overrides: Dictionary = round.get("effect_overrides", {})
+	var resolved: Array = []
+	for e: Dictionary in to_apply:
+		var r: Dictionary = JourneyData.resolved_effect(str(e.get("name", "")), overrides)
+		if not r.is_empty():
+			resolved.append(r)
+	to_apply = resolved
 
 	for roll: Dictionary in to_apply:
 		var fx: Dictionary = _make_boss_effect(roll)
 		fx["name"] = roll.get("name", fx["name"])
-		fx["benefit"] = true  # green chip
+		if JourneyData.effect_is_benefit(str(roll.get("_ref", roll.get("name", "")))):
+			fx["benefit"] = true  # green chip; hindrances/sensory stay red
 		InventoryService.AddBossEffects([fx])
-		_apply_boon(roll, round)
+		_apply_effect(roll, round)
 
-	if _blessing_tint != null:
-		_blessing_tint.visible = true
-	if _blessing_frame != null:
-		_blessing_frame.visible = true
-	_reveal_effects = _build_reveal_effects(to_apply, true)
+	# Optional coloured border (author-toggled); the resolvable cleanse layer when enabled.
+	var v: Dictionary = _effect_visuals(round)
+	_show_effect_overlay(v["frame"], bool(round.get("show_border", false)))
+	if _effect_resolvable:
+		_effect_resolved = false
+		_show_cleanse_button()
+	_reveal_effects = _build_reveal_effects(to_apply)
+
+
+# Dispatches an effect to its GameLoop-side behaviour. Stroke/economy modifiers
+# (scale/clamp/reverse/block/score_multiplier/coin_jackpot/coin_penalty) are already
+# live via the boss-effect pipeline and need nothing here; the boon behaviours
+# (gift/interest/lingering) run in _apply_boon, everything else through _apply_hex
+# (sensory + hud_hide/no_pause/toll). Both no-op on kinds they don't own.
+func _apply_effect(roll: Dictionary, round: Dictionary) -> void:
+	if String(roll.get("kind", "")) in ["gift", "interest", "lingering"]:
+		_apply_boon(roll, round)
+	else:
+		_apply_hex(roll, SensoryFX.intensity_for(round, roll))
 
 
 # GameLoop-side boon behaviours (the ones not handled by an existing effect kind).
@@ -873,21 +903,43 @@ func _apply_boon(roll: Dictionary, round: Dictionary) -> void:
 			if gift != "":
 				InventoryService.AddItem(gift)
 		"interest":
-			var gain: int = roundi(CoinService.Balance * INTEREST_PCT)
+			var gain: int = roundi(CoinService.Balance * float(roll.get("pct", INTEREST_PCT)))
 			if gain > 0:
 				CoinService.AddCoins(gain)
-		"ward":
-			_ward_next_curse = true
 		"lingering":
-			_blessing_lingering = true
+			_effect_lingering = true
 			InventoryService.SetPaused(true)  # freeze the effect clock for the round
 
 
-# Animated pre-round reveal card naming the curse(s)/boon(s) and their effects.
-# Fades + pops in, holds, fades out — then the round's video plays. Awaited by
-# _begin_round so playback waits for it.
-func _show_reveal_card(is_blessed: bool) -> void:
-	var accent: Color = Color(1.0, 0.84, 0.30) if is_blessed else Color(0.45, 0.95, 0.30)
+# Resolves the framing (icon, header, accent, border colour) for an effect round
+# straight from its author-set fields. Colours are concrete (baked in at save / migration).
+func _effect_visuals(round: Dictionary) -> Dictionary:
+	return {
+		"icon": _nonblank_str(str(round.get("card_icon", "")), "✦"),
+		"header": _nonblank_str(str(round.get("card_header", "")), "EFFECT"),
+		"accent": _hex_color(round.get("card_accent", ""), JourneyData.EFFECT_COLOR_NEUTRAL),
+		"frame": _hex_color(round.get("frame_color", ""), JourneyData.EFFECT_COLOR_NEUTRAL),
+	}
+
+
+# Parses an "#rrggbb" string to a Color, falling back to `fallback_hex` when blank/invalid.
+func _hex_color(value: Variant, fallback_hex: String) -> Color:
+	var s: String = str(value)
+	if s != "" and Color.html_is_valid(s):
+		return Color.html(s)
+	return Color.html(fallback_hex)
+
+
+func _nonblank_str(value: String, fallback: String) -> String:
+	return value if value != "" else fallback
+
+
+# Animated pre-round reveal card naming the effect(s) and what they do. Fades + pops
+# in, holds, fades out — then the round's video plays. Awaited by _begin_round so
+# playback waits for it. Header / icon / accent come from the round's effect visuals.
+func _show_reveal_card(round: Dictionary) -> void:
+	var v: Dictionary = _effect_visuals(round)
+	var accent: Color = v["accent"]
 
 	var root: Control = Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -921,7 +973,7 @@ func _show_reveal_card(is_blessed: bool) -> void:
 	panel.add_child(col)
 
 	var header: Label = Label.new()
-	header.text = "✦  BLESSED" if is_blessed else "☠  CURSED"
+	header.text = "%s  %s" % [v["icon"], v["header"]]
 	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	header.add_theme_color_override("font_color", accent)
 	header.add_theme_font_size_override("font_size", 34)
@@ -964,79 +1016,18 @@ func _show_reveal_card(is_blessed: bool) -> void:
 	root.queue_free()
 
 
-# Gentle gold shimmer (mirrors the curse frame's drift).
-func _update_blessing_frame() -> void:
-	if _blessing_frame == null:
+# Slow drift on the effect-round frame — breathes rather than snaps. The colour is
+# set per-round in _show_effect_overlay; here we only animate the alpha.
+func _update_effect_frame() -> void:
+	if _effect_frame == null:
 		return
 	var t: float = Time.get_ticks_msec() / 1000.0
-	_blessing_frame.modulate.a = 0.45 + 0.25 * sin(t * TAU * 0.4)
+	_effect_frame.modulate.a = 0.42 + 0.25 * sin(t * TAU * 0.37)
 
 
-func _enter_cursed_mode() -> void:
-	# A "Ward" boon from an earlier blessed round repels this curse entirely.
-	if _ward_next_curse:
-		_ward_next_curse = false
-		_curse_cleansed = true  # counts as resolved → no endure reward
-		_reveal_effects = []  # nothing to reveal — no card
-		_show_curse_banner("WARDED — THE CURSE IS REPELLED")
-		return
-
-	# The player's active buffs are kept (they can fight the curse) — curses live
-	# in the separate boss-effects list. Two buckets resolve here:
-	#   GAMEPLAY CURSE (the cleansable curse) — from CURSE_CATALOG:
-	#     • author-selected + fixed → apply exactly those
-	#     • author-selected + random → roll from that set
-	#     • no selection + random → roll from the full gameplay catalog
-	#   NON-GAMEPLAY (sensory) modifiers — from SENSORY_CATALOG:
-	#     • ticked ones always apply
-	#     • if "include in random pool" is on, the random roll above may also
-	#       surface sensory modifiers from the full sensory set
-	# Everything applied is cleansable/endurable alike (uniform boss-effect path).
-	var round: Dictionary = GameState.CurrentRound()
-	_curse_cleanse_cost = int(round.get("cleanse_cost", CLEANSE_COST_DEFAULT))
-
-	var selected: Array = round.get("curses", [])
-	var random_mode: bool = bool(round.get("curse_random", true))
-	var sensory_in_pool: bool = bool(round.get("sensory_in_pool", false))
-
-	var to_apply: Array = []
-	if random_mode:
-		var pool: Array = (
-			JourneyData.CURSE_CATALOG
-			if selected.is_empty()
-			else _catalog_subset(JourneyData.CURSE_CATALOG, selected)
-		)
-		if sensory_in_pool:
-			pool = pool + JourneyData.SENSORY_CATALOG
-		to_apply = _roll_from(pool)
-	else:
-		to_apply = _catalog_subset(JourneyData.CURSE_CATALOG, selected)  # fixed: apply all selected
-
-	# Ticked non-gameplay modifiers always apply (deduped against the roll).
-	for s: Dictionary in _catalog_subset(JourneyData.SENSORY_CATALOG, round.get("sensory", [])):
-		if s not in to_apply:
-			to_apply.append(s)
-
-	# A cursed round should never be a no-op. If the author configured nothing
-	# (fixed mode, nothing ticked in either bucket), fall back to a random gameplay
-	# curse — matching the pre-split behaviour for an unconfigured cursed round.
-	if to_apply.is_empty():
-		to_apply = _roll_from(JourneyData.CURSE_CATALOG)
-
-	for roll: Dictionary in to_apply:
-		var fx: Dictionary = _make_boss_effect(roll)
-		fx["name"] = roll.get("name", fx["name"])
-		InventoryService.AddBossEffects([fx])  # also shows as a (red) HUD chip
-		_apply_hex(roll, SensoryFX.intensity_for(round, roll))  # sensory → SensoryFX, gameplay → here
-
-	_curse_cleansed = false
-	_show_curse_overlay()
-	_show_cleanse_button()
-	_reveal_effects = _build_reveal_effects(to_apply, false)
-
-
-# Builds the reveal-card payload from a list of catalog entries.
-func _build_reveal_effects(entries: Array, benefit: bool) -> Array:
+# Builds the reveal-card payload from a list of catalog entries. Each entry's benefit
+# flag comes from its source catalog (boon → green, hindrance / sensory → red).
+func _build_reveal_effects(entries: Array) -> Array:
 	var out: Array = []
 	for e: Dictionary in entries:
 		(
@@ -1045,21 +1036,20 @@ func _build_reveal_effects(entries: Array, benefit: bool) -> Array:
 				{
 					"name": str(e.get("name", "")),
 					"desc": str(e.get("desc", "")),
-					"benefit": benefit,
+					"benefit": JourneyData.effect_is_benefit(str(e.get("_ref", e.get("name", "")))),
 				}
 			)
 		)
 	return out
 
 
-# Rolls one entry from `pool`, or rarely two (the "double" chance). Shared by
-# cursed and blessed rounds.
+# Rolls one entry from `pool`, or rarely two (the "double" chance).
 func _roll_from(pool: Array) -> Array:
 	if pool.is_empty():
 		return []
 	var shuffled: Array = pool.duplicate()
 	shuffled.shuffle()
-	var count: int = 2 if (shuffled.size() >= 2 and randf() < DOUBLE_CURSE_CHANCE) else 1
+	var count: int = 2 if (shuffled.size() >= 2 and randf() < DOUBLE_EFFECT_CHANCE) else 1
 	return shuffled.slice(0, count)
 
 
@@ -1080,11 +1070,11 @@ func _show_cleanse_button() -> void:
 	var btn: Button = Button.new()
 	var has_item: bool = InventoryService.OwnsItem("cleanse")
 	btn.text = (
-		"✦ CLEANSE  (use Cleanse item)" if has_item else "✦ CLEANSE  (♦ %d)" % _curse_cleanse_cost
+		"✦ CLEANSE  (use Cleanse item)" if has_item else "✦ CLEANSE  (♦ %d)" % _effect_cleanse_cost
 	)
 	btn.tooltip_text = (
 		"Lift the curse with a Cleanse item or %d coins — or endure it for the reward."
-		% _curse_cleanse_cost
+		% _effect_cleanse_cost
 	)
 	UITheme.style_button(btn, Color(0.45, 0.95, 0.30))
 	btn.anchor_left = 0.5
@@ -1097,21 +1087,21 @@ func _show_cleanse_button() -> void:
 	btn.offset_right = 110
 	btn.pressed.connect(_on_cleanse_pressed)
 	add_child(btn)
-	_curse_cleanse_btn = btn
+	_effect_cleanse_btn = btn
 
 
 func _remove_cleanse_button() -> void:
-	if is_instance_valid(_curse_cleanse_btn):
-		_curse_cleanse_btn.queue_free()
-	_curse_cleanse_btn = null
+	if is_instance_valid(_effect_cleanse_btn):
+		_effect_cleanse_btn.queue_free()
+	_effect_cleanse_btn = null
 
 
 func _on_cleanse_pressed() -> void:
 	# Prefer a held Cleanse item (free); fall back to coins.
 	if InventoryService.OwnsItem("cleanse"):
 		InventoryService.ConsumeItem("cleanse")
-	elif not CoinService.SpendCoins(_curse_cleanse_cost):
-		_show_save_toast("✕  NEED ♦ %d OR A CLEANSE ITEM" % _curse_cleanse_cost)
+	elif not CoinService.SpendCoins(_effect_cleanse_cost):
+		_show_save_toast("✕  NEED ♦ %d OR A CLEANSE ITEM" % _effect_cleanse_cost)
 		return
 	_cleanse_curse()
 
@@ -1119,13 +1109,13 @@ func _on_cleanse_pressed() -> void:
 # Lifts the active curse(s) mid-round: clears the effects, undoes hex side-effects,
 # drops the overlay. Marks the round cleansed so it pays no endure reward.
 func _cleanse_curse() -> void:
-	_curse_cleansed = true
+	_effect_resolved = true
 	InventoryService.ClearBossEffects()
 	_clear_curse_hexes()
 	_show_hud()  # bring the HUD straight back if a Fog hex hid it
-	_hide_curse_overlay()
+	_hide_effect_overlay()
 	_remove_cleanse_button()
-	_show_save_toast("✦  CURSE CLEANSED")
+	_show_save_toast("✦  CLEANSED")
 
 
 # Undoes every hex side-effect — sensory ones via SensoryFX, gameplay ones
@@ -1153,7 +1143,7 @@ func _apply_hex(roll: Dictionary, intensity: float = 1.0) -> void:
 			_curse_hud_hidden = true
 			_hud.visible = false
 		"toll":
-			var take: int = mini(TOLL_AMOUNT, CoinService.Balance)
+			var take: int = mini(int(roll.get("amount", TOLL_AMOUNT)), CoinService.Balance)
 			if take > 0:
 				CoinService.SpendCoins(take)
 		"no_pause":
@@ -1161,46 +1151,20 @@ func _apply_hex(roll: Dictionary, intensity: float = 1.0) -> void:
 			_pause_btn.disabled = true
 
 
-# Transient curse flash naming the rolled affliction.
-func _show_curse_banner(curse_name: String) -> void:
-	var banner: Label = Label.new()
-	banner.text = "☠  CURSED  —  %s" % (curse_name as String).to_upper()
-	banner.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
-	banner.add_theme_font_size_override("font_size", 30)
-	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	banner.anchor_left = 0.0
-	banner.anchor_right = 1.0
-	banner.anchor_top = 0.35
-	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner.modulate.a = 0.0
-	add_child(banner)
-	var tw: Tween = create_tween()
-	tw.tween_property(banner, "modulate:a", 1.0, 0.3)
-	tw.tween_interval(1.4)
-	tw.tween_property(banner, "modulate:a", 0.0, 0.5)
-	tw.tween_callback(banner.queue_free)
-
-
-# Tears down boss / curse state at round end. Safe to call on plain rounds.
+# Tears down boss / effect state at round end. Safe to call on plain rounds.
 func _exit_boss_mode() -> void:
-	if not _is_boss_round and not _is_cursed_round and not _is_blessed_round:
+	if not _is_boss_round and not _is_effect_round:
 		return
 	# Undo any hex side-effects before clearing the flags.
 	_clear_curse_hexes()
-	_hide_curse_overlay()
+	_hide_effect_overlay()
 	_remove_cleanse_button()
-	# Blessed teardown. Lingering un-freezes the effect clock; Ward intentionally
-	# persists past this round until the next curse consumes it.
-	if _blessing_lingering:
-		_blessing_lingering = false
+	# A "Lingering" boon un-freezes the effect clock at round end.
+	if _effect_lingering:
+		_effect_lingering = false
 		InventoryService.SetPaused(_paused)
-	if _blessing_frame != null:
-		_blessing_frame.visible = false
-	if _blessing_tint != null:
-		_blessing_tint.visible = false
 	_is_boss_round = false
-	_is_cursed_round = false
-	_is_blessed_round = false
+	_is_effect_round = false
 	InventoryService.ClearBossEffects()
 	_inv_btn.disabled = false
 	if _boss_frame != null:
@@ -1282,85 +1246,45 @@ func _send_frame_behind_hud(frame: Control) -> void:
 		move_child(frame, _hud.get_index())
 
 
-# Builds the cursed-round overlay — a sickly green "hex" border plus a faint
-# tint over the play area, giving cursed rounds a distinct identity from the
-# boss frame's aggressive red pulse — and the SensoryFX engine, whose overlay
-# stack (Murk/Tunnel/Bloodshot/Static/Flicker/Strobe) slots in above the tint
-# and below the frames, preserving the original draw order. Hidden until used.
-func _build_curse_overlay() -> void:
-	_curse_tint = ColorRect.new()
-	_curse_tint.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_curse_tint.color = Color(0.20, 0.45, 0.15, 0.12)  # faint toxic green
-	_curse_tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_curse_tint.visible = false
-	add_child(_curse_tint)
-
+# Builds the effect-round overlay — an optional coloured edge border (author-toggled,
+# no screen tint) — and the SensoryFX engine, whose overlay stack (Murk/Tunnel/Bloodshot/
+# Static/Flicker/Strobe) slots below the frame, preserving the original draw order. The
+# border colour is set per-round in _show_effect_overlay. Hidden until used.
+func _build_effect_overlay() -> void:
 	# Non-gameplay (sensory) modifier engine — owns its overlays, the composable
 	# video shader, the VideoFX audio bus, tremor, and mute.
 	_sensory = SensoryFX.new()
 	add_child(_sensory)
 	_sensory.setup(_video, self)
 
-	_curse_frame = Panel.new()
-	_curse_frame.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_curse_frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_curse_frame.visible = false
+	_effect_frame = Panel.new()
+	_effect_frame.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_effect_frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_effect_frame.visible = false
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(0, 0, 0, 0)
-	s.border_color = Color(0.45, 0.95, 0.30)  # toxic green
-	s.border_width_left = 5
-	s.border_width_right = 5
-	s.border_width_top = 5
-	s.border_width_bottom = 5
-	_curse_frame.add_theme_stylebox_override("panel", s)
-	add_child(_curse_frame)
-	_send_frame_behind_hud(_curse_frame)
-
-	# Blessed-round counterparts — faint gold tint + gold frame.
-	_blessing_tint = ColorRect.new()
-	_blessing_tint.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_blessing_tint.color = Color(0.55, 0.45, 0.10, 0.10)
-	_blessing_tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_blessing_tint.visible = false
-	add_child(_blessing_tint)
-
-	_blessing_frame = Panel.new()
-	_blessing_frame.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_blessing_frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_blessing_frame.visible = false
-	var gs: StyleBoxFlat = StyleBoxFlat.new()
-	gs.bg_color = Color(0, 0, 0, 0)
-	gs.border_color = Color(1.0, 0.84, 0.30)  # gold
-	gs.border_width_left = 5
-	gs.border_width_right = 5
-	gs.border_width_top = 5
-	gs.border_width_bottom = 5
-	_blessing_frame.add_theme_stylebox_override("panel", gs)
-	add_child(_blessing_frame)
-	_send_frame_behind_hud(_blessing_frame)
+	s.set_border_width_all(5)
+	_effect_frame.add_theme_stylebox_override("panel", s)
+	add_child(_effect_frame)
+	_send_frame_behind_hud(_effect_frame)
 
 
-func _show_curse_overlay() -> void:
-	if _curse_tint != null:
-		_curse_tint.visible = true
-	if _curse_frame != null:
-		_curse_frame.visible = true
-
-
-func _hide_curse_overlay() -> void:
-	if _curse_tint != null:
-		_curse_tint.visible = false
-	if _curse_frame != null:
-		_curse_frame.visible = false
-
-
-# Slow, wavering drift — eerie/unstable rather than the boss frame's hard climax
-# pulse. Never snaps; just breathes.
-func _update_curse_frame() -> void:
-	if _curse_frame == null:
+# Shows the coloured edge border for this round — but only when the author enabled it.
+func _show_effect_overlay(frame_color: Color, show_border: bool) -> void:
+	if _effect_frame == null:
 		return
-	var t: float = Time.get_ticks_msec() / 1000.0
-	_curse_frame.modulate.a = 0.4 + 0.25 * sin(t * TAU * 0.35)
+	if not show_border:
+		_effect_frame.visible = false
+		return
+	var s: StyleBox = _effect_frame.get_theme_stylebox("panel")
+	if s is StyleBoxFlat:
+		(s as StyleBoxFlat).border_color = frame_color
+	_effect_frame.visible = true
+
+
+func _hide_effect_overlay() -> void:
+	if _effect_frame != null:
+		_effect_frame.visible = false
 
 
 # Holds the boss frame at a subtle level, then pulses it in the final stretch.
@@ -1527,12 +1451,13 @@ func _on_round_ended() -> void:
 				jackpot_factor *= float(fx.get("factor", 1.0))
 			"coin_penalty":
 				penalty_factor *= float(fx.get("factor", 1.0))
-	# Endure-payout: a cursed round carried to the end without cleansing pays its
-	# curse_reward bonus. Captured before _exit_boss_mode clears the cursed flag.
+	# Endure-payout: a resolvable effect round carried to the end without cleansing
+	# pays its endure_reward bonus. Captured before _exit_boss_mode clears the flag.
 	var endure_reward: int = 0
-	if _is_cursed_round and not _curse_cleansed:
-		endure_reward = int(GameState.CurrentRound().get("curse_reward", 0))
-	# Tear down boss / curse / blessing state (modifiers, lockout, frames) if active.
+	if _effect_resolvable and not _effect_resolved:
+		var nr: Dictionary = JourneyData.normalize_effect_round(GameState.CurrentRound())
+		endure_reward = int(nr.get("endure_reward", 0))
+	# Tear down boss / effect state (modifiers, lockout, frames) if active.
 	_exit_boss_mode()
 
 	var coins: int = GameState.CurrentRound().get("coins", 0)
@@ -2040,7 +1965,7 @@ func _toggle_pause() -> void:
 	_video.paused = _paused
 	# Freeze the active-effect clock while paused — or for the whole round under a
 	# Lingering boon, so unpausing doesn't restart the countdown.
-	InventoryService.SetPaused(_paused or _blessing_lingering)
+	InventoryService.SetPaused(_paused or _effect_lingering)
 	if _paused:
 		FunscriptPlayer.Pause()
 		_pause_btn.text = "> RESUME"

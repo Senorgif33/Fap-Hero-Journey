@@ -23,6 +23,9 @@ var _modifiers: Array = []  # effect-shaped dicts (boss modifiers / curse / boon
 var _mod_label: String = "Boss Modifiers"  # what the modifiers are called for this round
 var _show_modifiers: bool = true
 var _caption: Label = null
+# Live-tuning callback: func(ref_name, key, value) — set when the caller wants the preview's
+# stroke-magnitude controls editable (effect rounds). Persists each change back to the round.
+var _on_tune: Callable = Callable()
 
 # Video preview (H.264 only — EIRTeam's decode limit). Stays hidden / graph-only
 # when the source can't be decoded.
@@ -62,10 +65,12 @@ func open(
 	mod_label: String = "Boss Modifiers",
 	trim_in: int = 0,
 	trim_out: int = 0,
-	on_trim_applied: Callable = Callable()
+	on_trim_applied: Callable = Callable(),
+	on_tune: Callable = Callable()
 ) -> void:
 	_modifiers = modifiers
 	_mod_label = mod_label
+	_on_tune = on_tune
 	_trim_mode = on_trim_applied.is_valid()
 	_trim_in = trim_in
 	_trim_out = trim_out
@@ -170,6 +175,13 @@ func _build_ui(round_name: String) -> void:
 	# Scrubbing the graph seeks the video; the graph's playhead and the video clock
 	# stay in lockstep (video → playhead in _process, playhead → video here).
 	_graph.scrubbed.connect(_on_scrubbed)
+
+	# Live stroke-magnitude tuning (effect rounds): sliders that rewrite the modifier
+	# curve as you drag and persist back to the round. Only when the caller opted in.
+	if _on_tune.is_valid():
+		var strip: Control = _build_tuning_strip()
+		if strip != null:
+			col.add_child(strip)
 
 	# Footer: play/pause + zoom + modifier toggle + caption.
 	var footer: HBoxContainer = HBoxContainer.new()
@@ -290,6 +302,78 @@ func _refresh_modified() -> void:
 	_graph.set_modified(modified, true)
 	_caption.text = _modifier_summary()
 	_caption.add_theme_color_override("font_color", UITheme.CYAN)
+
+
+# A row of live-tuning controls, one group per stroke effect that has a magnitude (scale →
+# stroke-length %, clamp → min/max). reverse/block carry no magnitude and are skipped.
+# Returns null when nothing is tunable. Dragging a control rewrites the effect's params in
+# `_modifiers` (redrawing the curve) and persists via `_on_tune`.
+func _build_tuning_strip() -> Control:
+	var strip: HBoxContainer = HBoxContainer.new()
+	strip.add_theme_constant_override("separation", 16)
+	var lead: Label = Label.new()
+	lead.text = "TUNE"
+	lead.add_theme_font_size_override("font_size", 11)
+	lead.add_theme_color_override("font_color", UITheme.PURPLE_MID)
+	strip.add_child(lead)
+
+	var any: bool = false
+	for m: Dictionary in _modifiers:
+		var specs: Array = JourneyData.effect_param_specs(String(m.get("kind", "")))
+		if specs.is_empty():
+			continue
+		any = true
+		var group: VBoxContainer = VBoxContainer.new()
+		group.add_theme_constant_override("separation", 1)
+		var name_lbl: Label = Label.new()
+		name_lbl.text = String(m.get("name", m.get("kind", ""))).to_upper()
+		name_lbl.add_theme_font_size_override("font_size", 10)
+		name_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+		group.add_child(name_lbl)
+		var row: HBoxContainer = HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		for spec: Dictionary in specs:
+			row.add_child(_make_tune_control(m, spec))
+		group.add_child(row)
+		strip.add_child(group)
+
+	return strip if any else null
+
+
+# One SpinBox editing `m[spec.key]` in place: rewrites the modifier params, redraws the
+# curve, and reports the change through _on_tune (which persists / prunes on the round).
+func _make_tune_control(m: Dictionary, spec: Dictionary) -> Control:
+	var key: String = String(spec.get("key", ""))
+	var ctl: String = String(spec.get("ctl", ""))
+	var ref: String = String(m.get("_ref", m.get("name", "")))
+	var view_scale: float = 100.0 if ctl == "pct" else 1.0
+
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 0)
+	var lab: Label = Label.new()
+	lab.text = String(spec.get("label", key))
+	lab.add_theme_font_size_override("font_size", 9)
+	lab.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	box.add_child(lab)
+	var spin: SpinBox = SpinBox.new()
+	spin.min_value = float(spec.get("min", 0)) * view_scale
+	spin.max_value = float(spec.get("max", 1)) * view_scale
+	spin.step = float(spec.get("step", 1)) * view_scale
+	spin.suffix = "%" if ctl == "pct" else ""
+	spin.custom_minimum_size = Vector2(84, 0)
+	UITheme.style_spin_box(spin)
+	spin.set_value_no_signal(float(m.get(key, spec.get("min", 0))) * view_scale)
+	spin.value_changed.connect(
+		func(v: float) -> void:
+			var real: float = v / view_scale
+			var store_val: Variant = int(round(real)) if ctl in ["pos", "coins"] else real
+			m[key] = store_val
+			_refresh_modified()
+			if _on_tune.is_valid():
+				_on_tune.call(ref, key, store_val)
+	)
+	box.add_child(spin)
+	return box
 
 
 # ── Modifier math ────────────────────────────────────────────────────────────

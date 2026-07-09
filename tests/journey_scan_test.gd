@@ -186,17 +186,19 @@ func test_map_enabled_round_trips() -> void:
 	assert_bool(_parse(d).map_enabled).is_false()
 
 
-# The cursed round's full authored field set survives the round-trip.
+# A legacy cursed round migrates to the generic effect schema on scan (curses →
+# effects, curse_reward → endure_reward, resolvable + green/CURSED visuals), sensory intact.
 func test_cursed_round_fields() -> void:
 	var r: Dictionary = _parse(_full_journey()).rounds[0]
-	assert_str(r.round_type).is_equal("cursed")
+	assert_str(r.round_type).is_equal("effect")
+	assert_str(r.frame_color).is_equal(JourneyData.EFFECT_COLOR_HINDER)
+	assert_str(r.card_header).is_equal("CURSED")
+	assert_bool(r.resolvable).is_true()
 	assert_bool(r.is_checkpoint).is_true()
-	assert_int(r.curse_reward).is_equal(75)
+	assert_int(r.endure_reward).is_equal(75)
 	assert_int(r.cleanse_cost).is_equal(30)
-	assert_bool(r.curse_random).is_false()
-	assert_array(r.curses).contains_exactly(["Shrunken", "Greed"])
-	assert_bool(r.boon_random).is_true()
-	assert_array(r.boons).is_empty()
+	assert_bool(r.effect_random).is_false()
+	assert_array(r.effects).contains_exactly(["Shrunken", "Greed"])
 	assert_array(r.sensory).contains_exactly(["Murk", "Muffled"])
 	assert_bool(r.sensory_in_pool).is_true()
 	assert_float(float(r.sensory_intensity["Murk"])).is_equal_approx(0.8, EPS)
@@ -248,8 +250,8 @@ func test_fork_resolution_fields() -> void:
 # carries the same authored fields as a top-level round.
 func test_fork_path_round_fields() -> void:
 	var pr: Dictionary = _parse(_full_journey()).forks[0].paths[0].rounds[0]
-	assert_str(pr.round_type).is_equal("cursed")
-	assert_array(pr.curses).contains_exactly(["Inverted"])
+	assert_str(pr.round_type).is_equal("effect")
+	assert_array(pr.effects).contains_exactly(["Inverted"])
 	assert_array(pr.sensory).contains_exactly(["Bleary"])
 	assert_float(float(pr.sensory_intensity["Bleary"])).is_equal_approx(0.5, EPS)
 	assert_bool(pr.show_reveal).is_false()

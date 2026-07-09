@@ -196,27 +196,21 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 			"funscript_path": funscript_stats["path"],
 			"axis_scripts": axis_scripts,
 			"vib_scripts": vib_scripts,
-			"round_type": round_type,
 			"is_checkpoint": bool(raw.get("IsCheckpoint", raw.get("is_checkpoint", false))),
-			"curse_reward": int(raw.get("CurseReward", raw.get("curse_reward", 0))),
-			"cleanse_cost": int(raw.get("CleanseCost", raw.get("cleanse_cost", 50))),
-			"curse_random": bool(raw.get("CurseRandom", raw.get("curse_random", true))),
-			"curses": raw.get("Curses", raw.get("curses", [])),
-			"boon_random": bool(raw.get("BoonRandom", raw.get("boon_random", true))),
-			"boons": raw.get("Boons", raw.get("boons", [])),
-			"gift_item": raw.get("GiftItem", raw.get("gift_item", "")),
 			"boss_image": boss_image,
 			"boss_tagline": raw.get("BossTagline", ""),
 			"boss_modifiers": boss_modifiers,
-			"sensory": raw.get("Sensory", raw.get("BossHexes", raw.get("sensory", []))),
-			"sensory_in_pool": bool(raw.get("SensoryInPool", raw.get("sensory_in_pool", false))),
-			"sensory_intensity": raw.get("SensoryIntensity", raw.get("sensory_intensity", {})),
-			"show_reveal": bool(raw.get("ShowReveal", raw.get("show_reveal", true))),
 			"coins": raw.get("CoinsAwarded", 0),
 			"order": raw.get("Order", 0),
 			"action_count": funscript_stats["count"],
 			"length_ms": funscript_stats["length_ms"],
 		}
+		# Effect-round + sensory fields — read both the generic ("effect") and retired
+		# cursed/blessed schemas (Pascal + lowercase), then normalize to the canonical
+		# generic set so legacy journeys still play (migrate-on-load).
+		round_data.merge(
+			JourneyData.normalize_effect_round(_read_effect_fields(raw, round_type)), true
+		)
 		journey["total_actions"] = (
 			(journey["total_actions"] as int) + (funscript_stats["count"] as int)
 		)
@@ -660,49 +654,28 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				if raw_mod is Dictionary:
 					pr_boss_modifiers.append(_parse_boss_modifier(raw_mod))
 
-			(
-				path_entry["rounds"]
-				. append(
-					{
-						"name": pr_name,
-						"folder": pr_folder,
-						"node_id": raw_pr.get("NodeId", raw_pr.get("node_id", "")),
-						"video_path": pr_video_path,
-						"funscript_path": pr_fs["path"],
-						"axis_scripts": pr_axis_scripts,
-						"vib_scripts": pr_vib_scripts,
-						"round_type": pr_round_type,
-						"is_checkpoint":
-						bool(raw_pr.get("IsCheckpoint", raw_pr.get("is_checkpoint", false))),
-						"curse_reward":
-						int(raw_pr.get("CurseReward", raw_pr.get("curse_reward", 0))),
-						"cleanse_cost":
-						int(raw_pr.get("CleanseCost", raw_pr.get("cleanse_cost", 50))),
-						"curse_random":
-						bool(raw_pr.get("CurseRandom", raw_pr.get("curse_random", true))),
-						"curses": raw_pr.get("Curses", raw_pr.get("curses", [])),
-						"boon_random":
-						bool(raw_pr.get("BoonRandom", raw_pr.get("boon_random", true))),
-						"boons": raw_pr.get("Boons", raw_pr.get("boons", [])),
-						"gift_item": raw_pr.get("GiftItem", raw_pr.get("gift_item", "")),
-						"boss_image": pr_boss_image,
-						"boss_tagline": raw_pr.get("BossTagline", ""),
-						"boss_modifiers": pr_boss_modifiers,
-						"sensory":
-						raw_pr.get("Sensory", raw_pr.get("BossHexes", raw_pr.get("sensory", []))),
-						"sensory_in_pool":
-						bool(raw_pr.get("SensoryInPool", raw_pr.get("sensory_in_pool", false))),
-						"sensory_intensity":
-						raw_pr.get("SensoryIntensity", raw_pr.get("sensory_intensity", {})),
-						"show_reveal":
-						bool(raw_pr.get("ShowReveal", raw_pr.get("show_reveal", true))),
-						"coins": raw_pr.get("CoinsAwarded", raw_pr.get("coins", 0)),
-						"order": raw_pr.get("Order", raw_pr.get("order", 0)),
-						"action_count": pr_fs["count"],
-						"length_ms": pr_fs["length_ms"],
-					}
-				)
+			var pr_data: Dictionary = {
+				"name": pr_name,
+				"folder": pr_folder,
+				"node_id": raw_pr.get("NodeId", raw_pr.get("node_id", "")),
+				"video_path": pr_video_path,
+				"funscript_path": pr_fs["path"],
+				"axis_scripts": pr_axis_scripts,
+				"vib_scripts": pr_vib_scripts,
+				"is_checkpoint":
+				bool(raw_pr.get("IsCheckpoint", raw_pr.get("is_checkpoint", false))),
+				"boss_image": pr_boss_image,
+				"boss_tagline": raw_pr.get("BossTagline", ""),
+				"boss_modifiers": pr_boss_modifiers,
+				"coins": raw_pr.get("CoinsAwarded", raw_pr.get("coins", 0)),
+				"order": raw_pr.get("Order", raw_pr.get("order", 0)),
+				"action_count": pr_fs["count"],
+				"length_ms": pr_fs["length_ms"],
+			}
+			pr_data.merge(
+				JourneyData.normalize_effect_round(_read_effect_fields(raw_pr, pr_round_type)), true
 			)
+			path_entry["rounds"].append(pr_data)
 		var raw_pr_shops: Array = raw_path.get("Shops", raw_path.get("shops", []))
 		for raw_ps in raw_pr_shops:
 			if raw_ps is Dictionary:
@@ -788,6 +761,40 @@ static func _parse_boss_modifier(raw_mod: Dictionary) -> Dictionary:
 	if raw_mod.has("Max") or raw_mod.has("max"):
 		mod["max"] = raw_mod.get("Max", raw_mod.get("max", 100))
 	return mod
+
+
+# Collects a round's effect-related fields from disk (both the generic "effect" schema and the
+# retired cursed/blessed one, Pascal + lowercase) into a lowercase source dict for
+# JourneyData.normalize_effect_round. `rtype` is the already-lowercased round_type; normalize
+# keys off it to decide which schema to read.
+static func _read_effect_fields(raw: Dictionary, rtype: String) -> Dictionary:
+	return {
+		"round_type": rtype,
+		# Retired cursed/blessed schema.
+		"curses": raw.get("Curses", raw.get("curses", [])),
+		"curse_random": bool(raw.get("CurseRandom", raw.get("curse_random", true))),
+		"curse_reward": int(raw.get("CurseReward", raw.get("curse_reward", 0))),
+		"boons": raw.get("Boons", raw.get("boons", [])),
+		"boon_random": bool(raw.get("BoonRandom", raw.get("boon_random", true))),
+		# Generic effect schema.
+		"effects": raw.get("Effects", raw.get("effects", [])),
+		"effect_random": bool(raw.get("EffectRandom", raw.get("effect_random", true))),
+		"resolvable": bool(raw.get("Resolvable", raw.get("resolvable", false))),
+		"endure_reward": int(raw.get("EndureReward", raw.get("endure_reward", 0))),
+		"frame_color": raw.get("FrameColor", raw.get("frame_color", "")),
+		"card_accent": raw.get("CardAccent", raw.get("card_accent", "")),
+		"card_header": raw.get("CardHeader", raw.get("card_header", "")),
+		"card_icon": raw.get("CardIcon", raw.get("card_icon", "")),
+		"show_border": bool(raw.get("ShowBorder", raw.get("show_border", false))),
+		"effect_overrides": raw.get("EffectOverrides", raw.get("effect_overrides", {})),
+		# Shared fields.
+		"cleanse_cost": int(raw.get("CleanseCost", raw.get("cleanse_cost", 50))),
+		"gift_item": raw.get("GiftItem", raw.get("gift_item", "")),
+		"sensory": raw.get("Sensory", raw.get("BossHexes", raw.get("sensory", []))),
+		"sensory_in_pool": bool(raw.get("SensoryInPool", raw.get("sensory_in_pool", false))),
+		"sensory_intensity": raw.get("SensoryIntensity", raw.get("sensory_intensity", {})),
+		"show_reveal": bool(raw.get("ShowReveal", raw.get("show_reveal", true))),
+	}
 
 
 # Returns {count, length_ms, round_count} for the longest path through a fork.

@@ -87,6 +87,55 @@ func test_cursed_round_interval() -> void:
 	assert_int(int((coins["r2"] as Dictionary)["hi"])).is_equal(80)  # 100+20-40
 
 
+# An effect round with no ticked effects applies nothing (a pure-visual round): the next
+# node's entry coins equal the plain payout — no random effect is rolled.
+func test_effect_round_no_effects_is_noop() -> void:
+	var graph := {
+		"start": "r1",
+		"nodes":
+		{
+			"r1":
+			{
+				"type": "round",
+				"data": {"coins": 100, "round_type": "effect", "effects": []},
+				"out": [_edge("r2")]
+			},
+			"r2": _round(0),
+		}
+	}
+	var coins: Dictionary = _audit(graph)["coins"]
+	assert_int(int((coins["r2"] as Dictionary)["lo"])).is_equal(100)
+	assert_int(int((coins["r2"] as Dictionary)["hi"])).is_equal(100)
+
+
+# A tuned Toll (amount override) shifts the coin interval by the tuned value, not the
+# catalog default of 40 — proving the auditor reads effect_overrides.
+func test_effect_tuned_toll_interval() -> void:
+	var graph := {
+		"start": "r1",
+		"nodes":
+		{
+			"r1":
+			{
+				"type": "round",
+				"data":
+				{
+					"coins": 100,
+					"round_type": "effect",
+					"effects": ["Toll"],
+					"effect_random": false,
+					"effect_overrides": {"Toll": {"amount": 10}},
+				},
+				"out": [_edge("r2")]
+			},
+			"r2": _round(0),
+		}
+	}
+	var coins: Dictionary = _audit(graph)["coins"]
+	assert_int(int((coins["r2"] as Dictionary)["lo"])).is_equal(90)  # 100 − 10 tuned toll
+	assert_int(int((coins["r2"] as Dictionary)["hi"])).is_equal(90)
+
+
 # Sacrifice gates: a cost above the best-case balance is dead; a cost above the
 # worst case (but below best) only warns.
 func test_sacrifice_cost_findings() -> void:

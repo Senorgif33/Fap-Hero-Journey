@@ -18,15 +18,16 @@ func test_coerce_round_coerces_int_fields() -> void:
 			{
 				"name": "A",
 				"coins": 5.0,
-				"curse_reward": 10.0,
+				"round_type": "effect",
+				"endure_reward": 10.0,
 				"cleanse_cost": 25.0,
 			}
 		)
 	)
 	assert_int(typeof(out["coins"])).is_equal(TYPE_INT)
 	assert_int(out["coins"]).is_equal(5)
-	assert_int(typeof(out["curse_reward"])).is_equal(TYPE_INT)
-	assert_int(out["curse_reward"]).is_equal(10)
+	assert_int(typeof(out["endure_reward"])).is_equal(TYPE_INT)
+	assert_int(out["endure_reward"]).is_equal(10)
 	assert_int(typeof(out["cleanse_cost"])).is_equal(TYPE_INT)
 	assert_int(out["cleanse_cost"]).is_equal(25)
 
@@ -69,12 +70,18 @@ func test_coerce_round_fills_baseline_defaults() -> void:
 	var out := JourneyData.coerce_node_save_data("round", {"name": "A"})
 	assert_str(out["round_type"]).is_equal("normal")
 	assert_bool(out["is_checkpoint"]).is_false()
-	assert_bool(out["curse_random"]).is_true()
+	assert_bool(out["effect_random"]).is_true()
+	assert_bool(out["resolvable"]).is_false()
 	assert_int(out["cleanse_cost"]).is_equal(50)
-	assert_array(out["curses"]).is_empty()
-	assert_array(out["boons"]).is_empty()
+	assert_str(out["card_header"]).is_equal("EFFECT")  # concrete visual default (no theme)
+	assert_str(out["card_icon"]).is_equal("✦")
+	assert_str(out["frame_color"]).is_equal(JourneyData.EFFECT_COLOR_NEUTRAL)
+	assert_array(out["effects"]).is_empty()
 	assert_array(out["sensory"]).is_empty()
 	assert_bool(out["show_reveal"]).is_true()
+	# Retired legacy keys are dropped on save (migrate-on-save).
+	assert_bool(out.has("curses")).is_false()
+	assert_bool(out.has("boons")).is_false()
 
 
 # Node-level keys (type / node_id / paths) never belong inside on-disk node.data.
@@ -115,10 +122,10 @@ func test_coerce_passes_through_extras_and_floats() -> void:
 
 # The copy is deep — mutating the result can't bleed back into the editor's live node data.
 func test_coerce_deep_copies_source() -> void:
-	var src := {"name": "A", "curses": ["Greed"]}
+	var src := {"name": "A", "round_type": "effect", "effects": ["Greed"]}
 	var out := JourneyData.coerce_node_save_data("round", src)
-	(out["curses"] as Array).append("Pauper")
-	assert_int((src["curses"] as Array).size()).is_equal(1)
+	(out["effects"] as Array).append("Pauper")
+	assert_int((src["effects"] as Array).size()).is_equal(1)
 
 
 # ── video planning (transcode plan + progress modal) ─────────────────────────
