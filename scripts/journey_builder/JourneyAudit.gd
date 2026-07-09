@@ -59,6 +59,9 @@ const SEV_INFO: String = "info"  # worth knowing; not necessarily a problem
 # {lo, hi} ENTRY intervals; visits is simulate()'s output; stats is
 # _statistics()'s journey-wide summary.
 static func audit(graph: Dictionary, ctx: Dictionary) -> Dictionary:
+	# Migrate any legacy cursed/blessed round nodes to the generic effect schema once,
+	# up front, so every downstream walk reads a single (effect) shape.
+	graph = _normalize_rounds(graph)
 	var flow: Dictionary = _flow_analysis(graph, ctx)
 	var findings: Array = _gate_findings(graph, ctx, flow)
 
@@ -293,11 +296,8 @@ static func round_coin_interval(data: Dictionary, entry_lo: int, entry_hi: int) 
 	var payout: int = int(data.get("coins", 0))
 	var round_type: String = str(data.get("round_type", "normal"))
 
-	if round_type == "cursed":
-		return _cursed_coin_interval(data, payout)
-
-	if round_type == "blessed":
-		return _blessed_coin_interval(data, payout, entry_lo, entry_hi)
+	if round_type == "effect":
+		return _effect_coin_interval(data, payout, entry_lo, entry_hi)
 
 	# Normal/boss rounds: boss modifiers may carry coin effects (always applied).
 	var lo: int = payout
@@ -313,116 +313,94 @@ static func round_coin_interval(data: Dictionary, entry_lo: int, entry_hi: int) 
 	return {"lo": lo, "hi": hi}
 
 
-static func _cursed_coin_interval(data: Dictionary, payout: int) -> Dictionary:
-	var pool: Array = _curse_pool(data)
-	var random_roll: bool = bool(data.get("curse_random", true))
-	var reward: int = int(data.get("curse_reward", 0))
-	var cleanse_cost: int = int(data.get("cleanse_cost", 50))
+# Coin interval for an effect round — the merged cursed/blessed model. The pool can
+# mix hindrances (coin_penalty/toll) and boons (coin_jackpot/interest). Random mode
+# rolls ONE from the pool (bound over each single outcome); fixed mode applies every
+# listed effect together. When the round is resolvable, the endure reward is added and
+# the cleanse alternative (full payout − cost, minus any toll that already hit) bounds
+# the other side.
+static func _effect_coin_interval(
+	data: Dictionary, payout: int, entry_lo: int, entry_hi: int
+) -> Dictionary:
+	var pool: Array = _effect_pool(data)
+	var random_roll: bool = bool(data.get("effect_random", true)) and pool.size() > 1
+	var resolvable: bool = bool(data.get("resolvable", false))
+	var reward: int = int(data.get("endure_reward", 0)) if resolvable else 0
 
-	# Endure outcome bounds. Random mode rolls ONE curse from the pool; fixed
-	# mode applies every listed curse together.
-	var endure_lo: int
-	var endure_hi: int
+	var lo: int
+	var hi: int
+	var toll_amount: int = 0  # the tuned toll a roll could inflict (one Toll entry per round)
 	var toll_possible: bool
 	var toll_certain: bool
-	if random_roll and not pool.is_empty():
-		endure_lo = 1 << 30
-		endure_hi = -(1 << 30)
+	if random_roll:
+		lo = 1 << 30
+		hi = -(1 << 30)
 		toll_possible = false
 		toll_certain = true
-		for curse: Dictionary in pool:
-			var earned: int = payout
-			var toll: int = 0
-			match str(curse.get("kind", "")):
-				"coin_penalty":
-					earned = roundi(payout * float(curse.get("factor", 1.0)))
-				"toll":
-					toll = TOLL_AMOUNT
-					toll_possible = true
-			if toll == 0:
+		for e: Dictionary in pool:
+			var o: Dictionary = _applied_coins([e], payout, entry_lo, entry_hi)
+			lo = mini(lo, int(o["lo"]))
+			hi = maxi(hi, int(o["hi"]))
+			if int(o["toll"]) > 0:
+				toll_possible = true
+				toll_amount = int(o["toll"])
+			else:
 				toll_certain = false
-			endure_lo = mini(endure_lo, earned + reward - toll)
-			endure_hi = maxi(endure_hi, earned + reward - toll)
 	else:
-		var earned: int = payout
-		var toll: int = 0
-		for curse: Dictionary in pool:
-			match str(curse.get("kind", "")):
-				"coin_penalty":
-					earned = roundi(earned * float(curse.get("factor", 1.0)))
-				"toll":
-					toll = TOLL_AMOUNT
-		endure_lo = earned + reward - toll
-		endure_hi = endure_lo
-		toll_possible = toll > 0
-		toll_certain = toll > 0
+		var o: Dictionary = _applied_coins(pool, payout, entry_lo, entry_hi)
+		lo = int(o["lo"])
+		hi = int(o["hi"])
+		toll_amount = int(o["toll"])
+		toll_possible = toll_amount > 0
+		toll_certain = toll_amount > 0
 
-	# The player may cleanse instead: full payout, reward forfeited, cost paid
-	# (a rolled toll already hit before the cleanse and isn't refunded).
-	var cleanse_lo: int = payout - cleanse_cost - (TOLL_AMOUNT if toll_possible else 0)
-	var cleanse_hi: int = payout - cleanse_cost - (TOLL_AMOUNT if toll_certain else 0)
+	var endure_lo: int = lo + reward
+	var endure_hi: int = hi + reward
+	if not resolvable:
+		return {"lo": endure_lo, "hi": endure_hi}
 
+	# The player may cleanse instead: full payout, reward forfeited, cost paid (a rolled
+	# toll already hit before the cleanse and isn't refunded).
+	var cleanse_cost: int = int(data.get("cleanse_cost", 50))
+	var cleanse_lo: int = payout - cleanse_cost - (toll_amount if toll_possible else 0)
+	var cleanse_hi: int = payout - cleanse_cost - (toll_amount if toll_certain else 0)
 	return {"lo": mini(endure_lo, cleanse_lo), "hi": maxi(endure_hi, cleanse_hi)}
 
 
-static func _blessed_coin_interval(
-	data: Dictionary, payout: int, entry_lo: int, entry_hi: int
-) -> Dictionary:
-	var pool: Array = _boon_pool(data)
-	# A single-entry pool is certain even in random mode.
-	var random_roll: bool = bool(data.get("boon_random", true)) and pool.size() > 1
-
-	if not random_roll:
-		# Every pooled boon applies together: jackpots compound the payout,
-		# interest adds 25% of the balance (bounded by the entry interval).
-		var earned: int = payout
-		var interest_lo: int = 0
-		var interest_hi: int = 0
-		for boon: Dictionary in pool:
-			match str(boon.get("kind", "")):
-				"coin_jackpot":
-					earned = roundi(earned * float(boon.get("factor", 1.0)))
-				"interest":
-					interest_lo = roundi(entry_lo * 0.25)
-					interest_hi = roundi(entry_hi * 0.25)
-		return {"lo": earned + interest_lo, "hi": earned + interest_hi}
-
-	# One boon rolled: bound over the single-boon outcomes (a boon with no coin
-	# effect leaves the plain payout, which is the usual floor).
-	var lo: int = 1 << 30
-	var hi: int = -(1 << 30)
-	for boon: Dictionary in pool:
-		var d_lo: int = payout
-		var d_hi: int = payout
-		match str(boon.get("kind", "")):
-			"coin_jackpot":
-				d_lo = roundi(payout * float(boon.get("factor", 1.0)))
-				d_hi = d_lo
+# Coin outcome {lo, hi, toll} for one applied set of effects, before any endure reward.
+# Magnitudes come from the (already override-resolved) entries: coin factor, toll amount,
+# interest pct. `toll` is returned as the total AMOUNT (0 if none) so the cleanse path can
+# subtract the tuned value.
+static func _applied_coins(applied: Array, payout: int, entry_lo: int, entry_hi: int) -> Dictionary:
+	var earned: int = payout
+	var toll: int = 0
+	var interest_frac: float = 0.0
+	for e: Dictionary in applied:
+		match str(e.get("kind", "")):
+			"coin_penalty", "coin_jackpot":
+				earned = roundi(earned * float(e.get("factor", 1.0)))
+			"toll":
+				toll += int(e.get("amount", TOLL_AMOUNT))
 			"interest":
-				d_lo = payout + roundi(entry_lo * 0.25)
-				d_hi = payout + roundi(entry_hi * 0.25)
-		lo = mini(lo, d_lo)
-		hi = maxi(hi, d_hi)
-	return {"lo": lo, "hi": hi}
+				interest_frac += float(e.get("pct", 0.25))
+	return {
+		"lo": earned - toll + roundi(entry_lo * interest_frac),
+		"hi": earned - toll + roundi(entry_hi * interest_frac),
+		"toll": toll,
+	}
 
 
-# The curse catalog entries a cursed round can roll: its ticked names, or the
-# full gameplay catalog when none are ticked (GameLoop's random-pool rule).
-static func _curse_pool(data: Dictionary) -> Array:
-	var names: Array = data.get("curses", [])
+# The gameplay effect entries an effect round can roll — resolved against the round's
+# per-effect overrides so tuned magnitudes (factor/toll amount/interest pct) feed the coin
+# math. NONE ticked = no gameplay effect (empty pool → pure visual), matching GameLoop.
+static func _effect_pool(data: Dictionary) -> Array:
+	var names: Array = data.get("effects", [])
+	var overrides: Dictionary = data.get("effect_overrides", {})
 	var pool: Array = []
-	for curse: Dictionary in JourneyData.CURSE_CATALOG:
-		if names.is_empty() or str(curse.get("name", "")) in names:
-			pool.append(curse)
-	return pool
-
-
-static func _boon_pool(data: Dictionary) -> Array:
-	var names: Array = data.get("boons", [])
-	var pool: Array = []
-	for boon: Dictionary in JourneyData.BLESSING_CATALOG:
-		if names.is_empty() or str(boon.get("name", "")) in names:
-			pool.append(boon)
+	for e: Dictionary in JourneyData.gameplay_effects():
+		var nm: String = str(e.get("name", ""))
+		if nm in names:
+			pool.append(JourneyData.resolved_effect(nm, overrides))
 	return pool
 
 
@@ -431,6 +409,19 @@ static func _pool_has_kind(pool: Array, kind: String) -> bool:
 		if str(entry.get("kind", "")) == kind:
 			return true
 	return false
+
+
+# Returns a deep graph copy whose round nodes carry the canonical effect-round fields
+# (legacy cursed/blessed migrated), so the whole audit reads one schema.
+static func _normalize_rounds(graph: Dictionary) -> Dictionary:
+	var out: Dictionary = graph.duplicate(true)
+	var nodes: Dictionary = out.get("nodes", {})
+	for id: String in nodes:
+		var node: Dictionary = nodes[id]
+		if str(node.get("type", "")) == "round":
+			var data: Dictionary = node.get("data", {})
+			data.merge(JourneyData.normalize_effect_round(data), true)
+	return out
 
 
 # Forward dataflow over the DAG. Returns per-node ENTRY states:
@@ -527,11 +518,11 @@ static func _flow_analysis(graph: Dictionary, ctx: Dictionary) -> Dictionary:
 					cp["max_ms"] = int(exit_gap_ms["hi"])
 					cp["max_rounds"] = int(exit_gap_r["hi"])
 					cp["at_node"] = id
-				if str(data.get("round_type", "")) == "blessed":
+				if str(data.get("round_type", "")) == "effect":
 					var gift: String = str(data.get("gift_item", ""))
-					if gift != "" and _pool_has_kind(_boon_pool(data), "gift"):
+					if gift != "" and _pool_has_kind(_effect_pool(data), "gift"):
 						exit_poss[gift] = true
-						if not bool(data.get("boon_random", true)):
+						if not bool(data.get("effect_random", true)):
 							exit_guar[gift] = true
 			"storyboard":
 				exit_coins["lo"] = int(exit_coins["lo"]) + int(data.get("coins", 0))
@@ -707,7 +698,7 @@ static func _gate_findings(graph: Dictionary, ctx: Dictionary, flow: Dictionary)
 							}
 						)
 					)
-		elif type == "round" and str(data.get("round_type", "")) == "cursed":
+		elif type == "round" and bool(data.get("resolvable", false)):
 			var cleanse: int = int(data.get("cleanse_cost", 50))
 			if cleanse > int(in_coins["lo"]):
 				(
@@ -932,8 +923,8 @@ static func _coverage_findings(graph: Dictionary, ctx: Dictionary) -> Array:
 				_note_key_source(key_source_at, items, str(data.get("item", "")), id)
 			"round":
 				if (
-					str(data.get("round_type", "")) == "blessed"
-					and _pool_has_kind(_boon_pool(data), "gift")
+					str(data.get("round_type", "")) == "effect"
+					and _pool_has_kind(_effect_pool(data), "gift")
 				):
 					_note_key_source(key_source_at, items, str(data.get("gift_item", "")), id)
 			"shop":
@@ -1178,31 +1169,25 @@ static func _roll_round_coins(
 ) -> int:
 	var payout: int = int(data.get("coins", 0))
 	match str(data.get("round_type", "normal")):
-		"cursed":
-			var pool: Array = _curse_pool(data)
+		"effect":
+			var pool: Array = _effect_pool(data)
 			var applied: Array = pool
-			if bool(data.get("curse_random", true)) and not pool.is_empty():
+			if bool(data.get("effect_random", true)) and not pool.is_empty():
 				applied = [pool[rng.randi_range(0, pool.size() - 1)]]
-			var delta: int = payout + int(data.get("curse_reward", 0))
-			for curse: Dictionary in applied:
-				match str(curse.get("kind", "")):
+			var reward: int = (
+				int(data.get("endure_reward", 0)) if bool(data.get("resolvable", false)) else 0
+			)
+			var delta: int = payout + reward
+			for e: Dictionary in applied:
+				match str(e.get("kind", "")):
 					"coin_penalty":
-						delta -= payout - roundi(payout * float(curse.get("factor", 1.0)))
-					"toll":
-						delta -= TOLL_AMOUNT
-			return delta
-		"blessed":
-			var pool: Array = _boon_pool(data)
-			var applied: Array = pool
-			if bool(data.get("boon_random", true)) and not pool.is_empty():
-				applied = [pool[rng.randi_range(0, pool.size() - 1)]]
-			var delta: int = payout
-			for boon: Dictionary in applied:
-				match str(boon.get("kind", "")):
+						delta -= payout - roundi(payout * float(e.get("factor", 1.0)))
 					"coin_jackpot":
-						delta += roundi(payout * float(boon.get("factor", 1.0))) - payout
+						delta += roundi(payout * float(e.get("factor", 1.0))) - payout
+					"toll":
+						delta -= int(e.get("amount", TOLL_AMOUNT))
 					"interest":
-						delta += roundi(balance * 0.25)
+						delta += roundi(balance * float(e.get("pct", 0.25)))
 					"gift":
 						var gift: String = str(data.get("gift_item", ""))
 						if gift != "":

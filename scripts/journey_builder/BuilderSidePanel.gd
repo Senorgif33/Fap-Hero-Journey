@@ -1216,22 +1216,43 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	_update_funscript_readout(fs_stats_lbl, round_data.get("funscript_path", ""))
 	col.add_child(fs_stats_lbl)
 
-	# Preview the funscript curve (and any stroke modifiers a boss / cursed /
-	# blessed round applies to it) in a graph overlay. Enabled once a funscript
-	# is attached.
-	var preview_btn: Button = UITheme.make_icon_btn(
-		"📈 PREVIEW FUNSCRIPT", round_data.get("funscript_path", "") == "", UITheme.CYAN
+	# Preview the funscript curve (and any stroke modifiers the round applies to it) in a
+	# graph overlay. Effect rounds also tune scale/clamp magnitudes live in there, so the
+	# button advertises it. Enabled once a funscript is attached.
+	var is_effect_round: bool = (
+		JourneyData.normalize_effect_round(arr[idx]).get("round_type", "") == "effect"
 	)
+	var preview_btn: Button = UITheme.make_icon_btn(
+		"📈 PREVIEW & TUNE FUNSCRIPT" if is_effect_round else "📈 PREVIEW FUNSCRIPT",
+		round_data.get("funscript_path", "") == "",
+		UITheme.CYAN
+	)
+	if is_effect_round:
+		preview_btn.tooltip_text = "Preview the strokes and drag scale/clamp effects to tune them live."
 	preview_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	preview_btn.pressed.connect(
 		func() -> void:
+			# Effect rounds get live stroke tuning; the callback persists (and prunes to the
+			# catalog default) as the author drags a magnitude in the preview.
+			var on_tune: Callable = Callable()
+			if JourneyData.normalize_effect_round(arr[idx]).get("round_type", "") == "effect":
+				on_tune = func(ref_name: String, key: String, value: Variant) -> void:
+					var def: Variant = JourneyData.effect_entry(ref_name).get(key, null)
+					if def != null and is_equal_approx(float(value), float(def)):
+						_set_effect_override(arr, idx, ref_name, key, null)
+					else:
+						_set_effect_override(arr, idx, ref_name, key, value)
 			FunscriptPreview.new().open(
 				_owner,
 				arr[idx].get("funscript_path", ""),
 				arr[idx].get("video_path", ""),
 				_round_preview_modifiers(arr[idx]),
 				arr[idx].get("name", ""),
-				_round_preview_label(arr[idx])
+				_round_preview_label(arr[idx]),
+				0,
+				0,
+				Callable(),
+				on_tune
 			)
 	)
 	col.add_child(preview_btn)
@@ -1272,10 +1293,7 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	col.add_child(_make_boss_expander(arr, idx, reselect))
 
 	col.add_child(_side_section_separator())
-	col.add_child(_make_cursed_toggle(arr, idx, reselect))
-
-	col.add_child(_side_section_separator())
-	col.add_child(_make_blessed_toggle(arr, idx, reselect))
+	col.add_child(_make_effect_expander(arr, idx, reselect))
 	return col
 
 
@@ -2354,88 +2372,163 @@ func _make_boss_expander(arr: Array, idx: int, reselect: Callable) -> Control:
 	return wrapper
 
 
-# Cursed-round toggle. Shares round_type with the boss toggle (mutually
-# exclusive). A cursed round rolls a random negative modifier at the start;
-# there's nothing to configure, so this is just a switch.
-func _make_cursed_toggle(arr: Array, idx: int, reselect: Callable) -> Control:
+# Effect-round expander. One round type (mutually exclusive with Boss) that applies a
+# mix of gameplay hindrances and/or boons plus an optional sensory layer, framed by
+# author-set visuals (border/accent colour pickers + header/icon), with an optional
+# resolvable (cleanse/endure) layer. Replaces the
+# retired cursed/blessed toggles; a legacy cursed/blessed node is migrated in place the
+# first time it's edited so it shows — and next saves — as a generic effect round.
+func _make_effect_expander(arr: Array, idx: int, reselect: Callable) -> Control:
 	if not arr[idx].has("round_type"):
 		arr[idx]["round_type"] = "normal"
-	var is_cursed: bool = arr[idx]["round_type"] == "cursed"
+	var rt: String = str(arr[idx]["round_type"])
+	if rt == "cursed" or rt == "blessed":
+		var norm: Dictionary = JourneyData.normalize_effect_round(arr[idx])
+		for k: String in norm:
+			arr[idx][k] = norm[k]
+		for legacy: String in [
+			"curses", "boons", "curse_random", "boon_random", "curse_reward", "theme"
+		]:
+			arr[idx].erase(legacy)
+	var is_effect: bool = arr[idx]["round_type"] == "effect"
 
 	var wrapper: VBoxContainer = VBoxContainer.new()
 	wrapper.add_theme_constant_override("separation", 6)
 
 	var toggle_btn: Button = Button.new()
-	toggle_btn.text = "☠  CURSED ROUND  ✓" if is_cursed else "☠  CURSED ROUND"
+	toggle_btn.text = "✦  EFFECT ROUND  ✓" if is_effect else "✦  EFFECT ROUND"
 	toggle_btn.toggle_mode = true
-	toggle_btn.button_pressed = is_cursed
+	toggle_btn.button_pressed = is_effect
 	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UITheme.style_button(toggle_btn, UITheme.ERROR_SOFT)
+	UITheme.style_button(toggle_btn, UITheme.PURPLE_MID)
 	toggle_btn.toggled.connect(
 		func(pressed: bool) -> void:
-			arr[idx]["round_type"] = "cursed" if pressed else "normal"
+			arr[idx]["round_type"] = "effect" if pressed else "normal"
 			reselect.call(idx)
 	)
 	wrapper.add_child(toggle_btn)
 
-	if is_cursed:
-		var hint: Label = Label.new()
-		hint.text = "A hex is applied at the start. Items stay usable; the player can pay to cleanse it, or endure it for the reward."
-		hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
-		hint.add_theme_font_size_override("font_size", 10)
-		hint.uppercase = true
-		hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		wrapper.add_child(hint)
+	if not is_effect:
+		return wrapper
 
-		wrapper.add_child(_make_reveal_toggle(arr, idx))
+	var hint: Label = Label.new()
+	hint.text = "Applies a mix of gameplay effects (hindrances and/or boons) plus optional sensory modifiers at the start. Items stay usable. Tick nothing for a pure visual round (intro card + border only)."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrapper.add_child(hint)
+
+	wrapper.add_child(_make_reveal_toggle(arr, idx))
+
+	# ── Framing (border on/off + colours + card header) ──
+	wrapper.add_child(HSeparator.new())
+	wrapper.add_child(_side_field_label("APPEARANCE"))
+
+	# Screen border — an edge frame drawn around the play area for the round. Off by
+	# default; the colour picker below only matters when it's on.
+	var show_border: bool = bool(arr[idx].get("show_border", false))
+	var border_toggle: CheckButton = CheckButton.new()
+	border_toggle.text = "SHOW SCREEN BORDER"
+	border_toggle.tooltip_text = "Draws a coloured edge frame around the play area for this round (no screen tint)."
+	border_toggle.add_theme_font_size_override("font_size", 12)
+	border_toggle.button_pressed = show_border
+	border_toggle.toggled.connect(
+		func(on: bool) -> void:
+			arr[idx]["show_border"] = on
+			reselect.call(idx)
+	)
+	wrapper.add_child(border_toggle)
+	if show_border:
 		wrapper.add_child(
-			_make_cursed_int_field(arr, idx, "cleanse_cost", "CLEANSE COST (COINS)", 50)
+			_make_effect_color_field(
+				arr, idx, "frame_color", "BORDER COLOUR", JourneyData.EFFECT_COLOR_NEUTRAL
+			)
+		)
+
+	wrapper.add_child(
+		_make_effect_color_field(
+			arr, idx, "card_accent", "INTRO CARD ACCENT", JourneyData.EFFECT_COLOR_NEUTRAL
+		)
+	)
+	wrapper.add_child(
+		_make_effect_text_field(arr, idx, "card_header", "INTRO CARD HEADER", "EFFECT")
+	)
+
+	# ── Resolvable (cleanse / endure) layer — optional on any effect round ──
+	wrapper.add_child(HSeparator.new())
+	var resolvable: bool = bool(arr[idx].get("resolvable", false))
+	var res_toggle: CheckButton = CheckButton.new()
+	res_toggle.text = "RESOLVABLE (pay to cleanse / endure for a reward)"
+	res_toggle.add_theme_font_size_override("font_size", 12)
+	res_toggle.button_pressed = resolvable
+	res_toggle.toggled.connect(
+		func(on: bool) -> void:
+			arr[idx]["resolvable"] = on
+			reselect.call(idx)
+	)
+	wrapper.add_child(res_toggle)
+	if resolvable:
+		wrapper.add_child(
+			_make_effect_int_field(arr, idx, "cleanse_cost", "CLEANSE COST (COINS)", 50)
 		)
 		wrapper.add_child(
-			_make_cursed_int_field(arr, idx, "curse_reward", "ENDURE REWARD (COINS)", 0)
+			_make_effect_int_field(arr, idx, "endure_reward", "ENDURE REWARD (COINS)", 0)
 		)
 
-		# Random vs fixed selection.
-		var rand_toggle: CheckButton = CheckButton.new()
-		rand_toggle.text = "RANDOM (roll the curse)"
-		rand_toggle.add_theme_font_size_override("font_size", 12)
-		rand_toggle.button_pressed = bool(arr[idx].get("curse_random", true))
-		rand_toggle.toggled.connect(func(on: bool) -> void: arr[idx]["curse_random"] = on)
-		wrapper.add_child(rand_toggle)
+	# ── Effect selection (hindrances + boons in one list) ──
+	wrapper.add_child(HSeparator.new())
+	var rand_toggle: CheckButton = CheckButton.new()
+	rand_toggle.text = "RANDOM (roll the effect)"
+	rand_toggle.add_theme_font_size_override("font_size", 12)
+	rand_toggle.button_pressed = bool(arr[idx].get("effect_random", true))
+	rand_toggle.toggled.connect(func(on: bool) -> void: arr[idx]["effect_random"] = on)
+	wrapper.add_child(rand_toggle)
 
-		wrapper.add_child(_side_field_label("CURSES  (NONE TICKED = FULL RANDOM POOL)"))
-		var selected: Array = arr[idx].get("curses", [])
-		for entry: Dictionary in JourneyData.CURSE_CATALOG:
-			var cname: String = str(entry.get("name", ""))
-			var cb: CheckButton = CheckButton.new()
-			cb.text = cname
-			cb.tooltip_text = str(entry.get("desc", ""))
-			cb.add_theme_font_size_override("font_size", 11)
-			cb.button_pressed = cname in selected
-			cb.toggled.connect(func(on: bool) -> void: _toggle_curse(arr, idx, cname, on))
-			wrapper.add_child(cb)
+	var selected: Array = arr[idx].get("effects", [])
+	var custom_hint: Label = Label.new()
+	custom_hint.text = "Tick an effect to rename it, reflavor it, or tune its strength."
+	custom_hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	custom_hint.add_theme_font_size_override("font_size", 10)
+	custom_hint.uppercase = true
+	custom_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrapper.add_child(custom_hint)
+	wrapper.add_child(_side_field_label("HINDRANCES  (NONE TICKED = NO EFFECT)"))
+	for entry: Dictionary in JourneyData.CURSE_CATALOG:
+		wrapper.add_child(_make_effect_row(arr, idx, entry, selected))
+	wrapper.add_child(_side_field_label("BOONS"))
+	for entry: Dictionary in JourneyData.BLESSING_CATALOG:
+		wrapper.add_child(_make_effect_row(arr, idx, entry, selected))
 
-		# Divider — sets the non-gameplay (visual/audio) section apart from the
-		# gameplay curses above.
-		wrapper.add_child(HSeparator.new())
+	wrapper.add_child(_side_field_label("GIFT ITEM  (FOR THE GIFT BOON)"))
+	var values: Array = [""]
+	var gift_dd: OptionButton = OptionButton.new()
+	gift_dd.add_item("None")
+	for k: String in InventoryService.GetAllItemIds():
+		values.append(k)
+		gift_dd.add_item(str(InventoryService.GetItemData(k).get("name", k)))
+	gift_dd.selected = max(0, values.find(str(arr[idx].get("gift_item", ""))))
+	gift_dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_option_button(gift_dd)
+	gift_dd.item_selected.connect(func(i: int) -> void: arr[idx]["gift_item"] = values[i])
+	wrapper.add_child(gift_dd)
 
-		# Pool toggle sits above the picker. Ticked modifiers always apply; the
-		# toggle additionally lets random sensory modifiers be rolled into the curse.
-		var pool_toggle: CheckButton = CheckButton.new()
-		pool_toggle.text = "INCLUDE IN RANDOM POOL"
-		pool_toggle.tooltip_text = "When on, the random curse roll can also surface non-gameplay modifiers from the full sensory set (not just ticked ones)."
-		pool_toggle.add_theme_font_size_override("font_size", 12)
-		pool_toggle.button_pressed = bool(arr[idx].get("sensory_in_pool", false))
-		pool_toggle.toggled.connect(func(on: bool) -> void: arr[idx]["sensory_in_pool"] = on)
-		wrapper.add_child(pool_toggle)
-
-		wrapper.add_child(_build_sensory_picker(arr, idx))
+	# ── Sensory layer (always-apply modifiers + optional random pool) ──
+	wrapper.add_child(HSeparator.new())
+	var pool_toggle: CheckButton = CheckButton.new()
+	pool_toggle.text = "INCLUDE SENSORY IN RANDOM POOL"
+	pool_toggle.tooltip_text = "When on, the random roll can also surface non-gameplay modifiers from the full sensory set (not just ticked ones)."
+	pool_toggle.add_theme_font_size_override("font_size", 12)
+	pool_toggle.button_pressed = bool(arr[idx].get("sensory_in_pool", false))
+	pool_toggle.toggled.connect(func(on: bool) -> void: arr[idx]["sensory_in_pool"] = on)
+	wrapper.add_child(pool_toggle)
+	wrapper.add_child(_build_sensory_picker(arr, idx, true))  # effect rounds can rename sensory
 
 	return wrapper
 
 
-# Labeled int SpinBox bound to arr[idx][key]. Used by the cursed-round fields.
-func _make_cursed_int_field(arr: Array, idx: int, key: String, label: String, def: int) -> Control:
+# Labeled int SpinBox bound to arr[idx][key]. Used by the effect-round fields.
+func _make_effect_int_field(arr: Array, idx: int, key: String, label: String, def: int) -> Control:
 	var box: VBoxContainer = VBoxContainer.new()
 	box.add_theme_constant_override("separation", 4)
 	box.add_child(_side_field_label(label))
@@ -2451,21 +2544,200 @@ func _make_cursed_int_field(arr: Array, idx: int, key: String, label: String, de
 	return box
 
 
-# Adds/removes a curse name from a cursed round's selected-curses list.
-func _toggle_curse(arr: Array, idx: int, curse_name: String, on: bool) -> void:
-	if not arr[idx].has("curses"):
-		arr[idx]["curses"] = []
-	var list: Array = arr[idx]["curses"]
-	if on:
-		if curse_name not in list:
-			list.append(curse_name)
+# Labeled free-text LineEdit bound to arr[idx][key] (blank falls back to `placeholder`,
+# baked in at save). Used by the effect-round card header / icon fields.
+func _make_effect_text_field(
+	arr: Array, idx: int, key: String, label: String, placeholder: String
+) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 4)
+	box.add_child(_side_field_label(label))
+	var edit: LineEdit = LineEdit.new()
+	edit.text = str(arr[idx].get(key, ""))
+	edit.placeholder_text = placeholder
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_line_edit(edit)
+	edit.text_changed.connect(func(val: String) -> void: arr[idx][key] = val)
+	box.add_child(edit)
+	return box
+
+
+# Labeled colour picker bound to arr[idx][key] as an "#rrggbb" string. Falls back to
+# `default_hex` when the round has no stored colour yet (new round).
+func _make_effect_color_field(
+	arr: Array, idx: int, key: String, label: String, default_hex: String
+) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 4)
+	box.add_child(_side_field_label(label))
+	var stored: String = str(arr[idx].get(key, ""))
+	var picker: ColorPickerButton = ColorPickerButton.new()
+	picker.edit_alpha = false
+	picker.color = (
+		Color.html(stored)
+		if (stored != "" and Color.html_is_valid(stored))
+		else Color.html(default_hex)
+	)
+	picker.custom_minimum_size = Vector2(0, 28)
+	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	picker.color_changed.connect(func(c: Color) -> void: arr[idx][key] = "#" + c.to_html(false))
+	box.add_child(picker)
+	return box
+
+
+# One effect row: a tick bound to the round's effects list and, while ticked, an indented
+# sub-editor to customize it — a name + flavor override (all kinds) and a magnitude control
+# for the non-stroke numeric kinds (coin/score/toll/interest). STROKE kinds (scale/clamp)
+# show a hint pointing to the funscript preview, where their magnitude is tuned live.
+func _make_effect_row(arr: Array, idx: int, entry: Dictionary, selected: Array) -> Control:
+	var nm: String = str(entry.get("name", ""))
+	var kind: String = str(entry.get("kind", ""))
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 2)
+
+	var cb: CheckButton = CheckButton.new()
+	cb.text = nm
+	cb.tooltip_text = str(entry.get("desc", ""))
+	cb.add_theme_font_size_override("font_size", 11)
+	cb.button_pressed = nm in selected
+	col.add_child(cb)
+
+	# Indented sub-editor, shown only while the effect is ticked.
+	var indent: MarginContainer = MarginContainer.new()
+	indent.add_theme_constant_override("margin_left", 28)
+	indent.visible = cb.button_pressed
+	col.add_child(indent)
+	var editor: VBoxContainer = VBoxContainer.new()
+	editor.add_theme_constant_override("separation", 3)
+	indent.add_child(editor)
+
+	editor.add_child(_effect_override_text(arr, idx, nm, "name", "NAME", nm))
+	editor.add_child(
+		_effect_override_text(arr, idx, nm, "desc", "FLAVOR", str(entry.get("desc", "")))
+	)
+	if JourneyData.is_stroke_effect(kind):
+		if not JourneyData.effect_param_specs(kind).is_empty():
+			var h: Label = _side_field_label("↳ tune magnitude in the funscript preview")
+			h.add_theme_color_override("font_color", UITheme.PURPLE_MID)
+			editor.add_child(h)
 	else:
-		list.erase(curse_name)
+		for spec: Dictionary in JourneyData.effect_param_specs(kind):
+			editor.add_child(_effect_override_number(arr, idx, nm, spec, entry))
+
+	cb.toggled.connect(
+		func(on: bool) -> void:
+			_toggle_effect(arr, idx, nm, on)
+			indent.visible = on
+	)
+	return col
+
+
+# Free-text override (name / flavor) for one effect. Blank clears the override (the catalog
+# default, shown as placeholder, is used). Kept as a diff in effect_overrides[name].
+func _effect_override_text(
+	arr: Array, idx: int, effect_name: String, key: String, label: String, placeholder: String
+) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
+	box.add_child(_side_field_label(label))
+	var edit: LineEdit = LineEdit.new()
+	edit.text = str(_stored_override(arr, idx, effect_name, key, ""))
+	edit.placeholder_text = placeholder
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_line_edit(edit)
+	edit.text_changed.connect(
+		func(val: String) -> void:
+			_set_effect_override(arr, idx, effect_name, key, null if val == "" else val)
+	)
+	box.add_child(edit)
+	return box
+
+
+# Magnitude override for a non-stroke numeric effect (coin_penalty/coin_jackpot/
+# score_multiplier/toll/interest). Shows the current value (override or catalog default);
+# returning it to the default clears the override so the diff stays minimal.
+func _effect_override_number(
+	arr: Array, idx: int, effect_name: String, spec: Dictionary, entry: Dictionary
+) -> Control:
+	var key: String = str(spec.get("key", ""))
+	var ctl: String = str(spec.get("ctl", ""))
+	var view_scale: float = 100.0 if ctl == "pct" else 1.0  # store 0–1, show as %
+	var default_val: float = float(entry.get(key, spec.get("min", 0)))
+
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
+	box.add_child(_side_field_label(str(spec.get("label", key))))
+	var spin: SpinBox = SpinBox.new()
+	spin.min_value = float(spec.get("min", 0)) * view_scale
+	spin.max_value = float(spec.get("max", 1)) * view_scale
+	spin.step = float(spec.get("step", 1)) * view_scale
+	spin.suffix = "%" if ctl == "pct" else ("×" if ctl == "mult" else "")
+	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(spin)
+	var stored: Variant = _stored_override(arr, idx, effect_name, key, null)
+	var current: float = float(stored) if stored != null else default_val
+	spin.set_value_no_signal(current * view_scale)
+	spin.value_changed.connect(
+		func(v: float) -> void:
+			var real: float = v / view_scale
+			var store_val: Variant = int(round(real)) if ctl == "coins" else real
+			if is_equal_approx(float(store_val), default_val):
+				_set_effect_override(arr, idx, effect_name, key, null)  # back to default → drop
+			else:
+				_set_effect_override(arr, idx, effect_name, key, store_val)
+	)
+	box.add_child(spin)
+	return box
+
+
+# The stored override value for effect_overrides[effect_name][key], or `default` if unset.
+func _stored_override(
+	arr: Array, idx: int, effect_name: String, key: String, default: Variant
+) -> Variant:
+	var ovs: Dictionary = arr[idx].get("effect_overrides", {})
+	return (ovs.get(effect_name, {}) as Dictionary).get(key, default)
+
+
+# Writes (or, when `value` is null, clears) one override key, pruning empty maps so the diff
+# stays minimal (matching the runtime's "absent = catalog default" contract).
+func _set_effect_override(
+	arr: Array, idx: int, effect_name: String, key: String, value: Variant
+) -> void:
+	if not arr[idx].has("effect_overrides"):
+		if value == null:
+			return
+		arr[idx]["effect_overrides"] = {}
+	var ovs: Dictionary = arr[idx]["effect_overrides"]
+	if not ovs.has(effect_name):
+		if value == null:
+			return
+		ovs[effect_name] = {}
+	var eff: Dictionary = ovs[effect_name]
+	if value == null:
+		eff.erase(key)
+	else:
+		eff[key] = value
+	if eff.is_empty():
+		ovs.erase(effect_name)
+	if ovs.is_empty():
+		arr[idx].erase("effect_overrides")
+
+
+# Adds/removes an effect name from an effect round's selected-effects list.
+func _toggle_effect(arr: Array, idx: int, effect_name: String, on: bool) -> void:
+	if not arr[idx].has("effects"):
+		arr[idx]["effects"] = []
+	var list: Array = arr[idx]["effects"]
+	if on:
+		if effect_name not in list:
+			list.append(effect_name)
+	else:
+		list.erase(effect_name)
 
 
 # A "Non-gameplay modifiers" checklist bound to arr[idx]["sensory"], split into
 # Visual and Audio subsections. Shared by the boss and cursed editors.
-func _build_sensory_picker(arr: Array, idx: int) -> Control:
+func _build_sensory_picker(arr: Array, idx: int, allow_rename: bool = false) -> Control:
 	if not arr[idx].has("sensory"):
 		arr[idx]["sensory"] = []
 	var selected: Array = arr[idx]["sensory"]
@@ -2496,13 +2768,13 @@ func _build_sensory_picker(arr: Array, idx: int) -> Control:
 	content.add_child(_side_field_label("VISUAL"))
 	for entry: Dictionary in JourneyData.SENSORY_CATALOG:
 		if str(entry.get("kind", "")) not in JourneyData.AUDIO_SENSORY_KINDS:
-			content.add_child(_make_sensory_row(arr, idx, entry, selected))
+			content.add_child(_make_sensory_row(arr, idx, entry, selected, allow_rename))
 
 	content.add_child(HSeparator.new())
 	content.add_child(_side_field_label("AUDIO"))
 	for entry: Dictionary in JourneyData.SENSORY_CATALOG:
 		if str(entry.get("kind", "")) in JourneyData.AUDIO_SENSORY_KINDS:
-			content.add_child(_make_sensory_row(arr, idx, entry, selected))
+			content.add_child(_make_sensory_row(arr, idx, entry, selected, allow_rename))
 
 	header.toggled.connect(
 		func(on: bool) -> void:
@@ -2521,7 +2793,9 @@ func _build_sensory_picker(arr: Array, idx: int) -> Control:
 # indented line below — a slider plus a synced % spin box for precise entry. The
 # control is only editable while the modifier is ticked; binary effects
 # (Blinded/Silence) show no control.
-func _make_sensory_row(arr: Array, idx: int, entry: Dictionary, selected: Array) -> Control:
+func _make_sensory_row(
+	arr: Array, idx: int, entry: Dictionary, selected: Array, allow_rename: bool = false
+) -> Control:
 	var sname: String = str(entry.get("name", ""))
 	var col: VBoxContainer = VBoxContainer.new()
 	col.add_theme_constant_override("separation", 2)
@@ -2533,8 +2807,29 @@ func _make_sensory_row(arr: Array, idx: int, entry: Dictionary, selected: Array)
 	cb.button_pressed = sname in selected
 	col.add_child(cb)
 
+	# Rename / reflavor editor (effect rounds only), indented, shown while ticked. Shares the
+	# effect_overrides map with gameplay effects — sensory keeps its own intensity control below.
+	var rename_indent: MarginContainer = null
+	if allow_rename:
+		rename_indent = MarginContainer.new()
+		rename_indent.add_theme_constant_override("margin_left", 28)
+		rename_indent.visible = cb.button_pressed
+		var ed: VBoxContainer = VBoxContainer.new()
+		ed.add_theme_constant_override("separation", 3)
+		ed.add_child(_effect_override_text(arr, idx, sname, "name", "NAME", sname))
+		ed.add_child(
+			_effect_override_text(arr, idx, sname, "desc", "FLAVOR", str(entry.get("desc", "")))
+		)
+		rename_indent.add_child(ed)
+		col.add_child(rename_indent)
+
 	if not entry.has("idef"):
-		cb.toggled.connect(func(on: bool) -> void: _toggle_sensory(arr, idx, sname, on))
+		cb.toggled.connect(
+			func(on: bool) -> void:
+				_toggle_sensory(arr, idx, sname, on)
+				if rename_indent != null:
+					rename_indent.visible = on
+		)
 		return col
 
 	# Intensity line, indented under the checkbox: slider (drag) + spin box (exact).
@@ -2585,6 +2880,8 @@ func _make_sensory_row(arr: Array, idx: int, entry: Dictionary, selected: Array)
 			_toggle_sensory(arr, idx, sname, on)
 			slider.editable = on
 			spin.editable = on
+			if rename_indent != null:
+				rename_indent.visible = on
 	)
 	return col
 
@@ -2646,9 +2943,8 @@ func _toggle_sensory(arr: Array, idx: int, sensory_name: String, on: bool) -> vo
 		list.erase(sensory_name)
 
 
-# A "Show intro card" toggle (default on) — whether a cursed/blessed round plays
-# its animated reveal card naming the effect(s) before the video starts. Off =
-# surprise the player. Shared by the cursed and blessed editors.
+# A "Show intro card" toggle (default on) — whether an effect round plays its animated
+# reveal card naming the effect(s) before the video starts. Off = surprise the player.
 func _make_reveal_toggle(arr: Array, idx: int) -> CheckButton:
 	var t: CheckButton = CheckButton.new()
 	t.text = "SHOW INTRO CARD"
@@ -2659,119 +2955,31 @@ func _make_reveal_toggle(arr: Array, idx: int) -> CheckButton:
 	return t
 
 
-# Blessed-round toggle — the positive mirror of cursed. Shares round_type (so it's
-# mutually exclusive with Boss / Cursed). Boons are pure upside: no cleanse/cost.
-func _make_blessed_toggle(arr: Array, idx: int, reselect: Callable) -> Control:
-	if not arr[idx].has("round_type"):
-		arr[idx]["round_type"] = "normal"
-	var is_blessed: bool = arr[idx]["round_type"] == "blessed"
-
-	var wrapper: VBoxContainer = VBoxContainer.new()
-	wrapper.add_theme_constant_override("separation", 6)
-
-	var toggle_btn: Button = Button.new()
-	toggle_btn.text = "✦  BLESSED ROUND  ✓" if is_blessed else "✦  BLESSED ROUND"
-	toggle_btn.toggle_mode = true
-	toggle_btn.button_pressed = is_blessed
-	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UITheme.style_button(toggle_btn, UITheme.AMBER)
-	toggle_btn.toggled.connect(
-		func(pressed: bool) -> void:
-			arr[idx]["round_type"] = "blessed" if pressed else "normal"
-			reselect.call(idx)
-	)
-	wrapper.add_child(toggle_btn)
-
-	if is_blessed:
-		var hint: Label = Label.new()
-		hint.text = "A boon is applied at the start — score, coins, stronger strokes, a free item, a ward against the next curse, or lingering buffs."
-		hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
-		hint.add_theme_font_size_override("font_size", 10)
-		hint.uppercase = true
-		hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		wrapper.add_child(hint)
-
-		wrapper.add_child(_make_reveal_toggle(arr, idx))
-
-		var rand_toggle: CheckButton = CheckButton.new()
-		rand_toggle.text = "RANDOM (roll the boon)"
-		rand_toggle.add_theme_font_size_override("font_size", 12)
-		rand_toggle.button_pressed = bool(arr[idx].get("boon_random", true))
-		rand_toggle.toggled.connect(func(on: bool) -> void: arr[idx]["boon_random"] = on)
-		wrapper.add_child(rand_toggle)
-
-		wrapper.add_child(_side_field_label("BOONS  (NONE TICKED = FULL RANDOM POOL)"))
-		var selected: Array = arr[idx].get("boons", [])
-		for entry: Dictionary in JourneyData.BLESSING_CATALOG:
-			var bname: String = str(entry.get("name", ""))
-			var cb: CheckButton = CheckButton.new()
-			cb.text = bname
-			cb.tooltip_text = str(entry.get("desc", ""))
-			cb.add_theme_font_size_override("font_size", 11)
-			cb.button_pressed = bname in selected
-			cb.toggled.connect(func(on: bool) -> void: _toggle_boon(arr, idx, bname, on))
-			wrapper.add_child(cb)
-
-		wrapper.add_child(_side_field_label("GIFT ITEM  (FOR THE GIFT BOON)"))
-		var values: Array = [""]
-		var gift_dd: OptionButton = OptionButton.new()
-		gift_dd.add_item("None")
-		for k: String in InventoryService.GetAllItemIds():
-			values.append(k)
-			gift_dd.add_item(str(InventoryService.GetItemData(k).get("name", k)))
-		gift_dd.selected = max(0, values.find(str(arr[idx].get("gift_item", ""))))
-		gift_dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		UITheme.style_option_button(gift_dd)
-		gift_dd.item_selected.connect(func(i: int) -> void: arr[idx]["gift_item"] = values[i])
-		wrapper.add_child(gift_dd)
-
-	return wrapper
-
-
-# Adds/removes a boon name from a blessed round's selected-boons list.
-func _toggle_boon(arr: Array, idx: int, boon_name: String, on: bool) -> void:
-	if not arr[idx].has("boons"):
-		arr[idx]["boons"] = []
-	var list: Array = arr[idx]["boons"]
-	if on:
-		if boon_name not in list:
-			list.append(boon_name)
-	else:
-		list.erase(boon_name)
-
-
 # Stroke-affecting modifiers to preview for this round, by type: boss modifiers
-# directly, or the round's selected curse/boon catalog entries — filtered to the
+# directly, or the round's selected effect catalog entries — filtered to the
 # kinds that actually change the funscript curve (others don't show in a preview).
 func _round_preview_modifiers(item: Dictionary) -> Array:
-	match item.get("round_type", "normal"):
-		"boss":
-			return _stroke_only(item.get("boss_modifiers", []))
-		"cursed":
-			return _stroke_only(_catalog_entries(JourneyData.CURSE_CATALOG, item.get("curses", [])))
-		"blessed":
-			return _stroke_only(
-				_catalog_entries(JourneyData.BLESSING_CATALOG, item.get("boons", []))
-			)
-	return []
+	if item.get("round_type", "normal") == "boss":
+		return _stroke_only(item.get("boss_modifiers", []))
+	# Effect rounds (incl. un-migrated legacy cursed/blessed): resolve each selected gameplay
+	# effect against the round's overrides so the curve reflects current tuning, keep only the
+	# stroke kinds, and carry `_ref` so the preview's live tuner can write overrides back.
+	var nr: Dictionary = JourneyData.normalize_effect_round(item)
+	if nr.get("round_type", "normal") != "effect":
+		return []
+	var overrides: Dictionary = nr.get("effect_overrides", {})
+	var out: Array = []
+	for nm: Variant in nr.get("effects", []):
+		var e: Dictionary = JourneyData.resolved_effect(str(nm), overrides)
+		if not e.is_empty() and JourneyData.is_stroke_effect(str(e.get("kind", ""))):
+			out.append(e)
+	return out
 
 
 func _round_preview_label(item: Dictionary) -> String:
-	match item.get("round_type", "normal"):
-		"cursed":
-			return "Curse effects"
-		"blessed":
-			return "Boon effects"
+	if JourneyData.normalize_effect_round(item).get("round_type", "normal") == "effect":
+		return "Effect modifiers"
 	return "Boss modifiers"
-
-
-# Catalog entries whose name is in `names`, preserving catalog order.
-func _catalog_entries(catalog: Array, names: Array) -> Array:
-	var out: Array = []
-	for entry: Dictionary in catalog:
-		if entry.get("name", "") in names:
-			out.append(entry)
-	return out
 
 
 # Keeps only modifiers whose kind changes the stroke curve.

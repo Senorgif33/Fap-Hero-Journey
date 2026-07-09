@@ -792,28 +792,28 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 	var item_type: String = item.get("type", "round")
 	var round_type: String = item.get("round_type", "normal") if item_type == "round" else ""
 	var is_boss: bool = round_type == "boss"
-	# Terminal nodes use AMBER; boss/cursed/blessed rounds get their own accent;
-	# otherwise the type colour.
+	# Effect rounds (incl. un-migrated legacy cursed/blessed) take their node accent + glyph
+	# straight from the round's author-set visuals (see _effect_look).
+	var effect_look: Dictionary = (
+		_effect_look(item) if round_type in ["effect", "cursed", "blessed"] else {}
+	)
+	# Terminal nodes use AMBER; boss / effect rounds get their own accent; else the type colour.
 	var accent: Color
 	if is_terminal:
 		accent = UITheme.AMBER
 	elif round_type == "boss":
 		accent = UITheme.DANGER
-	elif round_type == "cursed":
-		accent = Color(0.45, 0.95, 0.30)  # toxic green
-	elif round_type == "blessed":
-		accent = Color(1.0, 0.84, 0.30)  # gold
+	elif not effect_look.is_empty():
+		accent = effect_look["color"]
 	else:
 		accent = _type_color(item_type)
-	var icon: String = (
-		"⚔"
-		if is_boss
-		else (
-			"☠"
-			if round_type == "cursed"
-			else ("✦" if round_type == "blessed" else _type_icon(item_type))
-		)
-	)
+	var icon: String
+	if is_boss:
+		icon = "⚔"
+	elif not effect_look.is_empty():
+		icon = effect_look["icon"]
+	else:
+		icon = _type_icon(item_type)
 	var primary: String = _type_label(item)
 	var secondary: String = _type_sublabel(item)
 	if is_terminal:
@@ -960,6 +960,25 @@ func _type_icon(item_type: String) -> String:
 	return "•"
 
 
+# Node accent colour + glyph for an effect round: the author's border colour + card icon,
+# or the baked look for a legacy cursed/blessed round that hasn't been re-saved yet.
+func _effect_look(item: Dictionary) -> Dictionary:
+	match str(item.get("round_type", "")):
+		"cursed":
+			return {"color": Color.html(JourneyData.EFFECT_COLOR_HINDER), "icon": "☠"}
+		"blessed":
+			return {"color": Color.html(JourneyData.EFFECT_COLOR_BOON), "icon": "✦"}
+		_:
+			var hex: String = str(item.get("frame_color", ""))
+			var color: Color = (
+				Color.html(hex)
+				if (hex != "" and Color.html_is_valid(hex))
+				else Color.html(JourneyData.EFFECT_COLOR_NEUTRAL)
+			)
+			var glyph: String = str(item.get("card_icon", ""))
+			return {"color": color, "icon": glyph if glyph != "" else "✦"}
+
+
 func _type_label(item: Dictionary) -> String:
 	var item_type: String = item.get("type", "round")
 	match item_type:
@@ -991,10 +1010,8 @@ func _type_sublabel(item: Dictionary) -> String:
 			match rt:
 				"boss":
 					rlabel = "BOSS ROUND"
-				"cursed":
-					rlabel = "☠ CURSED ROUND"
-				"blessed":
-					rlabel = "✦ BLESSED ROUND"
+				"effect", "cursed", "blessed":
+					rlabel = "✦ EFFECT ROUND"
 			# Checkpoint marker — author-set save point, honoured on every round
 			# type (the banner shows before a boss round's intro card).
 			if item.get("is_checkpoint", false):

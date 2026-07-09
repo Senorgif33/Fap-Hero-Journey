@@ -53,8 +53,8 @@ func test_audio_kinds_subset() -> void:
 		)
 
 
-# Effect names are the saved ids selected from curses[]/sensory[]/boons[] and
-# resolved by name at runtime — a collision across catalogs would mis-resolve.
+# Effect names are the saved ids selected into an effect round's effects[] / sensory[]
+# and resolved by name at runtime — a collision across catalogs would mis-resolve.
 func test_names_unique_across_catalogs() -> void:
 	var seen := {}
 	for cat in [JD.CURSE_CATALOG, JD.SENSORY_CATALOG, JD.BLESSING_CATALOG]:

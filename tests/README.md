@@ -67,26 +67,28 @@ Ordered by value × ease. ✅ = written, ▢ = planned.
 ### Tier 2 — journey serialize ↔ scan round-trip (the content-corruption guard)
 
 - ✅ **Step 1 — scanner parse round-trip** (`journey_scan_test.gd`): writes a
-  full-coverage journey.json (cursed + boss rounds, shop, storyboard, conditional
-  fork with a nested fork) to a temp `user://` dir and runs the real
-  `parse_journey`, asserting every authored field on both the top-level and
-  fork-path round sites, plus the `ShowReveal` default and the empty-on-missing
-  case. No media files: rounds carry cached `ActionCount`/`LengthMs`, hitting the
-  scanner's fast path. Guards scanner-side field drops; doubles as the schema.
-- ✅ **Step 2 — builder↔scanner round-trip** (`journey_build_roundtrip_test.gd`):
-  the authored-field serialization was extracted from the builder's two save sites
-  into one shared pure function, `JourneyData.round_to_json(item)` (the save loop
-  now just merges in the media/slug fields it computes). The test runs an item
-  through the real `round_to_json` → real `parse_journey` and asserts equality,
-  catching a *builder*-side key drop/typo (which step 1 can't, since it hand-authors
-  the JSON). Also unit-tests `round_to_json`'s shape directly and the default values.
-  This collapsed the duplicated authored-field write block to one site.
-  - *Remaining:* shops / storyboards / fork-resolution serialization still live
-    inline in the builder save — same extraction could fold them into
-    `round_to_json`-style helpers if/when they grow. Not urgent.
-  - *VideoPath round-trip:* both round-trip suites now also assert the explicit
-    `VideoPath` survives save → scan (resolved to absolute), with a no-`VideoPath`
-    case asserting the folder-scan fallback (`JourneyData._round_video`).
+  full-coverage journey.json (a legacy **cursed** round + a boss round, shop,
+  storyboard, conditional fork with a nested fork) to a temp `user://` dir and runs
+  the real `parse_journey`, asserting every authored field on both the top-level and
+  fork-path round sites, plus the `ShowReveal` default and the empty-on-missing case.
+  The cursed round doubles as **migration coverage** — it asserts the scanner
+  normalizes it to the generic effect schema (`round_type: effect`, `theme: hinder`,
+  `resolvable`, `effects`, `endure_reward`). No media files: rounds carry cached
+  `ActionCount`/`LengthMs`, hitting the scanner's fast path. Guards scanner-side
+  field drops; doubles as the schema.
+- ✅ **Effect-round migration + valence** (`effect_round_test.gd`): unit-tests the
+  pure `JourneyData` helpers — `normalize_effect_round` (cursed/blessed → generic,
+  Ward dropped, generic passthrough, normal/boss untouched), `effect_is_benefit`,
+  `gameplay_effects`, and the theme-scoped `effect_roll_pool`.
+- ✅ **Step 2 — builder-side save serialization** (`graph_save_test.gd`): the
+  builder now writes Format-2 (`Nodes[]`) via `JourneyData.coerce_node_save_data`,
+  which stores each node's `data` verbatim — so builder→disk is a pure normalization
+  step, not a lossy transform. `graph_save_test` unit-tests that function directly:
+  numeric coercion (the "coins lesson"), baseline-field defaults, node-key stripping,
+  deep-copy isolation, and the legacy cursed/blessed → effect **migrate-on-save**
+  (retired keys dropped). *(The old `journey_build_roundtrip_test.gd`, which round-
+  tripped through the since-removed `round_to_json` legacy-tree serializer, was
+  deleted — that serializer no longer exists.)*
 - ✅ **Shared media pool** (`media_pool_test.gd`): the save-time dedup that stores
   each video / funscript source once under `media/m_<fingerprint>.<ext>`. Unit-tests
   the pure planner `JourneyData.plan_media_pool` (first-copy vs skip-on-reuse, 5
