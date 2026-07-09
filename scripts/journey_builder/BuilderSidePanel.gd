@@ -2522,7 +2522,7 @@ func _make_effect_expander(arr: Array, idx: int, reselect: Callable) -> Control:
 	pool_toggle.button_pressed = bool(arr[idx].get("sensory_in_pool", false))
 	pool_toggle.toggled.connect(func(on: bool) -> void: arr[idx]["sensory_in_pool"] = on)
 	wrapper.add_child(pool_toggle)
-	wrapper.add_child(_build_sensory_picker(arr, idx))
+	wrapper.add_child(_build_sensory_picker(arr, idx, true))  # effect rounds can rename sensory
 
 	return wrapper
 
@@ -2737,7 +2737,7 @@ func _toggle_effect(arr: Array, idx: int, effect_name: String, on: bool) -> void
 
 # A "Non-gameplay modifiers" checklist bound to arr[idx]["sensory"], split into
 # Visual and Audio subsections. Shared by the boss and cursed editors.
-func _build_sensory_picker(arr: Array, idx: int) -> Control:
+func _build_sensory_picker(arr: Array, idx: int, allow_rename: bool = false) -> Control:
 	if not arr[idx].has("sensory"):
 		arr[idx]["sensory"] = []
 	var selected: Array = arr[idx]["sensory"]
@@ -2768,13 +2768,13 @@ func _build_sensory_picker(arr: Array, idx: int) -> Control:
 	content.add_child(_side_field_label("VISUAL"))
 	for entry: Dictionary in JourneyData.SENSORY_CATALOG:
 		if str(entry.get("kind", "")) not in JourneyData.AUDIO_SENSORY_KINDS:
-			content.add_child(_make_sensory_row(arr, idx, entry, selected))
+			content.add_child(_make_sensory_row(arr, idx, entry, selected, allow_rename))
 
 	content.add_child(HSeparator.new())
 	content.add_child(_side_field_label("AUDIO"))
 	for entry: Dictionary in JourneyData.SENSORY_CATALOG:
 		if str(entry.get("kind", "")) in JourneyData.AUDIO_SENSORY_KINDS:
-			content.add_child(_make_sensory_row(arr, idx, entry, selected))
+			content.add_child(_make_sensory_row(arr, idx, entry, selected, allow_rename))
 
 	header.toggled.connect(
 		func(on: bool) -> void:
@@ -2793,7 +2793,9 @@ func _build_sensory_picker(arr: Array, idx: int) -> Control:
 # indented line below — a slider plus a synced % spin box for precise entry. The
 # control is only editable while the modifier is ticked; binary effects
 # (Blinded/Silence) show no control.
-func _make_sensory_row(arr: Array, idx: int, entry: Dictionary, selected: Array) -> Control:
+func _make_sensory_row(
+	arr: Array, idx: int, entry: Dictionary, selected: Array, allow_rename: bool = false
+) -> Control:
 	var sname: String = str(entry.get("name", ""))
 	var col: VBoxContainer = VBoxContainer.new()
 	col.add_theme_constant_override("separation", 2)
@@ -2805,8 +2807,29 @@ func _make_sensory_row(arr: Array, idx: int, entry: Dictionary, selected: Array)
 	cb.button_pressed = sname in selected
 	col.add_child(cb)
 
+	# Rename / reflavor editor (effect rounds only), indented, shown while ticked. Shares the
+	# effect_overrides map with gameplay effects — sensory keeps its own intensity control below.
+	var rename_indent: MarginContainer = null
+	if allow_rename:
+		rename_indent = MarginContainer.new()
+		rename_indent.add_theme_constant_override("margin_left", 28)
+		rename_indent.visible = cb.button_pressed
+		var ed: VBoxContainer = VBoxContainer.new()
+		ed.add_theme_constant_override("separation", 3)
+		ed.add_child(_effect_override_text(arr, idx, sname, "name", "NAME", sname))
+		ed.add_child(
+			_effect_override_text(arr, idx, sname, "desc", "FLAVOR", str(entry.get("desc", "")))
+		)
+		rename_indent.add_child(ed)
+		col.add_child(rename_indent)
+
 	if not entry.has("idef"):
-		cb.toggled.connect(func(on: bool) -> void: _toggle_sensory(arr, idx, sname, on))
+		cb.toggled.connect(
+			func(on: bool) -> void:
+				_toggle_sensory(arr, idx, sname, on)
+				if rename_indent != null:
+					rename_indent.visible = on
+		)
 		return col
 
 	# Intensity line, indented under the checkbox: slider (drag) + spin box (exact).
@@ -2857,6 +2880,8 @@ func _make_sensory_row(arr: Array, idx: int, entry: Dictionary, selected: Array)
 			_toggle_sensory(arr, idx, sname, on)
 			slider.editable = on
 			spin.editable = on
+			if rename_indent != null:
+				rename_indent.visible = on
 	)
 	return col
 

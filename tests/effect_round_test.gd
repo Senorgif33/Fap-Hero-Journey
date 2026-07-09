@@ -185,3 +185,12 @@ func test_effect_param_routing() -> void:
 func test_toll_interest_catalog_defaults() -> void:
 	assert_int(int(JD.effect_entry("Toll").get("amount", -1))).is_equal(40)
 	assert_float(float(JD.effect_entry("Interest").get("pct", -1.0))).is_equal_approx(0.25, 0.0001)
+
+
+# A renamed sensory effect keeps its intensity: intensity_for looks up by _ref (the original
+# catalog name the sensory_intensity map is keyed on), not the custom display name.
+func test_sensory_intensity_survives_rename() -> void:
+	var round := {"sensory_intensity": {"Murk": 0.9}}
+	var resolved := JD.resolved_effect("Murk", {"Murk": {"name": "The Haze"}})
+	assert_str(str(resolved["name"])).is_equal("The Haze")  # renamed
+	assert_float(SensoryFX.intensity_for(round, resolved)).is_equal_approx(0.9, 0.0001)

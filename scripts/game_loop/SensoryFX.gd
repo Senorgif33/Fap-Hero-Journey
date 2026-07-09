@@ -227,10 +227,13 @@ func _exit_tree() -> void:
 
 
 # This round's intensity (0–1) for a sensory modifier: the author's per-round
-# override if set, else the catalog default. Used by cursed and boss rounds.
+# override if set, else the catalog default. Used by effect and boss rounds.
+# `sensory_intensity` is keyed by the ORIGINAL catalog name, so look up via `_ref`
+# (present on override-resolved entries) — a custom-renamed sensory effect keeps its
+# intensity. Falls back to `name` for un-resolved entries (boss rounds).
 static func intensity_for(round: Dictionary, entry: Dictionary) -> float:
 	var overrides: Dictionary = round.get("sensory_intensity", {})
-	var nm: String = str(entry.get("name", ""))
+	var nm: String = str(entry.get("_ref", entry.get("name", "")))
 	if overrides.has(nm):
 		return clampf(float(overrides[nm]), 0.0, 1.0)
 	return float(entry.get("idef", 0.5))

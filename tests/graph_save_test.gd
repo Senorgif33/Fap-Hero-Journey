@@ -128,6 +128,33 @@ func test_coerce_deep_copies_source() -> void:
 	assert_int((src["effects"] as Array).size()).is_equal(1)
 
 
+# On save, overrides for effects the round no longer selects (in effects[] or sensory[]) are
+# pruned; overrides for ticked effects survive.
+func test_coerce_prunes_orphan_overrides() -> void:
+	var out := (
+		JourneyData
+		. coerce_node_save_data(
+			"round",
+			{
+				"name": "A",
+				"round_type": "effect",
+				"effects": ["Greed"],
+				"sensory": ["Murk"],
+				"effect_overrides":
+				{
+					"Greed": {"factor": 0.25},  # ticked gameplay — kept
+					"Murk": {"name": "The Haze"},  # ticked sensory — kept
+					"Choked": {"min": 10},  # not selected — pruned
+				},
+			}
+		)
+	)
+	var ov := out["effect_overrides"] as Dictionary
+	assert_bool(ov.has("Greed")).is_true()
+	assert_bool(ov.has("Murk")).is_true()
+	assert_bool(ov.has("Choked")).is_false()
+
+
 # ── video planning (transcode plan + progress modal) ─────────────────────────
 
 

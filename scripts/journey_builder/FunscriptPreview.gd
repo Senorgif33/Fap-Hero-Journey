@@ -332,8 +332,11 @@ func _build_tuning_strip() -> Control:
 		group.add_child(name_lbl)
 		var row: HBoxContainer = HBoxContainer.new()
 		row.add_theme_constant_override("separation", 6)
-		for spec: Dictionary in specs:
-			row.add_child(_make_tune_control(m, spec))
+		if String(m.get("kind", "")) == "clamp":
+			_fill_clamp_row(row, m)  # min/max cross-linked so the range can't invert
+		else:
+			for spec: Dictionary in specs:
+				row.add_child(_make_tune_control(m, spec))
 		group.add_child(row)
 		strip.add_child(group)
 
@@ -352,6 +355,29 @@ func _build_tuning_strip() -> Control:
 	return box
 
 
+# A labeled SpinBox, returned as {box, spin} so callers can wire the value_changed signal.
+func _labeled_spin(
+	label: String, mn: float, mx: float, step: float, suffix: String, value: float
+) -> Dictionary:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 0)
+	var lab: Label = Label.new()
+	lab.text = label
+	lab.add_theme_font_size_override("font_size", 9)
+	lab.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	box.add_child(lab)
+	var spin: SpinBox = SpinBox.new()
+	spin.min_value = mn
+	spin.max_value = mx
+	spin.step = step
+	spin.suffix = suffix
+	spin.custom_minimum_size = Vector2(84, 0)
+	UITheme.style_spin_box(spin)
+	spin.set_value_no_signal(value)
+	box.add_child(spin)
+	return {"box": box, "spin": spin}
+
+
 # One SpinBox editing `m[spec.key]` in place: rewrites the modifier params, redraws the
 # curve, and reports the change through _on_tune (which persists / prunes on the round).
 func _make_tune_control(m: Dictionary, spec: Dictionary) -> Control:
@@ -359,33 +385,63 @@ func _make_tune_control(m: Dictionary, spec: Dictionary) -> Control:
 	var ctl: String = String(spec.get("ctl", ""))
 	var ref: String = String(m.get("_ref", m.get("name", "")))
 	var view_scale: float = 100.0 if ctl == "pct" else 1.0
-
-	var box: VBoxContainer = VBoxContainer.new()
-	box.add_theme_constant_override("separation", 0)
-	var lab: Label = Label.new()
-	lab.text = String(spec.get("label", key))
-	lab.add_theme_font_size_override("font_size", 9)
-	lab.add_theme_color_override("font_color", UITheme.SEPARATOR)
-	box.add_child(lab)
-	var spin: SpinBox = SpinBox.new()
-	spin.min_value = float(spec.get("min", 0)) * view_scale
-	spin.max_value = float(spec.get("max", 1)) * view_scale
-	spin.step = float(spec.get("step", 1)) * view_scale
-	spin.suffix = "%" if ctl == "pct" else ""
-	spin.custom_minimum_size = Vector2(84, 0)
-	UITheme.style_spin_box(spin)
-	spin.set_value_no_signal(float(m.get(key, spec.get("min", 0))) * view_scale)
+	var ui: Dictionary = _labeled_spin(
+		String(spec.get("label", key)),
+		float(spec.get("min", 0)) * view_scale,
+		float(spec.get("max", 1)) * view_scale,
+		float(spec.get("step", 1)) * view_scale,
+		"%" if ctl == "pct" else "",
+		float(m.get(key, spec.get("min", 0))) * view_scale
+	)
+	var spin: SpinBox = ui["spin"]
 	spin.value_changed.connect(
 		func(v: float) -> void:
 			var real: float = v / view_scale
 			var store_val: Variant = int(round(real)) if ctl in ["pos", "coins"] else real
 			m[key] = store_val
 			_refresh_modified()
-			if _on_tune.is_valid():
-				_on_tune.call(ref, key, store_val)
+			_persist_tune(ref, key, store_val)
 	)
-	box.add_child(spin)
-	return box
+	return ui["box"]
+
+
+# Clamp's min + max, cross-linked: dragging min above max pushes max up (and vice versa) so
+# the range can never invert — an inverted clamp maps strokes backwards, never what's wanted.
+func _fill_clamp_row(row: HBoxContainer, m: Dictionary) -> void:
+	var ref: String = String(m.get("_ref", m.get("name", "")))
+	var mn_ui: Dictionary = _labeled_spin("Range min", 0, 100, 1, "", int(m.get("min", 0)))
+	var mx_ui: Dictionary = _labeled_spin("Range max", 0, 100, 1, "", int(m.get("max", 100)))
+	var min_spin: SpinBox = mn_ui["spin"]
+	var max_spin: SpinBox = mx_ui["spin"]
+	min_spin.value_changed.connect(
+		func(v: float) -> void:
+			var mn: int = int(round(v))
+			m["min"] = mn
+			_persist_tune(ref, "min", mn)
+			if mn > int(max_spin.value):
+				max_spin.set_value_no_signal(mn)
+				m["max"] = mn
+				_persist_tune(ref, "max", mn)
+			_refresh_modified()
+	)
+	max_spin.value_changed.connect(
+		func(v: float) -> void:
+			var mx: int = int(round(v))
+			m["max"] = mx
+			_persist_tune(ref, "max", mx)
+			if mx < int(min_spin.value):
+				min_spin.set_value_no_signal(mx)
+				m["min"] = mx
+				_persist_tune(ref, "min", mx)
+			_refresh_modified()
+	)
+	row.add_child(mn_ui["box"])
+	row.add_child(mx_ui["box"])
+
+
+func _persist_tune(ref: String, key: String, value: Variant) -> void:
+	if _on_tune.is_valid():
+		_on_tune.call(ref, key, value)
 
 
 # ── Modifier math ────────────────────────────────────────────────────────────

@@ -607,6 +607,7 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			]:
 				out.erase(legacy)
 			out.merge(normalize_effect_round(data), true)
+			_prune_orphan_overrides(out)  # drop tuning for effects no longer ticked
 		"shop":
 			out["title"] = str(data.get("title", ""))
 			out["mode"] = str(data.get("mode", "pool"))
@@ -634,6 +635,23 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 static func _fill_default(out: Dictionary, key: String, default: Variant) -> void:
 	if not out.has(key):
 		out[key] = default
+
+
+# Drops effect_overrides for effects the round no longer selects (in effects[] or sensory[]).
+# Un-ticking an effect leaves its tuning in place during editing (re-tick restores it), but the
+# save prunes the orphans so on-disk diffs stay lean. Mutates `out` in place.
+static func _prune_orphan_overrides(out: Dictionary) -> void:
+	var overrides: Dictionary = out.get("effect_overrides", {})
+	if overrides.is_empty():
+		return
+	var live: Dictionary = {}
+	for nm: Variant in out.get("effects", []):
+		live[str(nm)] = true
+	for nm: Variant in out.get("sensory", []):
+		live[str(nm)] = true
+	for nm: String in overrides.keys():
+		if not live.has(nm):
+			overrides.erase(nm)
 
 
 # ── Item templates ───────────────────────────────────────────────────────────
