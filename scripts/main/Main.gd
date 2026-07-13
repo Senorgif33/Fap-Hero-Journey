@@ -35,6 +35,7 @@ const FLICKER_DURATION: float = 0.08
 @onready var _divider: HSeparator = $Panel/CenterContainer/TitleSection/TitleDivider
 @onready var _button_container: VBoxContainer = $Panel/CenterContainer/ButtonContainer
 @onready var _start_btn: Button = $Panel/CenterContainer/ButtonContainer/StartButton
+@onready var _randomize_btn: Button = $Panel/CenterContainer/ButtonContainer/RandomizeButton
 @onready var _options_btn: Button = $Panel/CenterContainer/ButtonContainer/OptionsButton
 @onready var _build_btn: Button = $Panel/CenterContainer/ButtonContainer/BuildButton
 @onready var _quit_btn: Button = $Panel/CenterContainer/ButtonContainer/QuitButton
@@ -351,6 +352,7 @@ func _apply_theme() -> void:
 	_divider.add_theme_stylebox_override("separator", sep)
 
 	_style_button(_start_btn, UITheme.PURPLE_BRIGHT)
+	_style_button(_randomize_btn, UITheme.CYAN)
 	_style_button(_options_btn, UITheme.MAGENTA)
 	_style_button(_build_btn, UITheme.PURPLE_MID)
 	_style_button(_quit_btn, UITheme.PURPLE_MID)
@@ -402,10 +404,11 @@ func _style_button(btn: Button, accent: Color) -> void:
 
 func _connect_buttons() -> void:
 	_start_btn.pressed.connect(_on_start_pressed)
+	_randomize_btn.pressed.connect(_on_randomize_pressed)
 	_options_btn.pressed.connect(_on_options_pressed)
 	_build_btn.pressed.connect(_on_build_pressed)
 	_quit_btn.pressed.connect(_on_quit_pressed)
-	for btn: Button in [_start_btn, _options_btn, _build_btn, _quit_btn]:
+	for btn: Button in [_start_btn, _randomize_btn, _options_btn, _build_btn, _quit_btn]:
 		btn.mouse_entered.connect(_hover_btn.bind(btn, true))
 		btn.mouse_exited.connect(_hover_btn.bind(btn, false))
 
@@ -418,7 +421,7 @@ func _connect_buttons() -> void:
 # Staged entrance: the title section pops in, the buttons cascade up one at a
 # time, then the tagline fades in. Buttons are locked until it finishes.
 func _play_intro() -> void:
-	var btns: Array = [_start_btn, _options_btn, _build_btn, _quit_btn]
+	var btns: Array = [_start_btn, _randomize_btn, _options_btn, _build_btn, _quit_btn]
 	_title_section.modulate.a = 0.0
 	_tagline.modulate.a = 0.0
 	for btn: Button in btns:
@@ -487,6 +490,10 @@ func _hover_btn(btn: Button, hovering: bool) -> void:
 
 func _on_start_pressed() -> void:
 	Transition.change_scene("res://scenes/journey_select/JourneySelect.tscn")
+
+
+func _on_randomize_pressed() -> void:
+	Transition.change_scene("res://scenes/randomizer/Randomizer.tscn")
 
 
 func _on_options_pressed() -> void:

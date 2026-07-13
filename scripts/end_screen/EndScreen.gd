@@ -56,6 +56,7 @@ func _ready() -> void:
 	_build_confetti()
 	_populate()
 	_back_btn.pressed.connect(_on_back_pressed)
+	_maybe_add_save_run_button()
 	_play_reveal()
 
 
@@ -441,6 +442,40 @@ func _fmt(total_seconds: int) -> String:
 
 func _on_back_pressed() -> void:
 	Transition.change_scene("res://scenes/journey_select/JourneySelect.tscn")
+
+
+# Randomized runs are ephemeral (their temp folder is wiped on the next generate),
+# so offer to keep the one just finished as a permanent catalogue journey. Only
+# shown when this journey is a live randomizer run — detected by its folder living
+# under RandomizerRun.RUNS_DIR — and only while that temp folder still exists.
+func _maybe_add_save_run_button() -> void:
+	var folder: String = str(GameState.Journey.get("folder", ""))
+	if not folder.begins_with(RandomizerRun.RUNS_DIR):
+		return
+	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(folder)):
+		return
+	var save_btn := Button.new()
+	save_btn.text = "★ SAVE THIS RUN"
+	save_btn.tooltip_text = "Add this randomized run to your journey library to replay later"
+	UITheme.style_button(save_btn, UITheme.AMBER, 20, 14)
+	var parent: Node = _back_btn.get_parent()
+	parent.add_child(save_btn)
+	parent.move_child(save_btn, _back_btn.get_index())  # sit just above Back to Menu
+	save_btn.pressed.connect(_on_save_run_pressed.bind(save_btn, folder))
+
+
+func _on_save_run_pressed(btn: Button, folder: String) -> void:
+	btn.disabled = true
+	btn.text = "SAVING…"
+	await get_tree().process_frame  # let the label repaint before the blocking copy
+	# Match the preview's Keep: use the run's own journey Name (carries the seed).
+	var run_name: String = str(GameState.Journey.get("title", "Random Run"))
+	var res: Dictionary = RandomizerRun.keep(folder, run_name)
+	if bool(res["ok"]):
+		btn.text = "SAVED ✓"
+	else:
+		btn.text = "SAVE FAILED — TRY AGAIN"
+		btn.disabled = false
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Fap Hero Journey"
-config/version="0.5.1"
+config/version="0.6.0"
 run/main_scene="uid://2kqlt5tkvd2b"
 config/features=PackedStringArray("4.6", "C#", "Forward Plus")
 config/icon="uid://ulq88yyawpam"
@@ -30,6 +30,8 @@ FunscriptPlayer="*uid://20dnrtc866mq"
 Transition="*uid://b2y3bfjyfdjjw"
 MusicService="*res://Globals/MusicService.gd"
 JourneySaveService="*res://Globals/JourneySaveService.gd"
+MediaPoolService="*res://Globals/MediaPoolService.gd"
+RandomizerLibrary="*res://Globals/RandomizerLibrary.gd"
 ScoreboardService="*res://Globals/ScoreboardService.gd"
 UpdateService="*res://Globals/UpdateService.gd"
 GlowEnvironment="*res://Globals/GlowEnvironment.gd"

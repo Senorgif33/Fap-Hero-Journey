@@ -20,9 +20,9 @@ const TOP_BAR_HEIGHT: int = 64
 # Difficulty list and file-extension sets live in JourneyData (canonical schema).
 # Referenced here as JourneyData.DIFFICULTIES / JourneyData.IMAGE_EXTENSIONS etc.
 
-# EIRTeam.FFmpeg only decodes H.264; everything else gets transcoded on save.
-const H264_NAMES: Array[String] = ["h264", "avc1", "avc"]
-const TRANSCODE_PROGRESS_FILE: String = "user://transcode_progress.txt"
+# Codec/pixel-format probing, the transcode-need decision, and the actual ffmpeg
+# encode live in MediaPoolService (shared with the randomizer library). This file
+# owns only the graph walk that builds the plan and the save-progress modal.
 
 # ── Save error / copy result cause codes ────────────────────────────────────
 # Every SaveError flowing through _show_save_error_modal carries one of these
@@ -112,7 +112,6 @@ const PASTE_OFFSET: Vector2 = Vector2(48, 48)
 var _side_renderer: BuilderSidePanel = null
 
 var _transcode_cancel: bool = false
-var _transcode_pid: int = -1
 
 # Set true when a media copy/transcode fails or is cancelled mid-save (by _copy_file or
 # _save_round_node_media), so the _save_graph_nodes walk can stop and _on_save_pressed
@@ -2791,14 +2790,6 @@ func _validate_presave() -> bool:
 	return false
 
 
-# Pixel formats the runtime decoder (EIRTeam.FFmpeg) handles: 8-bit 4:2:0, both
-# the standard (`yuv420p`) and full-range JPEG (`yuvj420p`) variants. Anything
-# else (10-bit, 4:2:2, 4:4:4) is re-encoded when auto-transcode is on, even if
-# the codec is already H.264 — these are the "it's h264 but still won't play"
-# cases. Kept broad to avoid needless re-encodes.
-const SAFE_PIX_FMTS: Array[String] = ["yuv420p", "yuvj420p"]
-
-
 # The _transcode_plan key for a (source, trim) combo. Untrimmed keeps the bare
 # source path (legacy shape); a pending trim gets its own entry so the same
 # source can be cut differently — or not at all — by different rounds.
@@ -2846,7 +2837,7 @@ func _build_transcode_plan() -> bool:
 
 	# Honest fallback: without ffprobe/ffmpeg we can neither verify, convert,
 	# nor cut videos. Stop with guidance rather than silently copy and hope.
-	if not _ffmpeg_available():
+	if not MediaPoolService.is_available():
 		_show_save_error_single(
 			"CANNOT SAVE JOURNEY",
 			CAUSE_FFMPEG_MISSING,
@@ -2869,24 +2860,16 @@ func _build_transcode_plan() -> bool:
 			continue  # transcode off: only pending trims are baked
 
 		if not src_info.has(src):
-			src_info[src] = _get_video_stream_info(src)
-		var codec: String = (src_info[src] as Dictionary)["codec"]
-		var pix: String = (src_info[src] as Dictionary)["pix_fmt"]
-
-		var reason: String = ""
-		if codec == "":
-			reason = "unverifiable"  # couldn't read — re-encode to be safe
-		elif not (codec in H264_NAMES):
-			reason = codec  # wrong codec (HEVC/AV1/VP9/…)
-		elif pix != "" and not (pix in SAFE_PIX_FMTS):
-			reason = "%s %s" % [codec, pix]  # h264 but undecodable profile
-		if is_trim and reason == "":
-			reason = "trim"  # fine codec, but the cut itself demands the encode
+			src_info[src] = MediaPoolService.probe_stream_info(src)
+		var info: Dictionary = src_info[src]
+		var reason: String = MediaPoolService.classify_transcode(
+			str(info["codec"]), str(info["pix_fmt"]), is_trim
+		)
 		if reason == "":
 			continue
 
 		if not src_duration.has(src):
-			src_duration[src] = _video_duration_seconds(src)
+			src_duration[src] = MediaPoolService.probe_duration_seconds(src)
 		var duration: float = float(src_duration[src])
 		if is_trim:
 			# Progress-bar duration = the trimmed window's length.
@@ -3199,8 +3182,16 @@ func _save_round_node_media(
 			if is_transcode:
 				var info: Dictionary = _transcode_plan[plan_key]
 				_update_modal_round(modal, rorder, total, round_name, info["codec"])
-				var ok: bool = await _transcode_video(
-					vid_src, vid_dst, info["duration"], modal, trim_in, trim_out
+				_transcode_cancel = false
+				var ok: bool = await MediaPoolService.transcode_video(
+					vid_src,
+					vid_dst,
+					info["duration"],
+					trim_in,
+					trim_out,
+					func(frac: float, cur: float, tot: float, spd: String) -> void:
+						_update_modal_progress(modal, frac, cur, tot, spd),
+					func() -> bool: return _transcode_cancel
 				)
 				if not ok:
 					if _transcode_cancel:
@@ -3414,194 +3405,6 @@ func _finalize_save_success() -> void:
 	_show_status(message, false)
 	await get_tree().create_timer(1.5).timeout
 	Transition.change_scene("res://scenes/journey_select/JourneySelect.tscn")
-
-
-# ---------------------------------------------------------------------------
-# Transcoding
-# ---------------------------------------------------------------------------
-
-
-func _ffmpeg_binary(name: String) -> String:
-	# Resolution order (custom folder → bundled → PATH) lives in
-	# SettingsService.resolve_ffmpeg_binary so the Options "Test" button shares
-	# it. The one builder-only concern: in an exported build res://bin/ is inside
-	# the PCK and can't be executed, so extract to user://bin/ on first use. Only
-	# bother when resolution otherwise falls through to a bare PATH name (i.e. no
-	# custom folder and nothing extracted yet).
-	var path: String = SettingsService.resolve_ffmpeg_binary(name)
-	if path == name and not OS.has_feature("editor"):
-		var exe: String = name + ".exe" if OS.get_name() == "Windows" else name
-		var user_abs: String = ProjectSettings.globalize_path("user://bin/" + exe)
-		if not FileAccess.file_exists(user_abs):
-			_extract_ffmpeg_binary("res://bin/" + exe, user_abs)
-		path = SettingsService.resolve_ffmpeg_binary(name)
-	return path
-
-
-# Copies a binary from the PCK (res://) to an absolute filesystem path so it
-# can be executed. Called once per binary per user data directory.
-func _extract_ffmpeg_binary(src_res: String, dst_abs: String) -> void:
-	if not FileAccess.file_exists(src_res):
-		return
-	DirAccess.make_dir_recursive_absolute(dst_abs.get_base_dir())
-	var f_in: FileAccess = FileAccess.open(src_res, FileAccess.READ)
-	if f_in == null:
-		return
-	var bytes: PackedByteArray = f_in.get_buffer(f_in.get_length())
-	f_in.close()
-	var f_out: FileAccess = FileAccess.open(dst_abs, FileAccess.WRITE)
-	if f_out == null:
-		return
-	f_out.store_buffer(bytes)
-	f_out.close()
-	if OS.get_name() != "Windows":
-		OS.execute("chmod", ["+x", dst_abs], [], true)
-
-
-func _ffmpeg_available() -> bool:
-	var out: Array = []
-	return OS.execute(_ffmpeg_binary("ffprobe"), ["-version"], out, true, false) == 0
-
-
-# Probes a video's primary stream for both codec name and pixel format in one
-# ffprobe call. Returns {"codec": String, "pix_fmt": String} (lowercased; empty
-# strings when the probe fails). Used by the transcode planner.
-func _get_video_stream_info(path: String) -> Dictionary:
-	var out: Array = []
-	var args: PackedStringArray = [
-		"-v",
-		"error",
-		"-select_streams",
-		"v:0",
-		"-show_entries",
-		"stream=codec_name,pix_fmt",
-		"-of",
-		"csv=p=0",
-		ProjectSettings.globalize_path(path),
-	]
-	if OS.execute(_ffmpeg_binary("ffprobe"), args, out, true, false) != 0 or out.is_empty():
-		return {"codec": "", "pix_fmt": ""}
-	# csv=p=0 yields "codec_name,pix_fmt" on the first non-empty line. Take the
-	# first non-empty line (stderr is merged in with read_stderr=true).
-	for raw_line: String in (out[0] as String).split("\n"):
-		var line: String = raw_line.strip_edges().to_lower()
-		if line == "":
-			continue
-		var parts: PackedStringArray = line.split(",")
-		var codec: String = parts[0].strip_edges() if parts.size() > 0 else ""
-		var pix_fmt: String = parts[1].strip_edges() if parts.size() > 1 else ""
-		return {"codec": codec, "pix_fmt": pix_fmt}
-	return {"codec": "", "pix_fmt": ""}
-
-
-func _video_duration_seconds(path: String) -> float:
-	var out: Array = []
-	var args: PackedStringArray = [
-		"-v",
-		"error",
-		"-show_entries",
-		"format=duration",
-		"-of",
-		"csv=p=0",
-		ProjectSettings.globalize_path(path),
-	]
-	if OS.execute(_ffmpeg_binary("ffprobe"), args, out, true, false) != 0 or out.is_empty():
-		return 0.0
-	return (out[0] as String).strip_edges().to_float()
-
-
-func _transcode_video(
-	input: String,
-	output: String,
-	duration: float,
-	modal: Control,
-	trim_in_ms: int = 0,
-	trim_out_ms: int = 0
-) -> bool:
-	_transcode_cancel = false
-
-	var progress_abs: String = ProjectSettings.globalize_path(TRANSCODE_PROGRESS_FILE)
-	# Truncate any prior progress file so old data doesn't mislead the parser.
-	var pf: FileAccess = FileAccess.open(progress_abs, FileAccess.WRITE)
-	if pf:
-		pf.close()
-
-	var args: PackedStringArray = []
-	args.append_array(["-y", "-hide_banner", "-loglevel", "error"])
-	# Trim bake: -ss before -i (fast input seek; frame-accurate because we
-	# always re-encode) + an explicit -t duration after it. `duration` is
-	# already the trimmed length, so the progress bar stays honest.
-	if trim_in_ms > 0:
-		args.append_array(["-ss", "%.3f" % (trim_in_ms / 1000.0)])
-	args.append_array(["-i", ProjectSettings.globalize_path(input)])
-	if trim_out_ms > 0 or trim_in_ms > 0:
-		var trim_len: float = duration
-		if trim_len > 0.0:
-			args.append_array(["-t", "%.3f" % trim_len])
-	(
-		args
-		. append_array(
-			[
-				"-c:v",
-				"libx264",
-				"-preset",
-				"fast",
-				"-crf",
-				"22",
-				"-pix_fmt",
-				"yuv420p",
-				"-c:a",
-				"aac",
-				"-b:a",
-				"192k",
-				"-progress",
-				progress_abs,
-				ProjectSettings.globalize_path(output),
-			]
-		)
-	)
-
-	_transcode_pid = OS.create_process(_ffmpeg_binary("ffmpeg"), args)
-	if _transcode_pid <= 0:
-		return false
-
-	while OS.is_process_running(_transcode_pid):
-		if _transcode_cancel:
-			OS.kill(_transcode_pid)
-			_transcode_pid = -1
-			return false
-		_poll_progress(progress_abs, duration, modal)
-		await get_tree().create_timer(0.4).timeout
-
-	# Final poll to flush "progress=end".
-	_poll_progress(progress_abs, duration, modal)
-	_transcode_pid = -1
-	return FileAccess.file_exists(output)
-
-
-func _poll_progress(progress_path: String, duration: float, modal: Control) -> void:
-	if modal == null:
-		return
-	var f: FileAccess = FileAccess.open(progress_path, FileAccess.READ)
-	if f == null:
-		return
-	var text: String = f.get_as_text()
-	f.close()
-	var out_time_us: int = 0
-	var speed: String = ""
-	for raw_line: String in text.split("\n"):
-		var line: String = raw_line.strip_edges()
-		if line.begins_with("out_time_us="):
-			out_time_us = line.substr(12).to_int()
-		elif line.begins_with("out_time_ms="):
-			out_time_us = line.substr(12).to_int()
-		elif line.begins_with("speed="):
-			speed = line.substr(6)
-	var current_seconds: float = out_time_us / 1_000_000.0
-	var progress: float = 0.0
-	if duration > 0.0:
-		progress = clampf(current_seconds / duration, 0.0, 1.0)
-	_update_modal_progress(modal, progress, current_seconds, duration, speed)
 
 
 # ---------------------------------------------------------------------------
