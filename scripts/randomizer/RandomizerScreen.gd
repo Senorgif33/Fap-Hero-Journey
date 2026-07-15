@@ -40,7 +40,6 @@ var _effect_val: Label
 var _boss_check: CheckButton
 var _intensity_check: CheckButton
 var _shop_spin: SpinBox
-var _checkpoint_spin: SpinBox
 var _seed_field: LineEdit
 
 
@@ -243,9 +242,6 @@ func _build_settings_column() -> Control:
 	_shop_spin = _make_spin(0, 20, 0, 1)
 	col.add_child(_labeled("Shop every N rounds (0=off)", _shop_spin))
 
-	_checkpoint_spin = _make_spin(0, 20, 0, 1)
-	col.add_child(_labeled("Checkpoint every N (0=off)", _checkpoint_spin))
-
 	_boss_check = CheckButton.new()
 	_boss_check.text = "Boss finale"
 	col.add_child(_boss_check)
@@ -341,7 +337,6 @@ func _apply_settings(s: Dictionary) -> void:
 	_boss_check.button_pressed = bool(s.get("boss_finale", false))
 	_intensity_check.button_pressed = bool(s.get("intensity_order", false))
 	_shop_spin.value = int(s.get("shop_every", 0))
-	_checkpoint_spin.value = int(s.get("checkpoint_every", 0))
 	_sync_mode_rows()
 
 
@@ -804,8 +799,6 @@ func _summary_text(s: Dictionary) -> String:
 		parts.append("boss finale")
 	if int(s.get("shops", 0)) > 0:
 		parts.append("%d shop" % int(s["shops"]))
-	if int(s.get("checkpoints", 0)) > 0:
-		parts.append("%d checkpoint" % int(s["checkpoints"]))
 	parts.append("~%d:%02d of video" % [total_s / 60, total_s % 60])
 	return "%s     •     seed %d" % [" · ".join(parts), int(s.get("seed", 0))]
 
@@ -876,7 +869,6 @@ func _read_settings() -> Dictionary:
 		"boss_finale": _boss_check.button_pressed,
 		"intensity_order": _intensity_check.button_pressed,
 		"shop_every": int(_shop_spin.value),
-		"checkpoint_every": int(_checkpoint_spin.value),
 	}
 
 

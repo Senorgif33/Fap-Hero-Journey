@@ -1140,133 +1140,136 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	name_edit.text_changed.connect(func(val: String) -> void: arr[idx]["name"] = val)
 	col.add_child(name_edit)
 
-	# ── Media & scripts ─────────────────────────────────────────────────────────
-	col.add_child(_side_divider_line())
-	col.add_child(_side_field_label("VIDEO FILE"))
-	var video_zone: PanelContainer = DropZoneScript.new()
-	video_zone.accepted_extensions = JourneyData.VIDEO_EXTENSIONS.duplicate()
-	video_zone.picker_title = "Select Video"
-	video_zone.picker_filters = [
-		"*.mp4,*.m4v,*.mkv,*.avi,*.mov,*.wmv,*.webm ; Video Files", "*.* ; All Files"
-	]
-	video_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	col.add_child(video_zone)
-	if round_data.get("video_path", "") != "":
-		video_zone.call_deferred("set_file", round_data["video_path"], false)
-	video_zone.file_dropped.connect(
-		func(p: String) -> void:
-			arr[idx]["video_path"] = p
-			if (arr[idx].get("name", "") as String).strip_edges() == "":
-				arr[idx]["name"] = p.get_file().get_basename()
-			# Auto-fill the funscript + any secondary axis / vib scripts from same-
-			# named siblings on disk, then rebuild so the DropZones show them.
-			if ImportScanner.autofill_round_siblings(arr[idx], p):
-				_owner._show_status("Auto-filled matching scripts from file names.", false)
-				reselect.call(idx)
-				return
-			name_edit.text = arr[idx].get("name", "")
-			_owner._refresh_graph()  # update the node's validation badge live
-	)
+	# A pool round's media lives in its encounter entries; skip the round's own media
+	# section (video / funscript / preview / trim / axis / vib) when it's a pool round.
+	if str(arr[idx].get("round_type", "normal")) != "pool":
+		# ── Media & scripts ─────────────────────────────────────────────────────────
+		col.add_child(_side_divider_line())
+		col.add_child(_side_field_label("VIDEO FILE"))
+		var video_zone: PanelContainer = DropZoneScript.new()
+		video_zone.accepted_extensions = JourneyData.VIDEO_EXTENSIONS.duplicate()
+		video_zone.picker_title = "Select Video"
+		video_zone.picker_filters = [
+			"*.mp4,*.m4v,*.mkv,*.avi,*.mov,*.wmv,*.webm ; Video Files", "*.* ; All Files"
+		]
+		video_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		col.add_child(video_zone)
+		if round_data.get("video_path", "") != "":
+			video_zone.call_deferred("set_file", round_data["video_path"], false)
+		video_zone.file_dropped.connect(
+			func(p: String) -> void:
+				arr[idx]["video_path"] = p
+				if (arr[idx].get("name", "") as String).strip_edges() == "":
+					arr[idx]["name"] = p.get_file().get_basename()
+				# Auto-fill the funscript + any secondary axis / vib scripts from same-
+				# named siblings on disk, then rebuild so the DropZones show them.
+				if ImportScanner.autofill_round_siblings(arr[idx], p):
+					_owner._show_status("Auto-filled matching scripts from file names.", false)
+					reselect.call(idx)
+					return
+				name_edit.text = arr[idx].get("name", "")
+				_owner._refresh_graph()  # update the node's validation badge live
+		)
 
-	col.add_child(_side_section_separator())
-	col.add_child(_side_field_label("FUNSCRIPT"))
-	# Declared before the drop handler so the closure can refresh it in place.
-	var fs_stats_lbl: Label = Label.new()
-	fs_stats_lbl.add_theme_font_size_override("font_size", 11)
-	fs_stats_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
-	var fs_zone: PanelContainer = DropZoneScript.new()
-	fs_zone.accepted_extensions = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
-	fs_zone.picker_title = "Select Funscript"
-	fs_zone.picker_filters = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
-	fs_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	# Zone + inline ✕ remove (disabled until a funscript is set).
-	var fs_rm: Button = UITheme.make_icon_btn(
-		"✕", round_data.get("funscript_path", "") == "", UITheme.MAGENTA
-	)
-	fs_rm.tooltip_text = "Remove funscript"
-	fs_rm.pressed.connect(func() -> void: fs_zone.set_file(""))
-	var fs_row: HBoxContainer = HBoxContainer.new()
-	fs_row.add_theme_constant_override("separation", 6)
-	fs_row.add_child(fs_zone)
-	fs_row.add_child(fs_rm)
-	col.add_child(fs_row)
-	if round_data.get("funscript_path", "") != "":
-		fs_zone.call_deferred("set_file", round_data["funscript_path"], false)
-	fs_zone.file_dropped.connect(
-		func(p: String) -> void:
-			arr[idx]["funscript_path"] = p
-			_update_funscript_readout(fs_stats_lbl, p)
-			fs_rm.disabled = (p == "")
-			# Removal (cleared zone): nothing to auto-fill or rename — just refresh.
-			if p == "":
-				_owner._refresh_graph()
-				return
-			if (arr[idx].get("name", "") as String).strip_edges() == "":
-				arr[idx]["name"] = p.get_file().get_basename()
-			# Auto-fill the video + any secondary axis / vib scripts from same-named
-			# siblings on disk, then rebuild so the DropZones show them.
-			if ImportScanner.autofill_round_siblings(arr[idx], p):
-				_owner._show_status("Auto-filled matching scripts from file names.", false)
-				reselect.call(idx)
-				return
-			name_edit.text = arr[idx].get("name", "")
-			_owner._refresh_graph()  # update the node's validation badge live
-	)
-	# Length / action-count readout (sits just under the funscript zone).
-	_update_funscript_readout(fs_stats_lbl, round_data.get("funscript_path", ""))
-	col.add_child(fs_stats_lbl)
+		col.add_child(_side_section_separator())
+		col.add_child(_side_field_label("FUNSCRIPT"))
+		# Declared before the drop handler so the closure can refresh it in place.
+		var fs_stats_lbl: Label = Label.new()
+		fs_stats_lbl.add_theme_font_size_override("font_size", 11)
+		fs_stats_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+		var fs_zone: PanelContainer = DropZoneScript.new()
+		fs_zone.accepted_extensions = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
+		fs_zone.picker_title = "Select Funscript"
+		fs_zone.picker_filters = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
+		fs_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		# Zone + inline ✕ remove (disabled until a funscript is set).
+		var fs_rm: Button = UITheme.make_icon_btn(
+			"✕", round_data.get("funscript_path", "") == "", UITheme.MAGENTA
+		)
+		fs_rm.tooltip_text = "Remove funscript"
+		fs_rm.pressed.connect(func() -> void: fs_zone.set_file(""))
+		var fs_row: HBoxContainer = HBoxContainer.new()
+		fs_row.add_theme_constant_override("separation", 6)
+		fs_row.add_child(fs_zone)
+		fs_row.add_child(fs_rm)
+		col.add_child(fs_row)
+		if round_data.get("funscript_path", "") != "":
+			fs_zone.call_deferred("set_file", round_data["funscript_path"], false)
+		fs_zone.file_dropped.connect(
+			func(p: String) -> void:
+				arr[idx]["funscript_path"] = p
+				_update_funscript_readout(fs_stats_lbl, p)
+				fs_rm.disabled = (p == "")
+				# Removal (cleared zone): nothing to auto-fill or rename — just refresh.
+				if p == "":
+					_owner._refresh_graph()
+					return
+				if (arr[idx].get("name", "") as String).strip_edges() == "":
+					arr[idx]["name"] = p.get_file().get_basename()
+				# Auto-fill the video + any secondary axis / vib scripts from same-named
+				# siblings on disk, then rebuild so the DropZones show them.
+				if ImportScanner.autofill_round_siblings(arr[idx], p):
+					_owner._show_status("Auto-filled matching scripts from file names.", false)
+					reselect.call(idx)
+					return
+				name_edit.text = arr[idx].get("name", "")
+				_owner._refresh_graph()  # update the node's validation badge live
+		)
+		# Length / action-count readout (sits just under the funscript zone).
+		_update_funscript_readout(fs_stats_lbl, round_data.get("funscript_path", ""))
+		col.add_child(fs_stats_lbl)
 
-	# Preview the funscript curve (and any stroke modifiers the round applies to it) in a
-	# graph overlay. Effect rounds also tune scale/clamp magnitudes live in there, so the
-	# button advertises it. Enabled once a funscript is attached.
-	var is_effect_round: bool = (
-		JourneyData.normalize_effect_round(arr[idx]).get("round_type", "") == "effect"
-	)
-	var preview_btn: Button = UITheme.make_icon_btn(
-		"📈 PREVIEW & TUNE FUNSCRIPT" if is_effect_round else "📈 PREVIEW FUNSCRIPT",
-		round_data.get("funscript_path", "") == "",
-		UITheme.CYAN
-	)
-	if is_effect_round:
-		preview_btn.tooltip_text = "Preview the strokes and drag scale/clamp effects to tune them live."
-	preview_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	preview_btn.pressed.connect(
-		func() -> void:
-			# Effect rounds get live stroke tuning; the callback persists (and prunes to the
-			# catalog default) as the author drags a magnitude in the preview.
-			var on_tune: Callable = Callable()
-			if JourneyData.normalize_effect_round(arr[idx]).get("round_type", "") == "effect":
-				on_tune = func(ref_name: String, key: String, value: Variant) -> void:
-					var def: Variant = JourneyData.effect_entry(ref_name).get(key, null)
-					if def != null and is_equal_approx(float(value), float(def)):
-						_set_effect_override(arr, idx, ref_name, key, null)
-					else:
-						_set_effect_override(arr, idx, ref_name, key, value)
-			FunscriptPreview.new().open(
-				_owner,
-				arr[idx].get("funscript_path", ""),
-				arr[idx].get("video_path", ""),
-				_round_preview_modifiers(arr[idx]),
-				arr[idx].get("name", ""),
-				_round_preview_label(arr[idx]),
-				0,
-				0,
-				Callable(),
-				on_tune
-			)
-	)
-	col.add_child(preview_btn)
+		# Preview the funscript curve (and any stroke modifiers the round applies to it) in a
+		# graph overlay. Effect rounds also tune scale/clamp magnitudes live in there, so the
+		# button advertises it. Enabled once a funscript is attached.
+		var is_effect_round: bool = (
+			JourneyData.normalize_effect_round(arr[idx]).get("round_type", "") == "effect"
+		)
+		var preview_btn: Button = UITheme.make_icon_btn(
+			"📈 PREVIEW & TUNE FUNSCRIPT" if is_effect_round else "📈 PREVIEW FUNSCRIPT",
+			round_data.get("funscript_path", "") == "",
+			UITheme.CYAN
+		)
+		if is_effect_round:
+			preview_btn.tooltip_text = "Preview the strokes and drag scale/clamp effects to tune them live."
+		preview_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		preview_btn.pressed.connect(
+			func() -> void:
+				# Effect rounds get live stroke tuning; the callback persists (and prunes to the
+				# catalog default) as the author drags a magnitude in the preview.
+				var on_tune: Callable = Callable()
+				if JourneyData.normalize_effect_round(arr[idx]).get("round_type", "") == "effect":
+					on_tune = func(ref_name: String, key: String, value: Variant) -> void:
+						var def: Variant = JourneyData.effect_entry(ref_name).get(key, null)
+						if def != null and is_equal_approx(float(value), float(def)):
+							_set_effect_override(arr, idx, ref_name, key, null)
+						else:
+							_set_effect_override(arr, idx, ref_name, key, value)
+				FunscriptPreview.new().open(
+					_owner,
+					arr[idx].get("funscript_path", ""),
+					arr[idx].get("video_path", ""),
+					_round_preview_modifiers(arr[idx]),
+					arr[idx].get("name", ""),
+					_round_preview_label(arr[idx]),
+					0,
+					0,
+					Callable(),
+					on_tune
+				)
+		)
+		col.add_child(preview_btn)
 
-	# ── Trim (pending; baked at save) ───────────────────────────────────────────
-	col.add_child(_side_section_separator())
-	col.add_child(_make_trim_section(arr, idx, reselect))
+		# ── Trim (pending; baked at save) ───────────────────────────────────────────
+		col.add_child(_side_section_separator())
+		col.add_child(_make_trim_section(arr, idx, reselect))
 
-	# Secondary device scripts (optional, collapsed) — they round out the media group.
-	col.add_child(_side_section_separator())
-	col.add_child(_make_axis_expander(arr, idx))
+		# Secondary device scripts (optional, collapsed) — they round out the media group.
+		col.add_child(_side_section_separator())
+		col.add_child(_make_axis_expander(arr, idx))
 
-	col.add_child(_side_section_separator())
-	col.add_child(_make_vib_expander(arr, idx))
+		col.add_child(_side_section_separator())
+		col.add_child(_make_vib_expander(arr, idx))
 
 	# ── Rewards & state ─────────────────────────────────────────────────────────
 	col.add_child(_side_divider_line())
@@ -1294,6 +1297,9 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 
 	col.add_child(_side_section_separator())
 	col.add_child(_make_effect_expander(arr, idx, reselect))
+
+	col.add_child(_side_section_separator())
+	col.add_child(_make_pool_expander(arr, idx, reselect))
 	return col
 
 
@@ -2370,6 +2376,214 @@ func _make_boss_expander(arr: Array, idx: int, reselect: Callable) -> Control:
 	)
 
 	return wrapper
+
+
+# Pool-round expander. A round type (mutually exclusive with Boss/Effect) holding a
+# list of encounter entries; the runtime weighted-picks one each play behind a
+# mystery "ENCOUNTER!" card. Each entry is its own media set (video + funscript +
+# name + weight); the round's own Video/Funscript fields are ignored for pool rounds.
+func _make_pool_expander(arr: Array, idx: int, reselect: Callable) -> Control:
+	if not arr[idx].has("round_type"):
+		arr[idx]["round_type"] = "normal"
+	var is_pool: bool = arr[idx]["round_type"] == "pool"
+
+	var wrapper: VBoxContainer = VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 6)
+
+	var toggle_btn: Button = Button.new()
+	toggle_btn.text = "🎲  POOL (RANDOM ENCOUNTER)  ✓" if is_pool else "🎲  POOL (RANDOM ENCOUNTER)"
+	toggle_btn.toggle_mode = true
+	toggle_btn.button_pressed = is_pool
+	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(toggle_btn, UITheme.CYAN)
+	toggle_btn.toggled.connect(
+		func(pressed: bool) -> void:
+			arr[idx]["round_type"] = "pool" if pressed else "normal"
+			if pressed and not arr[idx].has("pool_entries"):
+				arr[idx]["pool_entries"] = []
+			reselect.call(idx)
+	)
+	wrapper.add_child(toggle_btn)
+
+	if not is_pool:
+		return wrapper
+
+	if not arr[idx].has("pool_entries"):
+		arr[idx]["pool_entries"] = []
+
+	var hint: Label = Label.new()
+	hint.text = "One encounter is picked at random (by weight) each play, behind a mystery card. Each encounter carries its own video + funscript — the round's own Video/Funscript fields above are ignored."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrapper.add_child(hint)
+
+	var list: VBoxContainer = VBoxContainer.new()
+	list.add_theme_constant_override("separation", 8)
+	wrapper.add_child(list)
+	_rebuild_pool_entries(arr, idx, list, reselect)
+
+	var add_btn: Button = Button.new()
+	add_btn.text = "+ ADD ENCOUNTER"
+	add_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(add_btn, UITheme.PURPLE_MID)
+	add_btn.pressed.connect(
+		func() -> void:
+			(arr[idx]["pool_entries"] as Array).append(_default_pool_entry())
+			_rebuild_pool_entries(arr, idx, list, reselect)
+	)
+	wrapper.add_child(add_btn)
+
+	return wrapper
+
+
+func _default_pool_entry() -> Dictionary:
+	return {
+		"name": "",
+		"video_path": "",
+		"funscript_path": "",
+		"axis_scripts": {},
+		"vib_scripts": {},
+		"weight": 1,
+	}
+
+
+# Reorders (swaps) a pool entry by `delta` (±1); no-op at the ends.
+func _move_pool_entry(arr: Array, idx: int, e_idx: int, delta: int) -> void:
+	var entries: Array = arr[idx].get("pool_entries", [])
+	var j: int = e_idx + delta
+	if j < 0 or j >= entries.size():
+		return
+	var tmp: Variant = entries[e_idx]
+	entries[e_idx] = entries[j]
+	entries[j] = tmp
+
+
+func _rebuild_pool_entries(arr: Array, idx: int, list: VBoxContainer, reselect: Callable) -> void:
+	for c: Node in list.get_children():
+		c.queue_free()
+	var entries: Array = arr[idx].get("pool_entries", [])
+	if entries.is_empty():
+		var empty: Label = Label.new()
+		empty.text = "No encounters yet — add at least one."
+		empty.add_theme_color_override("font_color", UITheme.SEPARATOR)
+		empty.add_theme_font_size_override("font_size", 10)
+		list.add_child(empty)
+		return
+	for i: int in entries.size():
+		list.add_child(_make_pool_entry_row(arr, idx, list, i, reselect))
+
+
+func _make_pool_entry_row(
+	arr: Array, idx: int, list: VBoxContainer, e_idx: int, reselect: Callable
+) -> Control:
+	var entries: Array = arr[idx]["pool_entries"]
+	var entry: Dictionary = entries[e_idx]
+
+	var panel: PanelContainer = PanelContainer.new()
+	var ps: StyleBoxFlat = StyleBoxFlat.new()
+	ps.bg_color = UITheme.CARD_BG
+	ps.set_corner_radius_all(UITheme.CORNER_RADIUS)
+	ps.set_content_margin_all(8)
+	panel.add_theme_stylebox_override("panel", ps)
+
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 5)
+	panel.add_child(box)
+
+	# Header: label + reorder + remove.
+	var header: HBoxContainer = HBoxContainer.new()
+	var title: Label = Label.new()
+	title.text = "ENCOUNTER %d" % (e_idx + 1)
+	title.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	title.add_theme_font_size_override("font_size", 11)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(title)
+	var up: Button = UITheme.make_icon_btn("↑", e_idx == 0, UITheme.PURPLE_MID)
+	up.pressed.connect(
+		func() -> void:
+			_move_pool_entry(arr, idx, e_idx, -1)
+			_rebuild_pool_entries(arr, idx, list, reselect)
+	)
+	header.add_child(up)
+	var down: Button = UITheme.make_icon_btn("↓", e_idx >= entries.size() - 1, UITheme.PURPLE_MID)
+	down.pressed.connect(
+		func() -> void:
+			_move_pool_entry(arr, idx, e_idx, 1)
+			_rebuild_pool_entries(arr, idx, list, reselect)
+	)
+	header.add_child(down)
+	var rm: Button = UITheme.make_icon_btn("✕", false, UITheme.MAGENTA)
+	rm.tooltip_text = "Remove this encounter"
+	rm.pressed.connect(
+		func() -> void:
+			(arr[idx]["pool_entries"] as Array).remove_at(e_idx)
+			_rebuild_pool_entries(arr, idx, list, reselect)
+	)
+	header.add_child(rm)
+	box.add_child(header)
+
+	# Name.
+	var name_edit: LineEdit = LineEdit.new()
+	name_edit.placeholder_text = "Encounter name (optional)"
+	name_edit.text = str(entry.get("name", ""))
+	UITheme.style_line_edit(name_edit)
+	name_edit.text_changed.connect(func(v: String) -> void: entry["name"] = v)
+	box.add_child(name_edit)
+
+	# Video (drop or browse). Auto-fills the funscript + axis/vib from same-named
+	# siblings on disk (reuses the round importer), then rebuilds to show them.
+	var vzone: PanelContainer = DropZoneScript.new()
+	vzone.accepted_extensions = JourneyData.VIDEO_EXTENSIONS.duplicate()
+	vzone.picker_title = "Select Encounter Video"
+	vzone.picker_filters = [
+		"*.mp4,*.m4v,*.mkv,*.avi,*.mov,*.wmv,*.webm ; Video Files", "*.* ; All Files"
+	]
+	vzone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_child(vzone)
+	if str(entry.get("video_path", "")) != "":
+		vzone.call_deferred("set_file", entry["video_path"], false)
+	vzone.file_dropped.connect(
+		func(p: String) -> void:
+			entry["video_path"] = p
+			if str(entry.get("name", "")).strip_edges() == "":
+				entry["name"] = p.get_file().get_basename()
+			ImportScanner.autofill_round_siblings(entry, p)
+			_rebuild_pool_entries(arr, idx, list, reselect)
+	)
+
+	# Funscript (drop or browse).
+	box.add_child(_side_field_label("FUNSCRIPT"))
+	var fzone: PanelContainer = DropZoneScript.new()
+	fzone.accepted_extensions = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
+	fzone.picker_title = "Select Encounter Funscript"
+	fzone.picker_filters = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
+	fzone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_child(fzone)
+	if str(entry.get("funscript_path", "")) != "":
+		fzone.call_deferred("set_file", entry["funscript_path"], false)
+	fzone.file_dropped.connect(func(p: String) -> void: entry["funscript_path"] = p)
+
+	# Weight (spawn rarity).
+	var wrow: HBoxContainer = HBoxContainer.new()
+	wrow.add_theme_constant_override("separation", 6)
+	var wlbl: Label = Label.new()
+	wlbl.text = "WEIGHT"
+	wlbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	wlbl.add_theme_font_size_override("font_size", 10)
+	wlbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wrow.add_child(wlbl)
+	var wspin: SpinBox = SpinBox.new()
+	wspin.min_value = 1
+	wspin.max_value = 100
+	wspin.step = 1
+	wspin.value = maxi(1, int(entry.get("weight", 1)))
+	UITheme.style_spin_box(wspin)
+	wspin.value_changed.connect(func(v: float) -> void: entry["weight"] = int(v))
+	wrow.add_child(wspin)
+	box.add_child(wrow)
+
+	return panel
 
 
 # Effect-round expander. One round type (mutually exclusive with Boss) that applies a

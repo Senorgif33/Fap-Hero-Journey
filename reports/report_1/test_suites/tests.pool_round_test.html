@@ -34,12 +34,12 @@
 		<div class="report-container">
 			<h1>Testsuite Report</h1>
 			<div>
-				<span class="label">res://tests/shop_offer_test.gd</span>
+				<span class="label">res://tests/pool_round_test.gd</span>
 			</div>
 			<div class="summary">
 				<div class="summary-item">
 					<span class="label">Tests</span>
-					<span class="value">6</span>
+					<span class="value">8</span>
 				</div>
 				<div class="summary-item">
 					<span class="label">Skipped</span>
@@ -59,7 +59,7 @@
 				</div>
 				<div class="summary-item">
 					<span class="label">Duration</span>
-					<span class="value">36ms</span>
+					<span class="value">50ms</span>
 				</div>
 				<div class="success-rate">
 					<div class="check-icon status-passed">✓</div>
@@ -73,7 +73,7 @@
 		<div class="breadcrumb">
 			<a href="../index.html"><span>All</span></a>
 			<a href="../path/tests.html"><span>tests</span></a>
-			<a class="active" href="#"><span>shop_offer_test</span></a>
+			<a class="active" href="#"><span>pool_round_test</span></a>
 		</div>
 	</header>
 
@@ -94,7 +94,35 @@
 					<tbody>
 						
 								<tr class="testcase-group">
-									<td>test_fixed_mode_exact_lineup</td>
+									<td>test_coerce_pool_entry_canonical_shape</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>3ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_coerce_pool_entry_clamps_weight</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>3ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_coerce_pool_entry_deep_copies_channels</td>
 									<td><span class="status status-passed">PASSED</span></td>
 									<td>0</td>
 									<td>0</td>
@@ -108,11 +136,11 @@
 
 
 								<tr class="testcase-group">
-									<td>test_pool_mode_guarantees_present</td>
+									<td>test_pool_entry_weights</td>
 									<td><span class="status status-passed">PASSED</span></td>
 									<td>0</td>
 									<td>0</td>
-									<td>2ms</td>
+									<td>7ms</td>
 									<td class="report-column">
 										<pre>
 
@@ -122,11 +150,11 @@
 
 
 								<tr class="testcase-group">
-									<td>test_pool_count_never_trims_guaranteed</td>
+									<td>test_pool_round_coercion_keeps_entries</td>
 									<td><span class="status status-passed">PASSED</span></td>
 									<td>0</td>
 									<td>0</td>
-									<td>4ms</td>
+									<td>7ms</td>
 									<td class="report-column">
 										<pre>
 
@@ -136,7 +164,7 @@
 
 
 								<tr class="testcase-group">
-									<td>test_pool_mode_plain_draw</td>
+									<td>test_non_pool_round_drops_entries</td>
 									<td><span class="status status-passed">PASSED</span></td>
 									<td>0</td>
 									<td>0</td>
@@ -150,7 +178,7 @@
 
 
 								<tr class="testcase-group">
-									<td>test_stale_guaranteed_dropped</td>
+									<td>test_pool_entry_paths_resolve_on_scan</td>
 									<td><span class="status status-passed">PASSED</span></td>
 									<td>0</td>
 									<td>0</td>
@@ -164,11 +192,11 @@
 
 
 								<tr class="testcase-group">
-									<td>test_guaranteed_and_possible_queries</td>
+									<td>test_weighted_pick_favors_heavy_entry</td>
 									<td><span class="status status-passed">PASSED</span></td>
 									<td>0</td>
 									<td>0</td>
-									<td>5ms</td>
+									<td>7ms</td>
 									<td class="report-column">
 										<pre>
 

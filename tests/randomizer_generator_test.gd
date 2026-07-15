@@ -3,7 +3,7 @@ extends GdUnitTestSuite
 # RandomizerGenerator — the pure, seeded run generator. Every test feeds a
 # synthetic library (no disk / no MediaPoolService) and asserts on the emitted
 # Format-2 journey dict. Determinism, no-repeat, both length modes, injected
-# systems (effect / boss / shop / checkpoint), tag filtering, intensity ordering,
+# systems (effect / boss / shop), tag filtering, intensity ordering,
 # and structural graph validity.
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -225,16 +225,6 @@ func test_shops_inserted_between_rounds() -> void:
 	# The final node is a round, not a shop.
 	var seq: Array = _sequence(res["journey"])
 	assert_str(str((seq[seq.size() - 1] as Dictionary)["type"])).is_equal("round")
-
-
-func test_checkpoint_every_flags_rounds() -> void:
-	var res: Dictionary = RandomizerGenerator.generate(
-		_library(6), {"seed": 6, "round_count": 6, "checkpoint_every": 3}
-	)
-	var rounds: Array = _rounds(res["journey"])
-	assert_bool(bool((rounds[2]["data"] as Dictionary)["is_checkpoint"])).is_true()  # 3rd
-	assert_bool(bool((rounds[5]["data"] as Dictionary)["is_checkpoint"])).is_true()  # 6th
-	assert_bool(bool((rounds[0]["data"] as Dictionary)["is_checkpoint"])).is_false()
 
 
 func test_tag_include_filters_pool() -> void:

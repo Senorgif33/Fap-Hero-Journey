@@ -20,7 +20,7 @@ extends RefCounted
 #   tags_include:[String]               tags_exclude:[String]
 #   intensity_order:bool (build-up)     effect_pct:float 0..1
 #   boss_finale:bool                    shop_every:int (0=off)
-#   checkpoint_every:int (0=off)        coins_per_round:int
+#   coins_per_round:int
 #   freshness_halflife_hours:float (0=off)   now_unix:int (injectable)
 #   name:String   author:String   difficulty:String
 
@@ -35,7 +35,6 @@ const DEFAULT_SETTINGS: Dictionary = {
 	"effect_pct": 0.0,
 	"boss_finale": false,
 	"shop_every": 0,
-	"checkpoint_every": 0,
 	"coins_per_round": 10,
 	"freshness_halflife_hours": 0.0,
 	"now_unix": 0,
@@ -57,7 +56,7 @@ const SHOP_BUDGET_TARGET: int = 75
 #   { ok:bool, reason:String,
 #     journey:Dictionary,        # the full journey.json dict (empty when not ok)
 #     content_rels:Array,        # pooled rels the run folder must contain
-#     summary:{rounds, effects, bosses, shops, checkpoints, est_length_ms, seed} }
+#     summary:{rounds, effects, bosses, shops, est_length_ms, seed} }
 # reason is "" on success, else "empty_library" / "no_matches".
 static func generate(entries: Array, settings: Dictionary = {}) -> Dictionary:
 	var cfg: Dictionary = DEFAULT_SETTINGS.duplicate(true)
@@ -96,13 +95,11 @@ static func generate(entries: Array, settings: Dictionary = {}) -> Dictionary:
 		"effects": 0,
 		"bosses": 0,
 		"shops": 0,
-		"checkpoints": 0,
 		"est_length_ms": 0,
 		"seed": seed_val,
 	}
 	var last_idx: int = chosen.size() - 1
 	var shop_every: int = int(cfg["shop_every"])
-	var checkpoint_every: int = int(cfg["checkpoint_every"])
 	# When shops are generated, per-round coins must accumulate to something
 	# spendable by each shop, or the shop is dead weight. Scale up so the player has
 	# ~SHOP_BUDGET_TARGET coins by every shop (shop appears every `shop_every`
@@ -123,13 +120,12 @@ static func generate(entries: Array, settings: Dictionary = {}) -> Dictionary:
 		elif rng.randf() < float(cfg["effect_pct"]):
 			round_type = "effect"
 
-		var is_checkpoint: bool = checkpoint_every > 0 and (i + 1) % checkpoint_every == 0
 		(
 			seq
 			. append(
 				{
 					"type": "round",
-					"data": _round_data(entry, round_type, is_checkpoint, coins_per_round, rng),
+					"data": _round_data(entry, round_type, coins_per_round, rng),
 				}
 			)
 		)
@@ -139,8 +135,6 @@ static func generate(entries: Array, settings: Dictionary = {}) -> Dictionary:
 			summary["effects"] += 1
 		elif round_type == "boss":
 			summary["bosses"] += 1
-		if is_checkpoint:
-			summary["checkpoints"] += 1
 		summary["est_length_ms"] += _entry_length_ms(entry)
 
 		# Insert a shop after every Nth round (never trailing the final round).
@@ -312,11 +306,7 @@ static func _stable_sort_by_intensity(chosen: Array) -> Array:
 # are author-fixed, applied directly — not rolled at runtime — so they're rolled
 # here, deterministic per seed); an empty list would be a boss with no effect.
 static func _round_data(
-	entry: Dictionary,
-	round_type: String,
-	is_checkpoint: bool,
-	coins: int,
-	rng: RandomNumberGenerator
+	entry: Dictionary, round_type: String, coins: int, rng: RandomNumberGenerator
 ) -> Dictionary:
 	var effects: Array = _all_gameplay_effect_names() if round_type == "effect" else []
 	var data: Dictionary = {
@@ -329,7 +319,6 @@ static func _round_data(
 		"length_ms": int(entry.get("length_ms", 0)),
 		"boss_image": str(entry.get("boss_image_rel", "")),
 		"coins": coins,
-		"is_checkpoint": is_checkpoint,
 		"round_type": round_type,
 		"effects": effects,
 		"effect_random": true,
@@ -447,7 +436,6 @@ static func _fail(reason: String, seed_val: int) -> Dictionary:
 			"effects": 0,
 			"bosses": 0,
 			"shops": 0,
-			"checkpoints": 0,
 			"est_length_ms": 0,
 			"coins_per_round": 0,
 			"seed": seed_val,

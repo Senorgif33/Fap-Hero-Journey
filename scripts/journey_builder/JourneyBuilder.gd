@@ -2820,14 +2820,18 @@ func _build_transcode_plan() -> bool:
 			continue
 		var data: Dictionary = node.get("data", {})
 		var src: String = str(data.get("video_path", ""))
-		if src == "":
-			continue
-		var t_in: int = int(data.get("trim_start_ms", 0))
-		var t_out: int = int(data.get("trim_end_ms", 0))
-		any_trim = any_trim or t_in > 0 or t_out > 0
-		combos[_transcode_plan_key(src, t_in, t_out)] = {
-			"src": src, "trim_in": t_in, "trim_out": t_out
-		}
+		if src != "":
+			var t_in: int = int(data.get("trim_start_ms", 0))
+			var t_out: int = int(data.get("trim_end_ms", 0))
+			any_trim = any_trim or t_in > 0 or t_out > 0
+			combos[_transcode_plan_key(src, t_in, t_out)] = {
+				"src": src, "trim_in": t_in, "trim_out": t_out
+			}
+		# Pool round: each encounter entry's video is its own source (no trim).
+		for pe: Variant in data.get("pool_entries", []):
+			var pv: String = str((pe as Dictionary).get("video_path", ""))
+			if pv != "":
+				combos[_transcode_plan_key(pv, 0, 0)] = {"src": pv, "trim_in": 0, "trim_out": 0}
 
 	# Auto-transcode disabled: copy videos verbatim and require nothing of
 	# ffmpeg (the escape hatch for setups where ffmpeg can't run, e.g. some
@@ -3098,63 +3102,23 @@ func _save_round_node_media(
 	# rebased to the window; journey.json never carries the trim itself.
 	var trim_in: int = int(data_in.get("trim_start_ms", 0))
 	var trim_out: int = int(data_in.get("trim_end_ms", 0))
-	var trimmed: bool = trim_in > 0 or trim_out > 0
+	# The round's OWN media (funscript / axis / vib / boss image / video). All empty
+	# for a pool round — its media lives in the entries, pooled below.
+	var fs: Dictionary = _pool_funscript(
+		str(data_in.get("funscript_path", "")), abs_dir, trim_in, trim_out
+	)
+	saved_data["funscript_path"] = fs["rel"]
+	saved_data["action_count"] = fs["count"]
+	saved_data["length_ms"] = fs["length_ms"]
 
-	# Funscript → content pool (stored + parsed once per source; stats cached by fingerprint).
-	var fs_src: String = str(data_in.get("funscript_path", ""))
-	var funscript_rel: String = ""
-	var fs_stats: Dictionary = {"count": 0, "length_ms": 0}
-	if fs_src != "":
-		var fs_pool: Dictionary = _assign_pooled_media(
-			fs_src, fs_src.get_extension(), trim_in, trim_out
-		)
-		funscript_rel = fs_pool["rel"]
-		if fs_pool["copy"]:
-			var fs_dst: String = abs_dir + "/" + funscript_rel
-			if trimmed:
-				_write_trimmed_funscript(fs_src, fs_dst, trim_in, trim_out)
-			else:
-				_copy_file(fs_src, fs_dst)
-			fs_stats = JourneyData.read_funscript_stats(fs_dst)
-			_pooled_fs_stats[fs_pool["fingerprint"]] = fs_stats
-		else:
-			fs_stats = _pooled_fs_stats.get(fs_pool["fingerprint"], fs_stats)
-	saved_data["funscript_path"] = funscript_rel
-	saved_data["action_count"] = fs_stats["count"]
-	saved_data["length_ms"] = fs_stats["length_ms"]
-
-	# Secondary-axis scripts — pooled, keyed by axis (suffix preserved via
-	# _channel_pool_ext); a pending trim rebases them to the same window.
-	var axis_in: Dictionary = data_in.get("axis_scripts", {})
-	var axis_rel: Dictionary = {}
-	for axis: String in axis_in:
-		var ax_src: String = str(axis_in[axis])
-		var ax_rel: String = _pool_small_file(
-			ax_src,
-			abs_dir,
-			_channel_pool_ext(JourneyData.AXIS_SUFFIXES.get(axis, ""), ax_src),
-			trim_in,
-			trim_out
-		)
-		if ax_rel != "":
-			axis_rel[axis] = ax_rel
-	saved_data["axis_scripts"] = axis_rel
-
-	# Vibrator-channel scripts — pooled, keyed by channel; trimmed identically.
-	var vib_in: Dictionary = data_in.get("vib_scripts", {})
-	var vib_rel: Dictionary = {}
-	for ch: String in vib_in:
-		var vib_src: String = str(vib_in[ch])
-		var vib_rel_path: String = _pool_small_file(
-			vib_src,
-			abs_dir,
-			_channel_pool_ext(JourneyData.VIB_SUFFIXES.get(ch, ""), vib_src),
-			trim_in,
-			trim_out
-		)
-		if vib_rel_path != "":
-			vib_rel[ch] = vib_rel_path
-	saved_data["vib_scripts"] = vib_rel
+	# Secondary-axis + vib scripts — pooled, keyed by channel (suffix preserved),
+	# trim-rebased identically.
+	saved_data["axis_scripts"] = _pool_channels(
+		data_in.get("axis_scripts", {}), abs_dir, JourneyData.AXIS_SUFFIXES, trim_in, trim_out
+	)
+	saved_data["vib_scripts"] = _pool_channels(
+		data_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, trim_in, trim_out
+	)
 
 	# Boss intro image (boss rounds only) → content pool.
 	var boss_rel: String = ""
@@ -3162,75 +3126,189 @@ func _save_round_node_media(
 		boss_rel = _pool_small_file(str(data_in.get("boss_image", "")), abs_dir)
 	saved_data["boss_image"] = boss_rel
 
-	# Video → content pool, transcoded/copied only the first time the source is seen this save.
-	var video_rel: String = ""
+	# Video → content pool. Legacy fallback: a pre-VideoPath round carries its video
+	# only on disk; a re-save must never drop it (the swap deletes the old folder).
 	var vid_src: String = str(data_in.get("video_path", ""))
 	if vid_src == "":
-		# Defense-in-depth against silent video loss: a legacy round (pre-VideoPath) carries its video
-		# only on disk. The editor load resolves it (parse_graph_for_editor), but fall back to a folder-
-		# scan here too — a re-save must NEVER drop a video that's physically present, because the swap
-		# then deletes the old rNNN/ folder. No-op for content/-pooled journeys (their folder is a slug).
 		vid_src = JourneyData.find_video_in_round(str(data_in.get("folder", "")))
-	if vid_src != "":
-		var plan_key: String = _transcode_plan_key(vid_src, trim_in, trim_out)
-		var is_transcode: bool = _transcode_plan.has(plan_key)
-		var vid_ext: String = "mp4" if is_transcode else vid_src.get_extension()
-		var vid_pool: Dictionary = _assign_pooled_media(vid_src, vid_ext, trim_in, trim_out)
-		video_rel = vid_pool["rel"]
-		if vid_pool["copy"]:
-			var vid_dst: String = abs_dir + "/" + video_rel
-			if is_transcode:
-				var info: Dictionary = _transcode_plan[plan_key]
-				_update_modal_round(modal, rorder, total, round_name, info["codec"])
-				_transcode_cancel = false
-				var ok: bool = await MediaPoolService.transcode_video(
-					vid_src,
-					vid_dst,
-					info["duration"],
-					trim_in,
-					trim_out,
-					func(frac: float, cur: float, tot: float, spd: String) -> void:
-						_update_modal_progress(modal, frac, cur, tot, spd),
-					func() -> bool: return _transcode_cancel
+	var vres: Dictionary = await _pool_video_into(
+		vid_src,
+		abs_dir,
+		modal,
+		round_name,
+		'Round "%s"' % round_name,
+		rorder,
+		total,
+		trim_in,
+		trim_out
+	)
+	if not vres["ok"]:
+		return {}
+	saved_data["video_path"] = vres["rel"]
+
+	# Pool round: pool each encounter entry's media (video + funscript + axis/vib),
+	# rewriting each entry's paths to content/ rels. No trim on entries.
+	if str(saved_data.get("round_type", "normal")) == "pool":
+		var entries_out: Array = []
+		for pe: Variant in data_in.get("pool_entries", []):
+			var entry_in: Dictionary = pe
+			var ename: String = str(entry_in.get("name", "")).strip_edges()
+			var e_fs: Dictionary = _pool_funscript(
+				str(entry_in.get("funscript_path", "")), abs_dir, 0, 0
+			)
+			var e_vid: Dictionary = await _pool_video_into(
+				str(entry_in.get("video_path", "")),
+				abs_dir,
+				modal,
+				ename,
+				'Encounter "%s"' % ename,
+				rorder,
+				total,
+				0,
+				0
+			)
+			if not e_vid["ok"]:
+				return {}
+			(
+				entries_out
+				. append(
+					{
+						"name": ename,
+						"video_path": e_vid["rel"],
+						"funscript_path": e_fs["rel"],
+						"action_count": e_fs["count"],
+						"length_ms": e_fs["length_ms"],
+						"axis_scripts":
+						_pool_channels(
+							entry_in.get("axis_scripts", {}),
+							abs_dir,
+							JourneyData.AXIS_SUFFIXES,
+							0,
+							0
+						),
+						"vib_scripts":
+						_pool_channels(
+							entry_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, 0, 0
+						),
+						"weight": maxi(1, int(entry_in.get("weight", 1))),
+					}
 				)
-				if not ok:
-					if _transcode_cancel:
-						_show_save_error_single(
-							"SAVE CANCELLED",
-							CAUSE_CANCELLED,
-							'Round "%s"' % round_name,
-							(
-								'You cancelled the transcode while round "%s" was being processed.'
-								% round_name
-							),
-							"Press Save again to retry. Nothing on disk was changed."
-						)
-					else:
-						_show_save_error_single(
-							"SAVE FAILED",
-							CAUSE_TRANSCODE_FAILED,
-							'Round "%s"' % round_name,
-							(
-								'ffmpeg failed to transcode video "%s" (codec %s → h264).'
-								% [vid_src.get_file(), info["codec"]]
-							),
-							"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round."
-						)
-					return {}
-			else:
-				_update_modal_label(
-					modal, "Round %d / %d — %s  (copying video)" % [rorder, total, round_name]
-				)
-				var copy_result: Dictionary = await _copy_file_chunked(
-					vid_src,
-					vid_dst,
-					func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot)
-				)
-				if not copy_result["ok"]:
-					_show_copy_failure_modal(copy_result, 'Round "%s"' % round_name)
-					return {}
-	saved_data["video_path"] = video_rel
+			)
+		saved_data["pool_entries"] = entries_out
+
 	return saved_data
+
+
+# Pools a funscript source into content/ (trim-rebased when trim set), caching stats
+# by fingerprint so a reused source is parsed once. Returns {rel, count, length_ms};
+# empty source → empty rel + zero stats.
+func _pool_funscript(fs_src: String, abs_dir: String, trim_in: int, trim_out: int) -> Dictionary:
+	if fs_src == "":
+		return {"rel": "", "count": 0, "length_ms": 0}
+	var pool: Dictionary = _assign_pooled_media(fs_src, fs_src.get_extension(), trim_in, trim_out)
+	var rel: String = pool["rel"]
+	var stats: Dictionary = {"count": 0, "length_ms": 0}
+	if pool["copy"]:
+		var dst: String = abs_dir + "/" + rel
+		if trim_in > 0 or trim_out > 0:
+			_write_trimmed_funscript(fs_src, dst, trim_in, trim_out)
+		else:
+			_copy_file(fs_src, dst)
+		stats = JourneyData.read_funscript_stats(dst)
+		_pooled_fs_stats[pool["fingerprint"]] = stats
+	else:
+		stats = _pooled_fs_stats.get(pool["fingerprint"], stats)
+	return {"rel": rel, "count": stats["count"], "length_ms": stats["length_ms"]}
+
+
+# Pools a {channel: source} map (secondary-axis or vib scripts) into content/, keyed
+# by channel with the suffix preserved. Returns {channel: rel} (skips empty sources).
+func _pool_channels(
+	channels_in: Dictionary, abs_dir: String, suffixes: Dictionary, trim_in: int, trim_out: int
+) -> Dictionary:
+	var out: Dictionary = {}
+	for ch: String in channels_in:
+		var src: String = str(channels_in[ch])
+		var rel: String = _pool_small_file(
+			src, abs_dir, _channel_pool_ext(suffixes.get(ch, ""), src), trim_in, trim_out
+		)
+		if rel != "":
+			out[ch] = rel
+	return out
+
+
+# Pools a video source into content/: transcodes (when the plan flags it) or copies,
+# with modal progress + cancel. `display` names it in the progress modal, `subject`
+# in error modals (e.g. 'Round "X"' / 'Encounter "Y"'). Returns {rel, ok}; ok=false
+# (after showing an error modal) means the caller must abort the save. Empty src is a
+# no-op success.
+func _pool_video_into(
+	vid_src: String,
+	abs_dir: String,
+	modal: Control,
+	display: String,
+	subject: String,
+	rorder: int,
+	total: int,
+	trim_in: int,
+	trim_out: int
+) -> Dictionary:
+	if vid_src == "":
+		return {"rel": "", "ok": true}
+	var plan_key: String = _transcode_plan_key(vid_src, trim_in, trim_out)
+	var is_transcode: bool = _transcode_plan.has(plan_key)
+	var vid_ext: String = "mp4" if is_transcode else vid_src.get_extension()
+	var pool: Dictionary = _assign_pooled_media(vid_src, vid_ext, trim_in, trim_out)
+	var rel: String = pool["rel"]
+	if not pool["copy"]:
+		return {"rel": rel, "ok": true}
+	var vid_dst: String = abs_dir + "/" + rel
+	if is_transcode:
+		var info: Dictionary = _transcode_plan[plan_key]
+		_update_modal_round(modal, rorder, total, display, info["codec"])
+		_transcode_cancel = false
+		var ok: bool = await MediaPoolService.transcode_video(
+			vid_src,
+			vid_dst,
+			info["duration"],
+			trim_in,
+			trim_out,
+			func(frac: float, cur: float, tot: float, spd: String) -> void:
+				_update_modal_progress(modal, frac, cur, tot, spd),
+			func() -> bool: return _transcode_cancel
+		)
+		if not ok:
+			if _transcode_cancel:
+				_show_save_error_single(
+					"SAVE CANCELLED",
+					CAUSE_CANCELLED,
+					subject,
+					"You cancelled the transcode while %s was being processed." % subject,
+					"Press Save again to retry. Nothing on disk was changed."
+				)
+			else:
+				_show_save_error_single(
+					"SAVE FAILED",
+					CAUSE_TRANSCODE_FAILED,
+					subject,
+					(
+						'ffmpeg failed to transcode video "%s" (codec %s → h264).'
+						% [vid_src.get_file(), info["codec"]]
+					),
+					"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round."
+				)
+			return {"rel": rel, "ok": false}
+	else:
+		_update_modal_label(modal, "Round %d / %d — %s  (copying video)" % [rorder, total, display])
+		var copy_result: Dictionary = await _copy_file_chunked(
+			vid_src,
+			vid_dst,
+			func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot)
+		)
+		if not copy_result["ok"]:
+			_show_copy_failure_modal(copy_result, subject)
+			return {"rel": rel, "ok": false}
+	return {"rel": rel, "ok": true}
 
 
 # Copies a storyboard node's images (background + per-line) into media/ (source-path dedup),
@@ -4175,6 +4253,12 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 			)
 		)
 
+	# Pool round: validate the encounter entries instead of the round's own media
+	# (empty by design). The own-media checks below don't apply.
+	if str(round_data.get("round_type", "normal")) == "pool":
+		_save_check_pool_entries(round_data, label, issues)
+		return
+
 	# Required: funscript.
 	var fs: String = round_data.get("funscript_path", "")
 	if fs == "":
@@ -4276,6 +4360,65 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 	# (`rNNN`) and the longest filename inside is `axis_<XY>.funscript` (~22
 	# chars), so the only path-length lever left is the journey name itself,
 	# which would need to be hundreds of characters to come close to MAX_PATH.)
+
+
+# Presave validation for a pool round: it needs ≥1 encounter, and each encounter
+# needs a video + funscript that still exist on disk (same requirements as a normal
+# round, per entry).
+func _save_check_pool_entries(round_data: Dictionary, label: String, issues: Array) -> void:
+	var entries: Array = round_data.get("pool_entries", [])
+	if entries.is_empty():
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": label,
+					"detail": "Pool round has no encounters.",
+					"hint": "Add at least one encounter (video + funscript) in the round editor.",
+				}
+			)
+		)
+		return
+	for i: int in entries.size():
+		var e: Dictionary = entries[i]
+		var ename: String = str(e.get("name", "")).strip_edges()
+		var elabel: String = (
+			'%s — encounter "%s"' % [label, ename]
+			if ename != ""
+			else "%s — encounter %d" % [label, i + 1]
+		)
+		_save_check_pool_source(str(e.get("video_path", "")), "video", elabel, issues)
+		_save_check_pool_source(str(e.get("funscript_path", "")), "funscript", elabel, issues)
+
+
+# Flags a single required encounter source (video / funscript): absent, or set but
+# missing on disk.
+func _save_check_pool_source(path: String, kind: String, elabel: String, issues: Array) -> void:
+	if path == "":
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": elabel,
+					"detail": "No %s selected." % kind,
+					"hint": "Drag a %s into this encounter, or remove it." % kind,
+				}
+			)
+		)
+	elif not _save_source_exists(path):
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": elabel,
+					"detail": "Encounter %s no longer exists at: %s" % [kind, path],
+					"hint": "Re-drag the %s or remove this encounter." % kind,
+				}
+			)
+		)
 
 
 func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> void:

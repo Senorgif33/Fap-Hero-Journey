@@ -608,6 +608,17 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 				out.erase(legacy)
 			out.merge(normalize_effect_round(data), true)
 			_prune_orphan_overrides(out)  # drop tuning for effects no longer ticked
+			# Pool round ("encounter"): a list of media-set entries, one weighted-picked
+			# at runtime. Only pool rounds carry the list; media inside is pooled later by
+			# _save_round_node_media (like a normal round's media, ×N entries).
+			if str(out.get("round_type", "")) == "pool":
+				var pool_out: Array = []
+				for pe: Variant in data.get("pool_entries", []):
+					if pe is Dictionary:
+						pool_out.append(coerce_pool_entry(pe))
+				out["pool_entries"] = pool_out
+			else:
+				out.erase("pool_entries")
 		"shop":
 			out["title"] = str(data.get("title", ""))
 			out["mode"] = str(data.get("mode", "pool"))
@@ -652,6 +663,32 @@ static func _prune_orphan_overrides(out: Dictionary) -> void:
 	for nm: String in overrides.keys():
 		if not live.has(nm):
 			overrides.erase(nm)
+
+
+# ── Pool round (random encounter) ─────────────────────────────────────────────
+# A pool round holds several media-set entries; the runtime weighted-picks one as
+# the "encounter" each play. Each entry is just media + a name + a spawn weight
+# (deep-copied so a coerced entry never aliases the editor's live dicts). At save
+# the media paths are pooled into content/ by _save_round_node_media; at scan they
+# resolve back to absolute — same as a normal round's media, per entry.
+static func coerce_pool_entry(e: Dictionary) -> Dictionary:
+	return {
+		"name": str(e.get("name", "")),
+		"video_path": str(e.get("video_path", "")),
+		"funscript_path": str(e.get("funscript_path", "")),
+		"axis_scripts": (e.get("axis_scripts", {}) as Dictionary).duplicate(true),
+		"vib_scripts": (e.get("vib_scripts", {}) as Dictionary).duplicate(true),
+		"weight": maxi(1, int(e.get("weight", 1))),
+	}
+
+
+# Per-entry spawn weights (≥1) for the runtime pick. Pair with
+# ForkResolver.weighted_pick(weights, randi() % sum(weights)).
+static func pool_entry_weights(entries: Array) -> Array:
+	var w: Array = []
+	for e: Variant in entries:
+		w.append(maxi(1, int((e as Dictionary).get("weight", 1))))
+	return w
 
 
 # ── Item templates ───────────────────────────────────────────────────────────
@@ -1424,11 +1461,15 @@ static func read_funscript_stats(path: String) -> Dictionary:
 static func graph_has_any_video(graph: Dictionary) -> bool:
 	for id: String in graph.get("nodes", {}):
 		var n: Dictionary = graph["nodes"][id]
-		if (
-			str(n.get("type", "")) == "round"
-			and str((n.get("data", {}) as Dictionary).get("video_path", "")) != ""
-		):
+		if str(n.get("type", "")) != "round":
+			continue
+		var data: Dictionary = n.get("data", {})
+		if str(data.get("video_path", "")) != "":
 			return true
+		# A pool round's videos live in its entries.
+		for pe: Variant in data.get("pool_entries", []):
+			if str((pe as Dictionary).get("video_path", "")) != "":
+				return true
 	return false
 
 

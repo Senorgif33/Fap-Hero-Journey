@@ -414,12 +414,20 @@ static func _resolve_round_paths(d: Dictionary, base: String) -> void:
 	d["funscript_path"] = _abs(str(d.get("funscript_path", "")), base)
 	d["video_path"] = _abs(str(d.get("video_path", "")), base)
 	d["boss_image"] = _abs(str(d.get("boss_image", "")), base)
-	var ax: Dictionary = d.get("axis_scripts", {})
-	for k: String in ax:
-		ax[k] = _abs(str(ax[k]), base)
-	var vb: Dictionary = d.get("vib_scripts", {})
-	for k: String in vb:
-		vb[k] = _abs(str(vb[k]), base)
+	_resolve_channels(d.get("axis_scripts", {}), base)
+	_resolve_channels(d.get("vib_scripts", {}), base)
+	# Pool round: each encounter entry carries its own media set — resolve them too.
+	for entry: Dictionary in d.get("pool_entries", []):
+		entry["funscript_path"] = _abs(str(entry.get("funscript_path", "")), base)
+		entry["video_path"] = _abs(str(entry.get("video_path", "")), base)
+		_resolve_channels(entry.get("axis_scripts", {}), base)
+		_resolve_channels(entry.get("vib_scripts", {}), base)
+
+
+# Resolves every value of a {channel: rel} media map to absolute, in place.
+static func _resolve_channels(channels: Dictionary, base: String) -> void:
+	for k: String in channels:
+		channels[k] = _abs(str(channels[k]), base)
 
 
 static func _resolve_storyboard_paths(d: Dictionary, base: String) -> void:

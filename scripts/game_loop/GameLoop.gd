@@ -159,6 +159,9 @@ const INTEREST_PCT: float = 0.25  # "Interest" boon pays this fraction of the co
 # Empty = no card (normal/boss rounds).
 var _reveal_effects: Array = []
 const REVEAL_HOLD_SECS: float = 2.6
+# Pool-round "ENCOUNTER!" card hold — punchier than the effect reveal (a mystery
+# beat, not a modifier to read).
+const ENCOUNTER_HOLD_SECS: float = 1.2
 # Cleanse / endure decision (only when the round is resolvable): pay to lift the
 # effects mid-round, or endure to the end for the round's endure_reward bonus. Its
 # own floating button (not in the HUD, so a Fog effect can't lock the player out).
@@ -568,6 +571,13 @@ func _begin_round(round: Dictionary) -> void:
 	# Clear any pause left by a pre-round gate (boss intro / checkpoint banner) —
 	# _video.play() below doesn't reset the paused flag on its own.
 	_video.paused = false
+
+	# Pool ("encounter") round: weighted-pick one entry and swap its media into this
+	# round (a deep copy — safe to mutate), then reveal it behind a mystery card.
+	# Playback waits for the card. Must run before the media loads below.
+	if str(round.get("round_type", "normal")) == "pool":
+		_resolve_pool_round(round)
+		await _show_encounter_card()
 
 	var fs_path: String = round.get("funscript_path", "")
 	if fs_path != "":
@@ -1017,6 +1027,80 @@ func _show_reveal_card(round: Dictionary) -> void:
 		return
 	var tout: Tween = create_tween()
 	tout.tween_property(root, "modulate:a", 0.0, 0.3)
+	await tout.finished
+	root.queue_free()
+
+
+# Pool round: weighted-pick one encounter entry and swap its resolved media into the
+# round dict (a deep copy, safe to mutate) so the rest of _begin_round loads it like a
+# normal round. No-op when the pool is empty (presave should have blocked that).
+func _resolve_pool_round(round: Dictionary) -> void:
+	var entries: Array = round.get("pool_entries", [])
+	if entries.is_empty():
+		return
+	var weights: Array = JourneyData.pool_entry_weights(entries)
+	var total_w: int = 0
+	for w: int in weights:
+		total_w += w
+	var idx: int = ForkResolver.weighted_pick(weights, randi() % maxi(1, total_w))
+	var e: Dictionary = entries[idx]
+	round["video_path"] = str(e.get("video_path", ""))
+	round["funscript_path"] = str(e.get("funscript_path", ""))
+	round["axis_scripts"] = (e.get("axis_scripts", {}) as Dictionary).duplicate(true)
+	round["vib_scripts"] = (e.get("vib_scripts", {}) as Dictionary).duplicate(true)
+
+
+# The mystery "ENCOUNTER!" reveal for a pool round: slides in from the right, holds,
+# slides out to the left. Awaited by _begin_round before playback. Deliberately shows
+# no name — the video reveals which encounter it is.
+func _show_encounter_card() -> void:
+	var accent: Color = UITheme.MAGENTA
+
+	var root: Control = Control.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+
+	var backdrop: ColorRect = ColorRect.new()
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.color = Color(0, 0, 0, 0.6)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(backdrop)
+
+	var panel: PanelContainer = PanelContainer.new()
+	var ps: StyleBoxFlat = StyleBoxFlat.new()
+	ps.bg_color = UITheme.PANEL_BG_DEEP
+	ps.border_color = accent
+	ps.set_border_width_all(2)
+	ps.set_corner_radius_all(8)
+	ps.set_content_margin_all(30)
+	panel.add_theme_stylebox_override("panel", ps)
+	root.add_child(panel)
+
+	var label: Label = Label.new()
+	label.text = "⚔  ENCOUNTER!"
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_color_override("font_color", accent)
+	label.add_theme_font_size_override("font_size", 44)
+	panel.add_child(label)
+
+	await get_tree().process_frame  # let the panel size itself before centering
+	var target: Vector2 = (root.size - panel.size) / 2.0
+	var off: Vector2 = Vector2(root.size.x, 0.0)
+	panel.position = target + off
+	root.modulate.a = 0.0
+	var tin: Tween = create_tween().set_parallel(true)
+	tin.tween_property(root, "modulate:a", 1.0, 0.35)
+	tin.tween_property(panel, "position", target, 0.45).set_trans(Tween.TRANS_BACK).set_ease(
+		Tween.EASE_OUT
+	)
+	await tin.finished
+	await get_tree().create_timer(ENCOUNTER_HOLD_SECS).timeout
+	if not is_inside_tree():
+		return
+	var tout: Tween = create_tween().set_parallel(true)
+	tout.tween_property(root, "modulate:a", 0.0, 0.3)
+	tout.tween_property(panel, "position", target - off, 0.3).set_ease(Tween.EASE_IN)
 	await tout.finished
 	root.queue_free()
 

@@ -1,0 +1,85 @@
+extends GdUnitTestSuite
+
+# Pool round (random encounter) — the pure schema + weighted-pick foundation:
+# entry coercion, weight extraction, the round-data round-trip, and selection via
+# the shared ForkResolver.weighted_pick.
+
+
+func test_coerce_pool_entry_canonical_shape() -> void:
+	var e: Dictionary = JourneyData.coerce_pool_entry({"name": "Goblin", "video_path": "g.mp4"})
+	assert_str(str(e["name"])).is_equal("Goblin")
+	assert_str(str(e["video_path"])).is_equal("g.mp4")
+	assert_str(str(e["funscript_path"])).is_equal("")  # defaulted
+	assert_int(int(e["weight"])).is_equal(1)  # default weight
+	assert_bool((e["axis_scripts"] as Dictionary).is_empty()).is_true()
+
+
+func test_coerce_pool_entry_clamps_weight() -> void:
+	assert_int(int(JourneyData.coerce_pool_entry({"weight": 0})["weight"])).is_equal(1)
+	assert_int(int(JourneyData.coerce_pool_entry({"weight": -5})["weight"])).is_equal(1)
+	assert_int(int(JourneyData.coerce_pool_entry({"weight": 4})["weight"])).is_equal(4)
+
+
+func test_coerce_pool_entry_deep_copies_channels() -> void:
+	var axis: Dictionary = {"L1": "a.funscript"}
+	var e: Dictionary = JourneyData.coerce_pool_entry({"axis_scripts": axis})
+	axis["L1"] = "MUTATED"  # mutate the source afterward
+	assert_str(str((e["axis_scripts"] as Dictionary)["L1"])).is_equal("a.funscript")
+
+
+func test_pool_entry_weights() -> void:
+	var w: Array = JourneyData.pool_entry_weights([{"weight": 1}, {"weight": 3}, {}])
+	assert_array(w).is_equal([1, 3, 1])  # missing weight → 1
+
+
+func test_pool_round_coercion_keeps_entries() -> void:
+	var data: Dictionary = {
+		"round_type": "pool",
+		"pool_entries": [{"name": "A", "video_path": "a.mp4", "weight": 2}, {"name": "B"}],
+	}
+	var out: Dictionary = JourneyData.coerce_node_save_data("round", data)
+	assert_str(str(out["round_type"])).is_equal("pool")
+	assert_int((out["pool_entries"] as Array).size()).is_equal(2)
+	assert_int(int((out["pool_entries"][0] as Dictionary)["weight"])).is_equal(2)
+	assert_str(str((out["pool_entries"][1] as Dictionary)["name"])).is_equal("B")
+
+
+func test_non_pool_round_drops_entries() -> void:
+	# A normal round must not carry a pool_entries key (schema stays lean).
+	var data: Dictionary = {"round_type": "normal", "pool_entries": [{"name": "stray"}]}
+	var out: Dictionary = JourneyData.coerce_node_save_data("round", data)
+	assert_bool(out.has("pool_entries")).is_false()
+
+
+func test_pool_entry_paths_resolve_on_scan() -> void:
+	# The scan side (JourneyGraph.resolve_paths) must make each entry's media
+	# absolute, not just the round's own fields.
+	var entry: Dictionary = {
+		"name": "A",
+		"video_path": "content/m_a.mp4",
+		"funscript_path": "content/m_a.funscript",
+		"axis_scripts": {"L1": "content/m_a.L1.funscript"},
+	}
+	var graph: Dictionary = {
+		"start": "n1",
+		"nodes":
+		{
+			"n1":
+			{"type": "round", "data": {"round_type": "pool", "pool_entries": [entry]}, "out": []}
+		},
+	}
+	JourneyGraph.resolve_paths(graph, "/base")
+	var e: Dictionary = graph["nodes"]["n1"]["data"]["pool_entries"][0]
+	assert_str(str(e["video_path"])).is_equal("/base/content/m_a.mp4")
+	assert_str(str(e["funscript_path"])).is_equal("/base/content/m_a.funscript")
+	assert_str(str((e["axis_scripts"] as Dictionary)["L1"])).is_equal(
+		"/base/content/m_a.L1.funscript"
+	)
+
+
+func test_weighted_pick_favors_heavy_entry() -> void:
+	# weights [1,3]: r=0 → index 0; r in {1,2,3} → index 1 (the heavier entry).
+	var weights: Array = JourneyData.pool_entry_weights([{"weight": 1}, {"weight": 3}])
+	assert_int(ForkResolver.weighted_pick(weights, 0)).is_equal(0)
+	assert_int(ForkResolver.weighted_pick(weights, 1)).is_equal(1)
+	assert_int(ForkResolver.weighted_pick(weights, 3)).is_equal(1)
