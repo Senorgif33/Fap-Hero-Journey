@@ -617,8 +617,10 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 					if pe is Dictionary:
 						pool_out.append(coerce_pool_entry(pe))
 				out["pool_entries"] = pool_out
+				out["show_encounter"] = bool(data.get("show_encounter", true))
 			else:
 				out.erase("pool_entries")
+				out.erase("show_encounter")
 		"shop":
 			out["title"] = str(data.get("title", ""))
 			out["mode"] = str(data.get("mode", "pool"))

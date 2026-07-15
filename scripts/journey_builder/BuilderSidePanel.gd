@@ -2418,6 +2418,14 @@ func _make_pool_expander(arr: Array, idx: int, reselect: Callable) -> Control:
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	wrapper.add_child(hint)
 
+	var card_toggle: CheckButton = CheckButton.new()
+	card_toggle.text = 'SHOW "ENCOUNTER!" CARD'
+	card_toggle.tooltip_text = "Play the animated ENCOUNTER card before the round starts. Off = the chosen encounter just begins, no reveal."
+	card_toggle.add_theme_font_size_override("font_size", 12)
+	card_toggle.button_pressed = bool(arr[idx].get("show_encounter", true))
+	card_toggle.toggled.connect(func(on: bool) -> void: arr[idx]["show_encounter"] = on)
+	wrapper.add_child(card_toggle)
+
 	var list: VBoxContainer = VBoxContainer.new()
 	list.add_theme_constant_override("separation", 8)
 	wrapper.add_child(list)

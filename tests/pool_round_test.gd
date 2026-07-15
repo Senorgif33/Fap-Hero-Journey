@@ -51,6 +51,19 @@ func test_non_pool_round_drops_entries() -> void:
 	assert_bool(out.has("pool_entries")).is_false()
 
 
+func test_pool_round_show_encounter_toggle() -> void:
+	# Defaults on; an explicit off persists; non-pool rounds never carry the flag.
+	var on: Dictionary = JourneyData.coerce_node_save_data("round", {"round_type": "pool"})
+	assert_bool(bool(on["show_encounter"])).is_true()
+	var off_data: Dictionary = {"round_type": "pool", "show_encounter": false}
+	var off: Dictionary = JourneyData.coerce_node_save_data("round", off_data)
+	assert_bool(bool(off["show_encounter"])).is_false()
+	var normal: Dictionary = JourneyData.coerce_node_save_data(
+		"round", {"round_type": "normal", "show_encounter": true}
+	)
+	assert_bool(normal.has("show_encounter")).is_false()
+
+
 func test_pool_entry_paths_resolve_on_scan() -> void:
 	# The scan side (JourneyGraph.resolve_paths) must make each entry's media
 	# absolute, not just the round's own fields.

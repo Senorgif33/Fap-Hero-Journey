@@ -139,6 +139,10 @@ var _boss_frame: Panel = null
 # cleanse. Set when the round loads, cleared at round end.
 var _is_effect_round: bool = false
 var _effect_resolvable: bool = false  # the round carries the cleanse/endure layer
+# Effective length (ms) of the round currently playing. For a pool round this is
+# the CHOSEN entry's length, not the round's own (empty) length_ms — read by the
+# no-video timer and the play log so the end-screen recap shows the right duration.
+var _active_round_length_ms: int = 0
 
 # Chance a *random* effect round rolls TWO effects instead of one.
 const DOUBLE_EFFECT_CHANCE: float = 0.22
@@ -573,11 +577,17 @@ func _begin_round(round: Dictionary) -> void:
 	_video.paused = false
 
 	# Pool ("encounter") round: weighted-pick one entry and swap its media into this
-	# round (a deep copy — safe to mutate), then reveal it behind a mystery card.
-	# Playback waits for the card. Must run before the media loads below.
+	# round (a deep copy — safe to mutate), then (unless the author turned it off)
+	# reveal it behind a mystery card. Playback waits for the card. Must run before
+	# the media loads below.
 	if str(round.get("round_type", "normal")) == "pool":
 		_resolve_pool_round(round)
-		await _show_encounter_card()
+		if bool(round.get("show_encounter", true)):
+			await _show_encounter_card()
+
+	# The round's effective length (pool rounds carry the chosen entry's after the
+	# resolve above; everything else its own). Read at round end for the play log.
+	_active_round_length_ms = int(round.get("length_ms", 0))
 
 	var fs_path: String = round.get("funscript_path", "")
 	if fs_path != "":
@@ -1048,6 +1058,10 @@ func _resolve_pool_round(round: Dictionary) -> void:
 	round["funscript_path"] = str(e.get("funscript_path", ""))
 	round["axis_scripts"] = (e.get("axis_scripts", {}) as Dictionary).duplicate(true)
 	round["vib_scripts"] = (e.get("vib_scripts", {}) as Dictionary).duplicate(true)
+	# Carry the chosen entry's stats too, so round length + action count (HUD,
+	# no-video timer, and the end-screen recap) reflect what actually played.
+	round["length_ms"] = int(e.get("length_ms", 0))
+	round["action_count"] = int(e.get("action_count", 0))
 
 
 # The mystery "ENCOUNTER!" reveal for a pool round: slides in from the right, holds,
@@ -1497,7 +1511,7 @@ func _load_video(path: String) -> void:
 func _start_no_video_fallback() -> void:
 	# No video: use funscript length to drive a timer so the round still advances.
 	FunscriptPlayer.Play()
-	var dur_ms: int = GameState.CurrentRound().get("length_ms", 0)
+	var dur_ms: int = _active_round_length_ms
 	if dur_ms > 0:
 		_end_timer.wait_time = dur_ms / 1000.0
 		_end_timer.start()
@@ -1517,8 +1531,9 @@ func _on_round_ended() -> void:
 	# then pass it explicitly so C# never needs to look up the key itself.
 	var _cur: Dictionary = GameState.CurrentRound()
 	var _cur_name: String = _cur.get("name", "") as String
-	var _cur_ms: int = _cur.get("length_ms", 0) as int
-	GameState.LogRound(_cur, _cur_name, _cur_ms)
+	# Use the effective length captured at round start — a pool round's own
+	# length_ms is 0 (its media lives in entries; the chosen one was swapped in).
+	GameState.LogRound(_cur, _cur_name, _active_round_length_ms)
 
 	# Append to the GDScript-side round-name log (see _ready). EndScreen reads
 	# this directly, avoiding any potential C#→GDScript Dictionary marshalling
