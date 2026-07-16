@@ -549,8 +549,9 @@ func _apply_layout() -> void:
 
 	var cheat_hint: Label = Label.new()
 	cheat_hint.text = (
-		"While playing: F8 = complete round (clean, awards coins). "
-		+ "F9 = skip node (no coins). Cooldown banners get Continue. Leave OFF for normal play."
+		"While playing: → complete round (clean, awards coins). "
+		+ "↑ skip node (no coins). Cooldown banners get Continue. "
+		+ "Arrows still nudge stroke range when Quick Settings (S) is open. Leave OFF for normal play."
 	)
 	cheat_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(cheat_hint, UITheme.SEPARATOR, 11, false)

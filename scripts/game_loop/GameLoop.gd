@@ -205,7 +205,7 @@ var _pending_cooldown_until: int = 0
 # True while the cooldown Force-Quit modal is on screen (dev Continue / F9).
 var _cooldown_banner_open: bool = false
 var _cooldown_modal: Control = null
-# Dev F8: treat round end as clean even for must-release / fail_on_clean_finish.
+# Dev F8/→: treat round end as clean even for must-release / fail_on_clean_finish.
 var _dev_bypass_release_fail: bool = false
 
 
@@ -2249,7 +2249,7 @@ func _dev_cheats_on() -> bool:
 	return SettingsService.get_dev_cheats_enabled()
 
 
-# F8: clean-finish the current round (coins/score), bypassing must-release fail.
+# → : clean-finish the current round (coins/score), bypassing must-release fail.
 func _dev_complete_round() -> void:
 	if not _dev_cheats_on():
 		return
@@ -2271,7 +2271,7 @@ func _dev_complete_round() -> void:
 	await _on_round_ended()
 
 
-# F9: jump to the next node without awards (or skip cooldown gap).
+# ↑ : jump to the next node without awards (or skip cooldown gap).
 func _dev_skip_node() -> void:
 	if not _dev_cheats_on():
 		return
@@ -2845,20 +2845,14 @@ func _input(event: InputEvent) -> void:
 					if not _is_overlay_open:
 						_on_release_pressed()
 						get_viewport().set_input_as_handled()
-				KEY_F8:
-					# Dev: complete current round (or skip cooldown gap).
-					if SettingsService.get_dev_cheats_enabled():
-						_dev_complete_round()
-						get_viewport().set_input_as_handled()
-				KEY_F9:
-					# Dev: skip node without awards (or skip cooldown gap).
-					if SettingsService.get_dev_cheats_enabled():
-						_dev_skip_node()
-						get_viewport().set_input_as_handled()
-				# Arrow keys nudge the stroke range, but only while the drawer is open: ↑/↓ max, →/← min.
+				# Arrow keys: with Quick Settings open they nudge stroke range.
+				# With Dev Cheats on (and drawer closed): → complete, ↑ skip.
 				KEY_UP:
 					if is_instance_valid(_session_panel):
 						_session_panel.nudge_range(0, STROKE_RANGE_STEP)
+						get_viewport().set_input_as_handled()
+					elif SettingsService.get_dev_cheats_enabled():
+						_dev_skip_node()
 						get_viewport().set_input_as_handled()
 				KEY_DOWN:
 					if is_instance_valid(_session_panel):
@@ -2867,6 +2861,9 @@ func _input(event: InputEvent) -> void:
 				KEY_RIGHT:
 					if is_instance_valid(_session_panel):
 						_session_panel.nudge_range(STROKE_RANGE_STEP, 0)
+						get_viewport().set_input_as_handled()
+					elif SettingsService.get_dev_cheats_enabled():
+						_dev_complete_round()
 						get_viewport().set_input_as_handled()
 				KEY_LEFT:
 					if is_instance_valid(_session_panel):
