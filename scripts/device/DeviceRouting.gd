@@ -6,19 +6,21 @@ extends RefCounted
 #
 # Turns the saved routing config plus a live device catalog into a concrete
 # dispatch plan the player fans its output over. The per-actuator mapping is
-# Buttplug-only; the serial T-code device is addressed by the sentinel "serial".
+# Buttplug-only; serial / Restim T-code are addressed by backend sentinels.
 #
 # Actuator id: "<device_id>:<kind>:<channel>", where device_id = "<name>#<occ>",
 # kind is linear / vibrate / constrict, channel is 0-based. The stroke target is
-# such an id (a Buttplug linear) or a backend sentinel: "serial" (T-code) or
-# "handy" (The Handy over its cloud API — GameLoop drives it, not FunscriptPlayer,
-# so the C# plan consumer leaves the stroke backend unset for it by design).
+# such an id (a Buttplug linear) or a backend sentinel: "serial" (COM T-code),
+# "restim" (Restim websocket T-code for FOC/e-stim), or "handy" (The Handy cloud
+# API — GameLoop drives it, not FunscriptPlayer, so the C# plan consumer leaves
+# the stroke backend unset for it by design).
 #
 # Catalog entry (one connected Buttplug device):
 #   { "id": "Edge 2#0", "linear": bool, "vibrate_channels": int, "constrict_channels": int }
 # ---------------------------------------------------------------------------
 
 const SERIAL_TARGET: String = "serial"
+const RESTIM_TARGET: String = "restim"
 const HANDY_TARGET: String = "handy"
 const VIBE_SOURCES: Array = ["vibe1", "vibe2", "stroke"]  # "stroke" = follow the L0 envelope
 
@@ -39,7 +41,7 @@ static func parse_actuator_id(id: String) -> Dictionary:
 # Resolves the config against `catalog`, dropping every route whose device isn't
 # connected or whose channel is out of range. Returns:
 #   {
-#     "stroke":    {} | {"backend": "serial"} | {"backend": "bp", "device": <id>, "channel": <int>},
+#     "stroke":    {} | {"backend": "serial"|"restim"|"handy"|"bp", ...},
 #     "vibration": [ {"device": <id>, "channel": <int>, "source": "vibe1"|"vibe2"|"stroke"}, ... ],
 #     "constrict": [ {"device": <id>, "channel": <int>}, ... ],
 #   }
@@ -60,6 +62,8 @@ static func resolve(
 	# device banner owns, same as serial).
 	if stroke_target == SERIAL_TARGET:
 		plan["stroke"] = {"backend": "serial"}
+	elif stroke_target == RESTIM_TARGET:
+		plan["stroke"] = {"backend": "restim"}
 	elif stroke_target == HANDY_TARGET:
 		plan["stroke"] = {"backend": "handy"}
 	elif stroke_target != "":

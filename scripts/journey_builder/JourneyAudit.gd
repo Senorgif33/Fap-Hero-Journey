@@ -11,13 +11,15 @@ extends RefCounted
 #      player model and counts per-edge traffic, surfacing near-dead paths.
 #
 # Baseline player model (documented in the report UI): completes every round,
-# never cleanses (endures), and buys ONLY gate items — at a shop, the simulated
-# player purchases an offered item some fork ahead requires (when affordable
-# and not already held), so item-locked branches receive realistic traffic
-# instead of a flat 0%. The interval walk mirrors that asymmetry: COIN bounds
-# assume no purchases (a run's simulated average can therefore dip below the
-# analytic lo after a gate purchase), while ITEM availability assumes a needed
-# guaranteed+affordable item IS bought.
+# never cleanses (endures). Shop policy depends on journey economy mode:
+#   classic (default): buys ONLY gate items a fork ahead requires (when affordable
+#     and not already held) — modifiers cost coins like utilities.
+#   unlock_pay_per_use: unlocks offered modifiers for free; still buys gate
+#     utilities when needed. The interval walk mirrors that asymmetry: COIN bounds
+#     assume no utility purchases (a run's simulated average can therefore dip
+#     below the analytic lo after a gate purchase), while ITEM availability
+#     assumes needed guaranteed+affordable utilities ARE bought (and in PPU mode
+#     any offered modifier is unlocked for free).
 #
 # Score/coin mechanics are mirrored from the runtime; the mirrored constants
 # below must stay in lockstep with their sources.
@@ -48,12 +50,13 @@ const SEV_INFO: String = "info"  # worth knowing; not necessarily a problem
 
 
 # Runs the full audit. ctx:
-#   items:         {item_id: {"price": int, ...}} — the item registry
-#   round_scores:  {node_id: int} — baseline funscript score per round node
-#                  (compute via baseline_score; engine glue does the file I/O)
-#   round_lengths: {node_id: int} — funscript length in ms per round node
-#   mc_runs:       int (optional, DEFAULT_MC_RUNS)
-#   rng_seed:      int (optional — fixed seed makes the MC pass reproducible)
+#   items:               {item_id: {"price": int, "category": String, ...}}
+#   round_scores:        {node_id: int} — baseline funscript score per round node
+#                        (compute via baseline_score; engine glue does the file I/O)
+#   round_lengths:       {node_id: int} — funscript length in ms per round node
+#   unlock_pay_per_use:  bool (optional, default false) — journey shop economy
+#   mc_runs:             int (optional, DEFAULT_MC_RUNS)
+#   rng_seed:            int (optional — fixed seed makes the MC pass reproducible)
 # Returns {findings, coins, last_score, visits, stats}: findings is an Array of
 # {severity, kind, node_id, edge_idx, msg}; coins/last_score map node_id →
 # {lo, hi} ENTRY intervals; visits is simulate()'s output; stats is
@@ -436,6 +439,7 @@ static func _normalize_rounds(graph: Dictionary) -> Dictionary:
 static func _flow_analysis(graph: Dictionary, ctx: Dictionary) -> Dictionary:
 	var nodes: Dictionary = graph.get("nodes", {})
 	var items: Dictionary = ctx.get("items", {})
+	var unlock_ppu: bool = bool(ctx.get("unlock_pay_per_use", false))
 	var round_scores: Dictionary = ctx.get("round_scores", {})
 	var round_lengths: Dictionary = ctx.get("round_lengths", {})
 	var order: Array = topo_order(graph)
@@ -532,16 +536,16 @@ static func _flow_analysis(graph: Dictionary, ctx: Dictionary) -> Dictionary:
 					exit_guar[reward] = true
 					exit_poss[reward] = true
 			"shop":
-				# Coins assume no purchase; availability assumes the player buys
-				# what's guaranteed and worst-case affordable (class doc).
+				# Coins assume no purchase; availability uses acquire cost
+				# (free modifier unlocks only when unlock_pay_per_use).
 				var mult: float = float(data.get("price_multiplier", 1.0))
 				var all_ids: Array = items.keys()
 				all_ids.sort()
 				for iid: String in JourneyData.shop_guaranteed_ids(data, all_ids):
-					if _shop_price(items, iid, mult) <= int(exit_coins["lo"]):
+					if _shop_acquire_cost(items, iid, mult, unlock_ppu) <= int(exit_coins["lo"]):
 						exit_guar[iid] = true
 				for iid: String in JourneyData.shop_possible_ids(data, all_ids):
-					if _shop_price(items, iid, mult) <= int(exit_coins["hi"]):
+					if _shop_acquire_cost(items, iid, mult, unlock_ppu) <= int(exit_coins["hi"]):
 						exit_poss[iid] = true
 
 		exits[id] = {
@@ -616,6 +620,18 @@ static func _shop_price(items: Dictionary, item_id: String, mult: float) -> int:
 	return int(round(float((items.get(item_id, {}) as Dictionary).get("price", 0)) * mult))
 
 
+# Cost to acquire at a shop. Classic: always price*mult. PPU: modifiers free,
+# utilities still pay price.
+static func _shop_acquire_cost(
+	items: Dictionary, item_id: String, mult: float, unlock_pay_per_use: bool = false
+) -> int:
+	if unlock_pay_per_use:
+		var data: Dictionary = items.get(item_id, {}) as Dictionary
+		if str(data.get("category", "modifier")) == "modifier":
+			return 0
+	return _shop_price(items, item_id, mult)
+
+
 # Merges every predecessor edge-exit that targets `id`: intervals widen
 # (min lo / max hi), guaranteed intersects, possible + flags union.
 static func _merge_incoming(
@@ -662,6 +678,7 @@ static func _merge_incoming(
 static func _gate_findings(graph: Dictionary, ctx: Dictionary, flow: Dictionary) -> Array:
 	var nodes: Dictionary = graph.get("nodes", {})
 	var items: Dictionary = ctx.get("items", {})
+	var unlock_ppu: bool = bool(ctx.get("unlock_pay_per_use", false))
 	var findings: Array = []
 
 	for id: String in topo_order(graph):
@@ -677,11 +694,19 @@ static func _gate_findings(graph: Dictionary, ctx: Dictionary, flow: Dictionary)
 			var all_ids: Array = items.keys()
 			all_ids.sort()
 			var guar: Array = JourneyData.shop_guaranteed_ids(data, all_ids)
-			if not guar.is_empty():
-				var cheapest: int = _shop_price(items, guar[0], mult)
-				for iid: String in guar:
-					cheapest = mini(cheapest, _shop_price(items, iid, mult))
+			# In PPU mode only paid utilities can be "unaffordable"; in classic
+			# every guaranteed item has a price and counts.
+			var paid_costs: Array = []
+			for iid: String in guar:
+				var cost: int = _shop_acquire_cost(items, iid, mult, unlock_ppu)
+				if cost > 0:
+					paid_costs.append(cost)
+			if not paid_costs.is_empty():
+				var cheapest: int = int(paid_costs[0])
+				for c: int in paid_costs:
+					cheapest = mini(cheapest, c)
 				if cheapest > int(in_coins["hi"]):
+					var label: String = "utility" if unlock_ppu else "item"
 					(
 						findings
 						. append(
@@ -692,8 +717,8 @@ static func _gate_findings(graph: Dictionary, ctx: Dictionary, flow: Dictionary)
 								"edge_idx": -1,
 								"msg":
 								(
-									"Nothing guaranteed here is ever affordable (cheapest ♦%d, best-case coins ♦%d)."
-									% [cheapest, int(in_coins["hi"])]
+									"No guaranteed %s here is ever affordable (cheapest ♦%d, best-case coins ♦%d)."
+									% [label, cheapest, int(in_coins["hi"])]
 								),
 							}
 						)
@@ -1039,6 +1064,7 @@ static func simulate(
 	var items: Dictionary = ctx.get("items", {})
 	var all_item_ids: Array = items.keys()
 	all_item_ids.sort()
+	var unlock_ppu: bool = bool(ctx.get("unlock_pay_per_use", false))
 	var needed_below: Dictionary = _items_needed_below(graph)
 	var start: String = str(graph.get("start", ""))
 	var node_visits: Dictionary = {}
@@ -1099,17 +1125,25 @@ static func simulate(
 					if reward != "":
 						owned[reward] = int(owned.get(reward, 0)) + 1
 				"shop":
-					# Gate-purchase policy: buy an offered item some fork ahead
-					# requires, when affordable and not already held. The lineup
-					# is rolled per run, so pool-mode randomness carries through.
+					# Gate-purchase policy. Classic: buy needed offered items when
+					# affordable. PPU: unlock offered modifiers free; buy needed
+					# utilities when affordable. Pool-mode lineup is rolled per run.
 					var mult: float = float(data.get("price_multiplier", 1.0))
 					var offer: Array = JourneyData.resolve_shop_offer(data, all_item_ids, rng)
+					var need: Dictionary = needed_below.get(id, {}) as Dictionary
 					for iid: String in offer:
-						if not (needed_below.get(id, {}) as Dictionary).has(iid):
+						if unlock_ppu:
+							var cat: String = str(
+								(items.get(iid, {}) as Dictionary).get("category", "modifier")
+							)
+							if cat == "modifier":
+								owned[iid] = maxi(int(owned.get(iid, 0)), 1)
+								continue
+						if not need.has(iid):
 							continue
 						if int(owned.get(iid, 0)) > 0:
 							continue
-						var price: int = _shop_price(items, iid, mult)
+						var price: int = _shop_acquire_cost(items, iid, mult, unlock_ppu)
 						if coins >= price:
 							coins -= price
 							owned[iid] = int(owned.get(iid, 0)) + 1

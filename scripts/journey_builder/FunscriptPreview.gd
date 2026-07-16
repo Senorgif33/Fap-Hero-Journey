@@ -462,11 +462,12 @@ func _transform_pos_at(points: Array, i: int, effects: Array) -> float:
 	var mirrored: bool = reverse_count % 2 == 1
 	var pos: float = _mirror_one((points[i] as Vector2).y, mirrored)
 
-	# Scale each stroke around its local centre (neighbour midpoint). All scale
-	# effects multiply into one factor.
+	# Scale each stroke around its local centre (neighbour midpoint). All scale /
+	# volume_attenuate effects multiply into one factor (linear devices; Restim uses V0).
 	var scale_factor: float = 1.0
 	for e: Dictionary in effects:
-		if String(e.get("kind", "")) == "scale" and e.has("factor"):
+		var kind: String = String(e.get("kind", ""))
+		if (kind == "scale" or kind == "volume_attenuate") and e.has("factor"):
 			scale_factor *= float(e["factor"])
 	if not is_equal_approx(scale_factor, 1.0):
 		var prev: float = _mirror_one((points[maxi(0, i - 1)] as Vector2).y, mirrored)

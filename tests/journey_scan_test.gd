@@ -175,6 +175,7 @@ func test_top_level_fields() -> void:
 	assert_str(j.description).is_equal("a description")
 	assert_int(j.total_rounds).is_equal(3)  # 2 top-level + 1 in the longest fork path
 	assert_bool(j.map_enabled).is_true()  # omitted MapEnabled → default true (back-compat)
+	assert_bool(j.unlock_pay_per_use).is_false()  # omitted UnlockPayPerUse → classic economy
 
 
 # The journey-level map switch round-trips. Authors set MapEnabled:false to hide
@@ -184,6 +185,14 @@ func test_map_enabled_round_trips() -> void:
 	var d := _full_journey()
 	d["MapEnabled"] = false
 	assert_bool(_parse(d).map_enabled).is_false()
+
+
+# Unlock-then-pay-per-use is opt-in; omitted → classic charges (stock journeys).
+func test_unlock_pay_per_use_round_trips() -> void:
+	var d := _full_journey()
+	assert_bool(_parse(d).unlock_pay_per_use).is_false()
+	d["UnlockPayPerUse"] = true
+	assert_bool(_parse(d).unlock_pay_per_use).is_true()
 
 
 # A legacy cursed round migrates to the generic effect schema on scan (curses →

@@ -124,6 +124,8 @@ var _ui_scale_value_lbl: Label = null
 var _beat_bar_toggle: Button = null
 var _handy_status_lbl: Label = null
 var _update_check_toggle: Button = null
+var _ignore_cooldowns_toggle: Button = null
+var _dev_cheats_toggle: Button = null
 var _ui_sound_toggle: Button = null
 var _ui_sound_slider: HSlider = null
 var _ui_sound_value_lbl: Label = null
@@ -144,6 +146,11 @@ var _filler_section: VBoxContainer = null
 var _routing_section: VBoxContainer = null
 var _routing_cards_vbox: VBoxContainer = null
 var _handy_section: VBoxContainer = null  # The Handy (WiFi) connection block — lives on the CONNECTION tab
+var _restim_section: VBoxContainer = null  # Restim / FOC websocket — CONNECTION tab
+var _restim_url_edit: LineEdit = null
+var _restim_status_lbl: Label = null
+var _restim_connect_btn: Button = null
+var _restim_auto_toggle: Button = null
 var _stroker_summary_lbl: Label = null
 var _serial_delay_slider: HSlider = null
 var _serial_delay_lbl: Label = null
@@ -490,6 +497,65 @@ func _apply_layout() -> void:
 	_style_label(upd_hint, UITheme.SEPARATOR, 11, false)
 	display_section.add_child(upd_hint)
 
+	# ── Ignore journey cooldowns (dev / QA) ───────────────────────────────────
+	var cd_row: HBoxContainer = HBoxContainer.new()
+	cd_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(cd_row)
+
+	var cd_lbl: Label = Label.new()
+	cd_lbl.text = "IGNORE JOURNEY COOLDOWNS"
+	cd_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(cd_lbl, UITheme.WHITE_SOFT, 14, false)
+	cd_row.add_child(cd_lbl)
+
+	_ignore_cooldowns_toggle = Button.new()
+	_ignore_cooldowns_toggle.toggle_mode = true
+	_ignore_cooldowns_toggle.focus_mode = Control.FOCUS_NONE
+	_style_toggle(_ignore_cooldowns_toggle, false)
+	cd_row.add_child(_ignore_cooldowns_toggle)
+	_ignore_cooldowns_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_ignore_cooldowns_toggle, pressed)
+			_save_settings()
+	)
+
+	var cd_hint: Label = Label.new()
+	cd_hint.text = "Dev/QA: Resume ignores calendar lockouts. Also unlocks Continue on cooldown Force-Quit banners."
+	cd_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(cd_hint, UITheme.SEPARATOR, 11, false)
+	display_section.add_child(cd_hint)
+
+	# ── Dev cheats (in-run hotkeys) ───────────────────────────────────────────
+	var cheat_row: HBoxContainer = HBoxContainer.new()
+	cheat_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(cheat_row)
+
+	var cheat_lbl: Label = Label.new()
+	cheat_lbl.text = "DEV CHEATS (IN-RUN)"
+	cheat_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(cheat_lbl, UITheme.WHITE_SOFT, 14, false)
+	cheat_row.add_child(cheat_lbl)
+
+	_dev_cheats_toggle = Button.new()
+	_dev_cheats_toggle.toggle_mode = true
+	_dev_cheats_toggle.focus_mode = Control.FOCUS_NONE
+	_style_toggle(_dev_cheats_toggle, false)
+	cheat_row.add_child(_dev_cheats_toggle)
+	_dev_cheats_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_dev_cheats_toggle, pressed)
+			_save_settings()
+	)
+
+	var cheat_hint: Label = Label.new()
+	cheat_hint.text = (
+		"While playing: F8 = complete round (clean, awards coins). "
+		+ "F9 = skip node (no coins). Cooldown banners get Continue. Leave OFF for normal play."
+	)
+	cheat_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(cheat_hint, UITheme.SEPARATOR, 11, false)
+	display_section.add_child(cheat_hint)
+
 	for label_path in [
 		"ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeLabel",
 		"ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/FullscreenRow/FsLabel",
@@ -801,6 +867,7 @@ func _apply_layout() -> void:
 
 	_build_routing_section()
 	_build_handy_section()
+	_build_restim_section()
 
 	var filler_header: Label = Label.new()
 	filler_header.text = "STORYBOARD FILLER"
@@ -1017,6 +1084,7 @@ func _on_tab_changed(idx: int) -> void:
 			get_node(VBOX + "SerialSection"),
 			_routing_section,
 			_handy_section,
+			_restim_section,
 		],
 		# DEVICE
 		[_range_section, _filler_section],
@@ -1356,6 +1424,16 @@ func _load_settings() -> void:
 		_update_check_toggle.button_pressed = upd_on
 		_style_toggle(_update_check_toggle, upd_on)
 
+	if _ignore_cooldowns_toggle != null:
+		var cd_on: bool = SettingsService.get_ignore_journey_cooldowns()
+		_ignore_cooldowns_toggle.button_pressed = cd_on
+		_style_toggle(_ignore_cooldowns_toggle, cd_on)
+
+	if _dev_cheats_toggle != null:
+		var cheats_on: bool = SettingsService.get_dev_cheats_enabled()
+		_dev_cheats_toggle.button_pressed = cheats_on
+		_style_toggle(_dev_cheats_toggle, cheats_on)
+
 	if _ui_sound_toggle != null:
 		var ui_snd_on: bool = SettingsService.get_ui_sound_enabled()
 		# no_signal so opening Options doesn't fire the toggled handler (which would
@@ -1454,6 +1532,12 @@ func _save_settings() -> void:
 
 	if _update_check_toggle != null:
 		SettingsService.set_update_check_enabled(_update_check_toggle.button_pressed)
+
+	if _ignore_cooldowns_toggle != null:
+		SettingsService.set_ignore_journey_cooldowns(_ignore_cooldowns_toggle.button_pressed)
+
+	if _dev_cheats_toggle != null:
+		SettingsService.set_dev_cheats_enabled(_dev_cheats_toggle.button_pressed)
 
 	if _ui_sound_toggle != null:
 		SettingsService.set_ui_sound_enabled(_ui_sound_toggle.button_pressed)
@@ -2195,6 +2279,115 @@ func _build_handy_section() -> void:
 	section.add_child(disclosure)
 
 
+func _build_restim_section() -> void:
+	var section: VBoxContainer = VBoxContainer.new()
+	section.add_theme_constant_override("separation", 10)
+	_content_vbox.add_child(section)
+	_restim_section = section
+
+	var header: Label = Label.new()
+	header.text = "RESTIM / FOC-STIM (T-CODE WEBSOCKET)"
+	_style_label(header, UITheme.PURPLE_BRIGHT, 13, true)
+	section.add_child(header)
+
+	var divider: HSeparator = HSeparator.new()
+	divider.add_theme_stylebox_override("separator", _make_separator_style())
+	section.add_child(divider)
+
+	var url_row: HBoxContainer = HBoxContainer.new()
+	url_row.add_theme_constant_override("separation", 16)
+	section.add_child(url_row)
+
+	var url_lbl: Label = Label.new()
+	url_lbl.text = "Restim WS URL"
+	url_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(url_lbl, UITheme.WHITE_SOFT, 14, false)
+	url_row.add_child(url_lbl)
+
+	_restim_url_edit = LineEdit.new()
+	_restim_url_edit.placeholder_text = "ws://127.0.0.1:12346"
+	_restim_url_edit.text = SettingsService.get_restim_url()
+	_restim_url_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_line_edit(_restim_url_edit)
+	url_row.add_child(_restim_url_edit)
+
+	_restim_status_lbl = Label.new()
+	_restim_status_lbl.text = "● DISCONNECTED"
+	_style_label(_restim_status_lbl, UITheme.ERROR, 13, false)
+	url_row.add_child(_restim_status_lbl)
+
+	_restim_connect_btn = Button.new()
+	_restim_connect_btn.focus_mode = Control.FOCUS_NONE
+	_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
+	_restim_connect_btn.text = "> CONNECT"
+	url_row.add_child(_restim_connect_btn)
+	_restim_connect_btn.pressed.connect(_on_restim_connect_pressed)
+
+	var auto_row: HBoxContainer = HBoxContainer.new()
+	auto_row.add_theme_constant_override("separation", 16)
+	section.add_child(auto_row)
+	var auto_lbl: Label = Label.new()
+	auto_lbl.text = "Auto-connect"
+	auto_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(auto_lbl, UITheme.WHITE_SOFT, 14, false)
+	auto_row.add_child(auto_lbl)
+	_restim_auto_toggle = Button.new()
+	_restim_auto_toggle.toggle_mode = true
+	_restim_auto_toggle.focus_mode = Control.FOCUS_NONE
+	_restim_auto_toggle.button_pressed = SettingsService.get_restim_auto_connect()
+	_style_toggle(_restim_auto_toggle, _restim_auto_toggle.button_pressed)
+	auto_row.add_child(_restim_auto_toggle)
+	_restim_auto_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_restim_auto_toggle, pressed)
+			SettingsService.set_restim_auto_connect(pressed)
+			SettingsService.save()
+	)
+
+	var disclosure: Label = Label.new()
+	disclosure.text = (
+		"Sends the Restim FOC kit over T-code: alpha→L0, beta→L1, e1–e4→E1–E4, "
+		+ "volume→V0, frequency→C0, pulse_*→P0–P3. Connect Restim Websocket (:12346) "
+		+ "and set stroke target to Restim. Authored axes only — no L0→β synthesis."
+	)
+	disclosure.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(disclosure, UITheme.SEPARATOR, 11, false)
+	section.add_child(disclosure)
+
+	RestimService.Connected.connect(_sync_restim_state)
+	RestimService.Disconnected.connect(_sync_restim_state)
+	RestimService.ErrorOccurred.connect(
+		func(msg: String) -> void:
+			_restim_status_lbl.text = "✕ %s" % msg
+			_restim_status_lbl.add_theme_color_override("font_color", UITheme.ERROR)
+	)
+	_sync_restim_state()
+
+
+func _sync_restim_state() -> void:
+	if _restim_status_lbl == null or _restim_connect_btn == null:
+		return
+	if RestimService.RestimConnected:
+		_restim_status_lbl.text = "● CONNECTED"
+		_restim_status_lbl.add_theme_color_override("font_color", UITheme.OK)
+		_style_button(_restim_connect_btn, UITheme.MAGENTA)
+		_restim_connect_btn.text = "> DISCONNECT"
+	else:
+		_restim_status_lbl.text = "● DISCONNECTED"
+		_restim_status_lbl.add_theme_color_override("font_color", UITheme.ERROR)
+		_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
+		_restim_connect_btn.text = "> CONNECT"
+
+
+func _on_restim_connect_pressed() -> void:
+	if RestimService.RestimConnected:
+		RestimService.Disconnect()
+		return
+	SettingsService.set_restim_url(_restim_url_edit.text)
+	SettingsService.save()
+	RestimService.Connect(_restim_url_edit.text)
+
+
 func _add_delay_row(parent: VBoxContainer, label_text: String) -> Dictionary:
 	var row: HBoxContainer = HBoxContainer.new()
 	row.add_theme_constant_override("separation", 16)
@@ -2234,6 +2427,18 @@ func _refresh_routing_cards() -> void:
 	var serial_body: VBoxContainer = _make_routing_card("SERIAL (T-CODE)", UITheme.AMBER)
 	_add_stroker_row(serial_body, DeviceRouting.SERIAL_TARGET, "Linear (T-code stroke)")
 
+	# Restim — FOC / e-stim via Restim's websocket T-code server (multi-axis kit).
+	var restim_body: VBoxContainer = _make_routing_card("RESTIM (FOC / E-STIM)", UITheme.CYAN)
+	_add_stroker_row(restim_body, DeviceRouting.RESTIM_TARGET, "T-code → Restim WS")
+	var restim_note: Label = Label.new()
+	restim_note.text = (
+		"Sends L0/α, L1/β, E1–E4, volume, frequency, pulse_* — load a Restim kit "
+		+ "with Extra Axes. Prefer this over Intiface for FOC devices."
+	)
+	restim_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(restim_note, UITheme.SEPARATOR, 10, false)
+	restim_body.add_child(restim_note)
+
 	# The Handy (direct WiFi) — offered once a connection key is configured in
 	# its section below. Stroke role only (single-axis device, cloud-synced).
 	if SettingsService.get_handy_connection_key() != "":
@@ -2255,9 +2460,11 @@ func _refresh_routing_cards() -> void:
 	else:
 		for entry: Dictionary in catalog:
 			var dev_id: String = str(entry.get("id", ""))
-			var body: VBoxContainer = _make_routing_card(
-				str(entry.get("name", dev_id)).to_upper(), UITheme.PURPLE_BRIGHT
-			)
+			var display_name: String = str(entry.get("name", dev_id))
+			var title: String = display_name.to_upper()
+			if "restim" in display_name.to_lower():
+				title = "%s  ·  E-STIM VIA RESTIM WSDM" % title
+			var body: VBoxContainer = _make_routing_card(title, UITheme.PURPLE_BRIGHT)
 			if bool(entry.get("linear", false)):
 				_add_stroker_row(
 					body, DeviceRouting.make_actuator_id(dev_id, "linear", 0), "Linear"
@@ -2455,6 +2662,8 @@ func _update_stroker_summary() -> void:
 	var target: String = SettingsService.get_stroke_target()
 	if target == DeviceRouting.SERIAL_TARGET:
 		_stroker_summary_lbl.text = "Stroker: Serial (T-code)"
+	elif target == DeviceRouting.RESTIM_TARGET:
+		_stroker_summary_lbl.text = "Stroker: Restim (FOC / e-stim)"
 	elif target == DeviceRouting.HANDY_TARGET:
 		_stroker_summary_lbl.text = "Stroker: The Handy (WiFi)"
 	elif target != "":

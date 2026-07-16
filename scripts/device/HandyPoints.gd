@@ -56,7 +56,9 @@ static func apply_effects(points: Array, effects: Array, hold_pos: int = 50) -> 
 	var mirrored: bool = _count_kind(effects, "reverse") % 2 == 1
 	var scale_factor: float = 1.0
 	for e: Dictionary in effects:
-		if str(e.get("kind", "")) == "scale" and e.has("factor"):
+		var kind: String = str(e.get("kind", ""))
+		# volume_attenuate softens linear devices the same way as scale (Restim uses V0).
+		if (kind == "scale" or kind == "volume_attenuate") and e.has("factor"):
 			scale_factor *= float(e["factor"])
 
 	var out: Array = []

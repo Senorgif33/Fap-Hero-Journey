@@ -1,0 +1,103 @@
+# Export Windows (manual)
+
+# Produces a Windows Desktop release artifact without publishing a GitHub Release.
+# Requires Godot 4.6.x .NET + matching export templates on the runner.
+
+name: Export Windows
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: export-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    name: Windows Desktop export
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GODOT_VERSION: "4.6.3"
+      GODOT_LABEL: "4.6.3-stable"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Cache Godot editor + templates
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            .godot-ci/editor
+            ${{ github.workspace }}/.godot-ci/templates
+          key: godot-mono-${{ env.GODOT_VERSION }}-win64-export
+
+      - name: Download Godot 4.6.3 .NET (Windows)
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $base = "https://github.com/godotengine/godot-builds/releases/download/${{ env.GODOT_LABEL }}"
+          $zip = "Godot_v${{ env.GODOT_VERSION }}-stable_mono_win64.zip"
+          $tpz = "Godot_v${{ env.GODOT_VERSION }}-stable_mono_export_templates.tpz"
+          New-Item -ItemType Directory -Force -Path ".godot-ci" | Out-Null
+          Invoke-WebRequest "$base/$zip" -OutFile ".godot-ci/$zip"
+          Invoke-WebRequest "$base/$tpz" -OutFile ".godot-ci/$tpz"
+          Expand-Archive ".godot-ci/$zip" -DestinationPath ".godot-ci/editor" -Force
+          # Templates live in a .tpz (zip); extract to Godot's expected folder name.
+          $tplRoot = Join-Path $env:APPDATA "Godot\export_templates"
+          $tplDir = Join-Path $tplRoot "${{ env.GODOT_VERSION }}.stable.mono"
+          New-Item -ItemType Directory -Force -Path $tplDir, ".godot-ci/templates-unpack" | Out-Null
+          Copy-Item ".godot-ci/$tpz" ".godot-ci/templates.zip" -Force
+          Expand-Archive ".godot-ci/templates.zip" -DestinationPath ".godot-ci/templates-unpack" -Force
+          # tpz usually contains templates/* ; flatten into tplDir
+          if (Test-Path ".godot-ci/templates-unpack/templates") {
+            Copy-Item ".godot-ci/templates-unpack/templates\*" $tplDir -Recurse -Force
+          } else {
+            Copy-Item ".godot-ci/templates-unpack\*" $tplDir -Recurse -Force
+          }
+          # Also keep a copy under workspace for the cache key paths
+          New-Item -ItemType Directory -Force -Path ".godot-ci/templates" | Out-Null
+          Copy-Item "$tplDir\*" ".godot-ci/templates\" -Recurse -Force
+
+      - name: Restore export templates into AppData
+        if: steps.cache-godot.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          $tplRoot = Join-Path $env:APPDATA "Godot\export_templates"
+          $tplDir = Join-Path $tplRoot "${{ env.GODOT_VERSION }}.stable.mono"
+          New-Item -ItemType Directory -Force -Path $tplDir | Out-Null
+          Copy-Item ".godot-ci/templates\*" $tplDir -Recurse -Force
+
+      - name: Locate Godot console binary
+        id: godot
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem ".godot-ci/editor" -Recurse -Filter "*_console.exe" | Select-Object -First 1
+          if (-not $exe) { throw "Godot console exe not found under .godot-ci/editor" }
+          "path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "GODOT=$($exe.FullName)"
+
+      - name: Dotnet build (C#)
+        shell: pwsh
+        run: dotnet build
+
+      - name: Export Windows
+        shell: pwsh
+        env:
+          GODOT_BIN: ${{ steps.godot.outputs.path }}
+        run: |
+          .\scripts\dev\export-windows.ps1 -GodotBin $env:GODOT_BIN
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            builds/windows/**
+            builds/*.zip
+          if-no-files-found: error

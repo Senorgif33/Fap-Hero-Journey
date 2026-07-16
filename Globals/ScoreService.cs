@@ -157,6 +157,19 @@ public partial class ScoreService : Node
         EmitSignal(SignalName.ScoreChanged, TotalScore);
     }
 
+    // Signed score delta for the in-progress round (Release timed_window hit/miss).
+    // Negative deltas clamp the current round at 0 — banked rounds stay intact.
+    public void AddScore(int delta)
+    {
+        if (delta == 0)
+            return;
+        if (delta > 0)
+            _current.Score += delta;
+        else
+            _current.Score = Math.Max(0, _current.Score + delta);
+        EmitSignal(SignalName.ScoreChanged, TotalScore);
+    }
+
     // Returns completed rounds only (not the current in-progress round).
     // Each Dictionary has keys: score, small, medium, large (all int).
     public Godot.Collections.Array<Godot.Collections.Dictionary> GetRoundBreakdowns()

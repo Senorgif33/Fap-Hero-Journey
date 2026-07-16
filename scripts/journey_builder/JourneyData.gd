@@ -32,11 +32,24 @@ const EXTRA_AXES: Array[String] = ["L1", "L2", "R0", "R1", "R2"]
 # id. Used to name pooled channel scripts (content/m_<fp>.<suffix>.funscript) so the
 # pooled files stay self-describing and follow the funscript multi-axis convention.
 const AXIS_SUFFIXES: Dictionary = {
+	"alpha": "alpha",
+	"beta": "beta",
 	"L1": "surge",
 	"L2": "sway",
 	"R0": "twist",
 	"R1": "roll",
 	"R2": "pitch",
+	"e1": "e1",
+	"e2": "e2",
+	"e3": "e3",
+	"e4": "e4",
+	"volume": "volume",
+	"frequency": "frequency",
+	"pulse_frequency": "pulse_frequency",
+	"pulse_width": "pulse_width",
+	"pulse_interval_random": "pulse_interval_random",
+	"pulse_rise_time": "pulse_rise_time",
+	"sensor_suppression": "sensor_suppression",
 }
 const VIB_SUFFIXES: Dictionary = {
 	"vib1": "vibe1",
@@ -566,6 +579,33 @@ static func normalize_effect_round(src: Dictionary) -> Dictionary:
 	}
 
 
+# Mid-round Release / "I came" fields. Defaults keep legacy rounds inert (button
+# off). Modes match ReleaseLogic.MODES; GameLoop + Builder read this shape.
+static func normalize_release_round(src: Dictionary) -> Dictionary:
+	var modes: Array[String] = [
+		"stamp_flag",
+		"fail_jump",
+		"timed_window",
+		"loop_until_clean",
+		"punish_polarity",
+	]
+	var mode: String = str(src.get("release_mode", "stamp_flag")).strip_edges().to_lower()
+	if not (mode in modes):
+		mode = "stamp_flag"
+	return {
+		"release_enabled": bool(src.get("release_enabled", false)),
+		"release_mode": mode,
+		"release_flag": str(src.get("release_flag", "")).strip_edges(),
+		"release_jump_to": str(src.get("release_jump_to", "")).strip_edges(),
+		"release_deadline_ms": maxi(0, int(src.get("release_deadline_ms", 0))),
+		"release_score_hit": int(src.get("release_score_hit", 0)),
+		"release_score_miss": int(src.get("release_score_miss", 0)),
+		"release_remove_on_press": bool(src.get("release_remove_on_press", true)),
+		"release_invert": bool(src.get("release_invert", false)),
+		"release_disabled_if_flag": str(src.get("release_disabled_if_flag", "")).strip_edges(),
+	}
+
+
 # ── Round serialization ──────────────────────────────────────────────────────
 
 
@@ -596,6 +636,10 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			# action_count/length_ms + folder are overwritten afterwards by _save_round_node_media.
 			out["coins"] = int(data.get("coins", 0))
 			out["is_checkpoint"] = bool(data.get("is_checkpoint", false))
+			out["cooldown_days"] = int(data.get("cooldown_days", 0))
+			out["items_blocked"] = bool(
+				data.get("items_blocked", data.get("skills_blocked", false))
+			)
 			out["boss_tagline"] = str(data.get("boss_tagline", ""))
 			_fill_default(out, "boss_modifiers", [])  # lowercase {kind,…}; deep-copied pass-through
 			# Effect-round fields, migrated from any legacy cursed/blessed schema. Drop the retired
@@ -608,6 +652,9 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 				out.erase(legacy)
 			out.merge(normalize_effect_round(data), true)
 			_prune_orphan_overrides(out)  # drop tuning for effects no longer ticked
+			# Release / "I came" control — always present on round data so authors and
+			# runtime share one typed shape (legacy rounds stay disabled).
+			out.merge(normalize_release_round(data), true)
 			# Pool round ("encounter"): a list of media-set entries, one weighted-picked
 			# at runtime. Only pool rounds carry the list; media inside is pooled later by
 			# _save_round_node_media (like a normal round's media, ×N entries).
@@ -888,6 +935,8 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 			"axis_scripts": r.get("axis_scripts", {}),
 			"vib_scripts": r.get("vib_scripts", {}),
 			"is_checkpoint": bool(r.get("is_checkpoint", false)),
+			"cooldown_days": int(r.get("cooldown_days", 0)),
+			"items_blocked": bool(r.get("items_blocked", false)),
 			"boss_image": r.get("boss_image", ""),
 			"boss_tagline": r.get("boss_tagline", ""),
 			"boss_modifiers": r.get("boss_modifiers", []),
@@ -969,6 +1018,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 		"map_enabled": bool(journey.get("map_enabled", true)),
 		"map_fog": bool(journey.get("map_fog", false)),
 		"map_fog_reveal": int(journey.get("map_fog_reveal", 1)),
+		"unlock_pay_per_use": bool(journey.get("unlock_pay_per_use", false)),
 		"redirects": journey.get("redirects", {}),
 		"items": items,
 	}
@@ -1029,6 +1079,8 @@ static func _build_path_items(p: Dictionary) -> Array:
 			"axis_scripts": pr.get("axis_scripts", {}),
 			"vib_scripts": pr.get("vib_scripts", {}),
 			"is_checkpoint": bool(pr.get("is_checkpoint", false)),
+			"cooldown_days": int(pr.get("cooldown_days", 0)),
+			"items_blocked": bool(pr.get("items_blocked", false)),
 			"boss_image": pr.get("boss_image", ""),
 			"boss_tagline": pr.get("boss_tagline", ""),
 			"boss_modifiers": pr.get("boss_modifiers", []),

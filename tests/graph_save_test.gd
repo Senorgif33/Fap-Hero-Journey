@@ -70,6 +70,8 @@ func test_coerce_round_fills_baseline_defaults() -> void:
 	var out := JourneyData.coerce_node_save_data("round", {"name": "A"})
 	assert_str(out["round_type"]).is_equal("normal")
 	assert_bool(out["is_checkpoint"]).is_false()
+	assert_int(int(out.get("cooldown_days", -1))).is_equal(0)
+	assert_bool(bool(out.get("items_blocked", true))).is_false()
 	assert_bool(out["effect_random"]).is_true()
 	assert_bool(out["resolvable"]).is_false()
 	assert_int(out["cleanse_cost"]).is_equal(50)

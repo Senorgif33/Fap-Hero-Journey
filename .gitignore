@@ -1,6 +1,9 @@
 .godot/
 *.translation
 .vs/
+.vscode/
+# Local Godot editor drop-ins (do not commit binaries)
+Godot_v*_mono_*/
 bin/Debug/
 bin/Release/
 obj/
@@ -29,6 +32,12 @@ Desktop.ini
 /builds/
 /dist/
 /exports/
+# Local journey packs + media (not committed)
+/local/
+.godot-ci/
 HANDOFF.md
 export_presets.cfg
 *.md
+# Committed how-to / smoke docs (override *.md)
+!docs/
+!docs/**/*.md

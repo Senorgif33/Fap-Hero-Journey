@@ -41,11 +41,16 @@ const DEFAULT_MAX_STROKE_SPEED: int = 0  # 0 = unlimited (units/sec)
 
 # ── Device routing (one stroker + per-actuator Buttplug vibe/constrict routes) ──
 # Actuator id: "<name>#<occurrence>:<linear|vibrate|constrict>:<channel>". Stroke target is
-# such an id (a Buttplug linear) or the sentinel "serial". Serial stays a single T-code device
-# and is NOT part of the per-actuator mapping (Buttplug-only, by design).
+# such an id (a Buttplug linear) or a backend sentinel: "serial", "restim", or "handy".
+# Serial / Restim are single T-code sinks and are NOT part of the per-actuator mapping
+# (Buttplug-only, by design).
 const DEFAULT_STROKE_TARGET: String = ""
 const DEFAULT_VIBRATION_ROUTES: Dictionary = {}  # { actuator_id: "vibe1"|"vibe2"|"stroke" }
 const DEFAULT_CONSTRICT_ROUTES: Dictionary = {}  # { actuator_id: true }
+
+# Restim (e-stim / FOC via T-code websocket). Default URL matches Restim Preferences → Network.
+const DEFAULT_RESTIM_URL: String = "ws://127.0.0.1:12346"
+const DEFAULT_RESTIM_AUTO: bool = false
 
 # Constrict auto state machine (activity-driven squeeze). WHICH actuators = constrict_routes above;
 # these globals tune the level transitions. Activity is the stroke speed in funscript units/sec.
@@ -73,6 +78,8 @@ const DEFAULT_AUTO_TRANSCODE: bool = true
 const DEFAULT_UPDATE_CHECK: bool = true  # check GitHub for a newer build on launch
 const DEFAULT_UI_SOUND_ENABLED: bool = true  # click/hover feedback blips
 const DEFAULT_UI_SOUND_VOLUME: float = 0.6  # linear, 0–1
+const DEFAULT_IGNORE_JOURNEY_COOLDOWNS: bool = false  # dev: skip calendar lockouts
+const DEFAULT_DEV_CHEATS: bool = false  # in-run F8/F9 + cooldown Continue
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -140,6 +147,14 @@ func get_serial_auto_connect() -> bool:
 	return bool(_config.get_value("serial", "auto_connect", DEFAULT_SERIAL_AUTO))
 
 
+func get_restim_url() -> String:
+	return str(_config.get_value("restim", "url", DEFAULT_RESTIM_URL))
+
+
+func get_restim_auto_connect() -> bool:
+	return bool(_config.get_value("restim", "auto_connect", DEFAULT_RESTIM_AUTO))
+
+
 func get_range_min() -> int:
 	return int(_config.get_value("device", "range_min", DEFAULT_RANGE_MIN))
 
@@ -148,8 +163,8 @@ func get_range_max() -> int:
 	return int(_config.get_value("device", "range_max", DEFAULT_RANGE_MAX))
 
 
-# Per-axis range for the secondary positional axes (T-code L1/L2/R0/R1/R2). Each
-# axis has its own [min,max] travel window; the stroke axis uses range_min/range_max.
+# Per-axis range for the secondary positional axes (T-code L1/L2/R0/R1/R2/E1–E4).
+# Each axis has its own [min,max] travel window; the stroke axis uses range_min/range_max.
 func get_axis_range_min(axis: String) -> int:
 	return int(_config.get_value("device", "axis_%s_range_min" % axis, DEFAULT_RANGE_MIN))
 
@@ -369,6 +384,18 @@ func get_ui_sound_volume() -> float:
 	return float(_config.get_value("audio", "ui_sound_volume", DEFAULT_UI_SOUND_VOLUME))
 
 
+# When true, Journey Select Resume ignores cooldown_until (authoring / QA).
+func get_ignore_journey_cooldowns() -> bool:
+	return bool(
+		_config.get_value("debug", "ignore_journey_cooldowns", DEFAULT_IGNORE_JOURNEY_COOLDOWNS)
+	)
+
+
+# When true, GameLoop enables F8 complete / F9 skip and cooldown-banner Continue.
+func get_dev_cheats_enabled() -> bool:
+	return bool(_config.get_value("debug", "dev_cheats", DEFAULT_DEV_CHEATS))
+
+
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
 
@@ -411,6 +438,14 @@ func set_serial_baud(value: int) -> void:
 
 func set_serial_auto_connect(value: bool) -> void:
 	_config.set_value("serial", "auto_connect", value)
+
+
+func set_restim_url(value: String) -> void:
+	_config.set_value("restim", "url", value.strip_edges())
+
+
+func set_restim_auto_connect(value: bool) -> void:
+	_config.set_value("restim", "auto_connect", value)
 
 
 func set_range_min(value: int) -> void:
@@ -534,6 +569,14 @@ func set_ui_sound_enabled(value: bool) -> void:
 
 func set_ui_sound_volume(value: float) -> void:
 	_config.set_value("audio", "ui_sound_volume", value)
+
+
+func set_ignore_journey_cooldowns(value: bool) -> void:
+	_config.set_value("debug", "ignore_journey_cooldowns", value)
+
+
+func set_dev_cheats_enabled(value: bool) -> void:
+	_config.set_value("debug", "dev_cheats", value)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
