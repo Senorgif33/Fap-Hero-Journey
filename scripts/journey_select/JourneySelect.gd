@@ -79,6 +79,8 @@ var _delete_btn: Button = $DetailModal/ModalPanel/ModalLayout/DetailsColumn/Acti
 # Inserted as the first child of the ActionRow so it sits before Play. Removed
 # (and Play recoloured) when the modal switches to a journey without a save.
 var _resume_btn: Button = null
+# Extra ActionRow buttons for shave_cooldown items while Resume is locked.
+var _cooldown_shave_btns: Array = []
 
 # Separate scoreboard panel, floated to the right of the detail modal. Built once
 # (lazily) and repositioned against the modal's right edge when the modal opens
@@ -942,6 +944,9 @@ func _on_clear_scores_pressed() -> void:
 func _refresh_resume_button(journey: Dictionary) -> void:
 	var folder_name: String = journey.get("folder_name", "")
 	var has_save: bool = JourneySaveService.has_save(folder_name)
+	var cooldown_locked: bool = (
+		has_save and JourneySaveService.is_cooldown_active(folder_name)
+	)
 
 	if has_save:
 		if _resume_btn == null:
@@ -955,14 +960,89 @@ func _refresh_resume_button(journey: Dictionary) -> void:
 			# Resume plays start_journey at the embark point; mute its default click
 			# (after add_child, which is where the global wiring hooks it).
 			UISound.mute_button(_resume_btn)
+		if cooldown_locked:
+			var remain: String = JourneySaveService.format_cooldown_remaining(folder_name)
+			_resume_btn.text = "⏳  LOCKED  %s" % remain
+			_resume_btn.disabled = true
+			_style_button(_resume_btn, UITheme.DANGER)
+			_offer_cooldown_shave_buttons(folder_name)
+		else:
+			_resume_btn.text = "▶  RESUME"
+			_resume_btn.disabled = false
+			_style_button(_resume_btn, UITheme.AMBER)
+			_clear_cooldown_shave_buttons()
 		_play_btn.text = "↻  NEW RUN"
 		_style_button(_play_btn, UITheme.PURPLE_MID)
 	else:
 		if _resume_btn != null:
 			_resume_btn.queue_free()
 			_resume_btn = null
+		_clear_cooldown_shave_buttons()
 		_play_btn.text = "▶  PLAY"
 		_style_button(_play_btn, UITheme.PURPLE_BRIGHT)
+
+
+func _clear_cooldown_shave_buttons() -> void:
+	for b: Variant in _cooldown_shave_btns:
+		if is_instance_valid(b):
+			(b as Node).queue_free()
+	_cooldown_shave_btns.clear()
+
+
+# When Resume is cooldown-locked, offer inventory shave items from the save.
+func _offer_cooldown_shave_buttons(folder_name: String) -> void:
+	_clear_cooldown_shave_buttons()
+	var save_data: Dictionary = JourneySaveService.read_save(folder_name)
+	var inv: Array = save_data.get("inventory", []) as Array
+	var action_row: HBoxContainer = _play_btn.get_parent()
+	var seen: Dictionary = {}
+	for entry: Variant in inv:
+		if not entry is Dictionary:
+			continue
+		var item: Dictionary = entry
+		if str(item.get("kind", "")) != "shave_cooldown":
+			continue
+		var id: String = str(item.get("id", ""))
+		if id == "" or seen.has(id):
+			continue
+		seen[id] = true
+		var hours: int = int(item.get("shave_hours", 24))
+		var btn: Button = Button.new()
+		btn.text = "✧  %s (−%dh)" % [str(item.get("name", id)).to_upper(), hours]
+		_style_button(btn, UITheme.PURPLE_BRIGHT)
+		btn.pressed.connect(_on_cooldown_shave_pressed.bind(folder_name, id, hours))
+		action_row.add_child(btn)
+		# Place after Resume.
+		if _resume_btn != null:
+			action_row.move_child(btn, _resume_btn.get_index() + 1)
+		UISound.mute_button(btn)
+		_cooldown_shave_btns.append(btn)
+
+
+func _on_cooldown_shave_pressed(folder_name: String, item_id: String, hours: int) -> void:
+	var save_data: Dictionary = JourneySaveService.read_save(folder_name)
+	if save_data.is_empty():
+		return
+	var until: int = int(save_data.get("cooldown_until", 0))
+	if until <= 0 or hours <= 0:
+		return
+	var inv: Array = (save_data.get("inventory", []) as Array).duplicate()
+	var removed: bool = false
+	for i in range(inv.size()):
+		var entry: Variant = inv[i]
+		if entry is Dictionary and str((entry as Dictionary).get("id", "")) == item_id:
+			inv.remove_at(i)
+			removed = true
+			break
+	if not removed:
+		return
+	save_data["inventory"] = inv
+	save_data["cooldown_until"] = maxi(0, until - hours * 3600)
+	if not JourneySaveService.write_save(folder_name, save_data):
+		return
+	# Refresh Resume / shave UI for the current modal journey.
+	if not _current_journey.is_empty():
+		_refresh_resume_button(_current_journey)
 
 
 # Loads the save file for the current journey, restores game state into the
@@ -979,6 +1059,12 @@ func _on_resume_pressed() -> void:
 	if _current_journey.is_empty():
 		return
 	var folder_name: String = _current_journey.get("folder_name", "")
+	if JourneySaveService.is_cooldown_active(folder_name):
+		var remain: String = JourneySaveService.format_cooldown_remaining(folder_name)
+		# Button should already be disabled; keep a hard gate anyway.
+		push_warning("JourneySelect: resume blocked — cooldown %s remaining" % remain)
+		_refresh_resume_button(_current_journey)
+		return
 	var save_data: Dictionary = JourneySaveService.read_save(folder_name)
 	if save_data.is_empty():
 		# Save vanished between modal open and Resume click (deleted in another
@@ -1003,10 +1089,12 @@ func _on_resume_pressed() -> void:
 			}
 		)
 	)
-	# Inventory restoration — owned items only. Active effects are not
-	# carried (deliberate; see InventoryService.LoadFromSave). Old saves
-	# missing the field load as empty, which is the right pre-feature default.
+	# Inventory restoration — utility charges + unlocked modifiers. Active
+	# effects are not carried (deliberate; see InventoryService.LoadFromSave).
+	# Economy mode must be set BEFORE load so PPU migrates/loads unlocks correctly.
+	InventoryService.SetUnlockPayPerUse(bool(play_journey.get("unlock_pay_per_use", false)))
 	InventoryService.LoadFromSave(save_data.get("inventory", []) as Array)
+	InventoryService.LoadUnlockedFromSave(save_data.get("unlocked", []) as Array)
 	# Restore the round-names log so the end-screen breakdown is complete.
 	var names: PackedStringArray = PackedStringArray()
 	for n in save_data.get("round_names", []) as Array:

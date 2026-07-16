@@ -60,6 +60,13 @@ func test_axis_human_name_suffixes() -> void:
 	assert_str(ImportScanner.detect_funscript_axis("/x/scene.pitch.funscript")).is_equal("R2")
 
 
+func test_restim_kit_suffixes() -> void:
+	assert_str(ImportScanner.detect_funscript_axis("/x/scene.alpha.funscript")).is_equal("alpha")
+	assert_str(ImportScanner.detect_funscript_axis("/x/scene.beta.funscript")).is_equal("beta")
+	assert_str(ImportScanner.detect_funscript_axis("/x/scene.e3.funscript")).is_equal("e3")
+	assert_str(ImportScanner.detect_funscript_axis("/x/scene.volume.funscript")).is_equal("volume")
+
+
 func test_vib_channels() -> void:
 	assert_str(ImportScanner.detect_vib_channel("/x/scene.vib1.funscript")).is_equal("vib1")
 	assert_str(ImportScanner.detect_vib_channel("/x/scene_vibe2.funscript")).is_equal("vib2")

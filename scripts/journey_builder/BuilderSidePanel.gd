@@ -22,13 +22,14 @@ const ROW_SEP: int = 8
 
 const DropZoneScript = preload("res://scripts/journey_builder/DropZone.gd")
 
-# T-code secondary axes shown in the collapsible expander for each round.
-const EXTRA_AXES_INFO: Array = [
-	{"axis": "L1", "label": "L1  —  SURGE  (in / out)"},
-	{"axis": "L2", "label": "L2  —  SWAY  (left / right)"},
-	{"axis": "R0", "label": "R0  —  TWIST  (rotate)"},
-	{"axis": "R1", "label": "R1  —  ROLL  (tilt side)"},
-	{"axis": "R2", "label": "R2  —  PITCH  (tilt fwd / back)"},
+# T-code / Restim axes with drop zones. Restim kit rows come from restim.ini auto_loading=true;
+# SSR axes are always listed for manual assignment.
+const SSR_AXES_INFO: Array = [
+	{"axis": "L1", "label": "L1 / SURGE  (SSR)"},
+	{"axis": "L2", "label": "L2 / SWAY  (SSR)"},
+	{"axis": "R0", "label": "R0 / TWIST  (SSR)"},
+	{"axis": "R1", "label": "R1 / ROLL  (SSR)"},
+	{"axis": "R2", "label": "R2 / PITCH  (SSR)"},
 ]
 
 # Vibrator channel drop zones shown in the collapsible expander for each round.
@@ -185,6 +186,24 @@ func show_journey_info_panel() -> void:
 	side_vbox.add_child(tag_flow)
 	for tag_def: Dictionary in TagRegistry.all():
 		tag_flow.add_child(_make_tag_toggle(tag_def))
+
+	side_vbox.add_child(_side_section_separator())
+
+	# Shop economy — classic (default) vs unlock-then-pay-per-use for modifiers.
+	side_vbox.add_child(_side_field_label("SHOP ECONOMY"))
+	var ppu_toggle: CheckButton = CheckButton.new()
+	ppu_toggle.text = "UNLOCK THEN PAY PER USE"
+	ppu_toggle.tooltip_text = (
+		"Off (default): buy modifier charges in the shop, activate free mid-round. "
+		+ "On: unlock modifiers free in the shop, then pay their price each time you activate mid-round. "
+		+ "Utilities (key / cleanse / save) always buy as charges."
+	)
+	ppu_toggle.add_theme_font_size_override("font_size", 12)
+	ppu_toggle.button_pressed = _owner._journey_unlock_pay_per_use
+	ppu_toggle.toggled.connect(
+		func(on: bool) -> void: _owner._journey_unlock_pay_per_use = on
+	)
+	side_vbox.add_child(ppu_toggle)
 
 	side_vbox.add_child(_side_section_separator())
 
@@ -1288,9 +1307,17 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	col.add_child(_side_section_separator())
 	col.add_child(_make_set_flags_field(arr[idx]))
 
-	# ── Round behavior (checkpoint + the mutually-exclusive round types) ─────────
+	# Mid-round Release control (mode + parameters for the selected mode only).
+	col.add_child(_side_section_separator())
+	col.add_child(_make_release_expander(arr, idx, reselect))
+
+	# ── Round behavior (checkpoint + cooldown + items gate + round types) ─────────
 	col.add_child(_side_divider_line())
 	col.add_child(_make_checkpoint_toggle(arr, idx))
+	col.add_child(_side_section_separator())
+	col.add_child(_make_cooldown_days_spin(arr, idx))
+	col.add_child(_side_section_separator())
+	col.add_child(_make_items_blocked_toggle(arr, idx))
 
 	col.add_child(_side_section_separator())
 	col.add_child(_make_boss_expander(arr, idx, reselect))
@@ -2082,8 +2109,8 @@ func _fork_resolution_hint(resolution: String, metric: String, decider: String) 
 # ── Extra axes expander ──────────────────────────────────────────────────────
 
 
-# Collapsed "▶ EXTRA AXES (SERIAL ONLY)" expander with one DropZone per axis.
-# Serial-only: Buttplug devices ignore all secondary axes.
+# Collapsed "▶ EXTRA AXES" expander with one DropZone per axis.
+# Serial + Restim T-code backends play these; Buttplug linears ignore secondary axes.
 func _make_axis_expander(arr: Array, idx: int) -> Control:
 	# Ensure the dict key exists.
 	if not arr[idx].has("axis_scripts"):
@@ -2093,7 +2120,7 @@ func _make_axis_expander(arr: Array, idx: int) -> Control:
 	wrapper.add_theme_constant_override("separation", 4)
 
 	var toggle_btn: Button = Button.new()
-	toggle_btn.text = "▶  EXTRA AXES  (SERIAL ONLY)"
+	toggle_btn.text = "▶  EXTRA AXES  (SERIAL / RESTIM)"
 	toggle_btn.toggle_mode = true
 	toggle_btn.button_pressed = false
 	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -2106,53 +2133,62 @@ func _make_axis_expander(arr: Array, idx: int) -> Control:
 	wrapper.add_child(axes_panel)
 
 	var hint: Label = Label.new()
-	hint.text = "SECONDARY-AXIS .FUNSCRIPT FILES FOR T-CODE SR6 / OSR2+ DEVICES.  SERIAL OUTPUT ONLY — IGNORED FOR BUTTPLUG."
+	hint.text = (
+		"RESTIM KIT AXES (alpha/beta/e1–e4/volume/…) AUTOFILL FROM SIBLINGS. "
+		+ "DROP ZONES BELOW — ASSIGN MANUALLY OR LET AUTOFILL POPULATE THEM."
+	)
 	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	hint.add_theme_font_size_override("font_size", 10)
 	hint.uppercase = true
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	axes_panel.add_child(hint)
 
-	for info: Dictionary in EXTRA_AXES_INFO:
+	for axis_name: String in RestimAxisKit.auto_loading_names():
+		axes_panel.add_child(_side_field_label(RestimAxisKit.axis_display_label(axis_name)))
+		_add_axis_drop_zone(axes_panel, arr, idx, axis_name)
+
+	for info: Dictionary in SSR_AXES_INFO:
 		var axis: String = info["axis"]
 		axes_panel.add_child(_side_field_label(info["label"]))
-		var zone: PanelContainer = DropZoneScript.new()
-		zone.accepted_extensions = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
-		zone.picker_title = "Select %s Funscript" % axis
-		zone.picker_filters = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
-		zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var current_path: String = (arr[idx]["axis_scripts"] as Dictionary).get(axis, "")
-		# Zone + inline ✕ remove (disabled until this axis is set).
-		var rm: Button = UITheme.make_icon_btn("✕", current_path == "", UITheme.MAGENTA)
-		rm.tooltip_text = "Remove %s funscript" % axis
-		rm.pressed.connect(func() -> void: zone.set_file(""))
-		var row: HBoxContainer = HBoxContainer.new()
-		row.add_theme_constant_override("separation", 6)
-		row.add_child(zone)
-		row.add_child(rm)
-		axes_panel.add_child(row)
-		if current_path != "":
-			zone.call_deferred("set_file", current_path, false)
-		# Capture axis in closure.
-		var captured_axis: String = axis
-		zone.file_dropped.connect(
-			func(p: String) -> void:
-				rm.disabled = (p == "")
-				if p == "":
-					(arr[idx]["axis_scripts"] as Dictionary).erase(captured_axis)
-				else:
-					arr[idx]["axis_scripts"][captured_axis] = p
-		)
+		_add_axis_drop_zone(axes_panel, arr, idx, axis)
 
 	toggle_btn.toggled.connect(
 		func(pressed: bool) -> void:
 			toggle_btn.text = (
-				"▼  EXTRA AXES  (SERIAL ONLY)" if pressed else "▶  EXTRA AXES  (SERIAL ONLY)"
+				"▼  EXTRA AXES  (SERIAL / RESTIM)" if pressed else "▶  EXTRA AXES  (SERIAL / RESTIM)"
 			)
 			axes_panel.visible = pressed
 	)
 
 	return wrapper
+
+
+func _add_axis_drop_zone(parent: VBoxContainer, arr: Array, idx: int, axis: String) -> void:
+	var zone: PanelContainer = DropZoneScript.new()
+	zone.accepted_extensions = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
+	zone.picker_title = "Select %s Funscript" % axis
+	zone.picker_filters = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
+	zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var current_path: String = (arr[idx]["axis_scripts"] as Dictionary).get(axis, "")
+	var rm: Button = UITheme.make_icon_btn("✕", current_path == "", UITheme.MAGENTA)
+	rm.tooltip_text = "Remove %s funscript" % axis
+	rm.pressed.connect(func() -> void: zone.set_file(""))
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.add_child(zone)
+	row.add_child(rm)
+	parent.add_child(row)
+	if current_path != "":
+		zone.call_deferred("set_file", current_path, false)
+	var captured_axis: String = axis
+	zone.file_dropped.connect(
+		func(p: String) -> void:
+			rm.disabled = (p == "")
+			if p == "":
+				(arr[idx]["axis_scripts"] as Dictionary).erase(captured_axis)
+			else:
+				arr[idx]["axis_scripts"][captured_axis] = p
+	)
 
 
 # ── Vibrator channel expander ────────────────────────────────────────────────
@@ -2283,6 +2319,388 @@ func _make_checkpoint_toggle(arr: Array, idx: int) -> Control:
 	wrapper.add_child(hint)
 
 	return wrapper
+
+
+# Calendar lockout days. When > 0, entering this round Force Save & Quits with
+# Resume blocked until cooldown_until. Wins over Continue on a checkpoint.
+func _make_cooldown_days_spin(arr: Array, idx: int) -> Control:
+	if not arr[idx].has("cooldown_days"):
+		arr[idx]["cooldown_days"] = 0
+
+	var wrapper: VBoxContainer = VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 4)
+
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", ROW_SEP)
+	wrapper.add_child(row)
+
+	var label: Label = Label.new()
+	label.text = "COOLDOWN DAYS"
+	label.add_theme_color_override("font_color", UITheme.DANGER)
+	label.add_theme_font_size_override("font_size", 12)
+	label.uppercase = true
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(label)
+
+	var spin: SpinBox = SpinBox.new()
+	spin.min_value = 0
+	spin.max_value = 365
+	spin.step = 1
+	spin.value = int(arr[idx].get("cooldown_days", 0))
+	spin.custom_minimum_size = Vector2(90, 0)
+	UITheme.style_spin_box(spin)
+	spin.value_changed.connect(func(v: float) -> void: arr[idx]["cooldown_days"] = int(v))
+	row.add_child(spin)
+
+	var hint: Label = Label.new()
+	hint.text = "0 = OFF. WHEN > 0, PLAYERS HIT A FORCE SAVE & QUIT BANNER (NO CONTINUE) AND RESUME STAYS LOCKED FOR THAT MANY CALENDAR DAYS."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrapper.add_child(hint)
+
+	return wrapper
+
+
+# Blocks Time Control + Divine Summoning on this round (punishment / special paths).
+func _make_items_blocked_toggle(arr: Array, idx: int) -> Control:
+	if not arr[idx].has("items_blocked"):
+		arr[idx]["items_blocked"] = false
+
+	var wrapper: VBoxContainer = VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 4)
+
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", ROW_SEP)
+	wrapper.add_child(row)
+
+	var label: Label = Label.new()
+	label.text = "BLOCK ITEMS"
+	label.add_theme_color_override("font_color", UITheme.AMBER)
+	label.add_theme_font_size_override("font_size", 12)
+	label.uppercase = true
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(label)
+
+	var toggle: Button = Button.new()
+	toggle.toggle_mode = true
+	toggle.button_pressed = arr[idx]["items_blocked"]
+	toggle.focus_mode = Control.FOCUS_NONE
+	UITheme.style_button(toggle, UITheme.AMBER)
+	toggle.text = "✓ ON" if arr[idx]["items_blocked"] else "OFF"
+	toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			arr[idx]["items_blocked"] = pressed
+			toggle.text = "✓ ON" if pressed else "OFF"
+	)
+	row.add_child(toggle)
+
+	var hint: Label = Label.new()
+	hint.text = "WHEN ON, TIME CONTROL AND DIVINE SUMMONING CANNOT BE USED ON THIS ROUND. USE FOR PUNISHMENT PATHS, FAILURE BRANCHES, OR STORY-ONLY SPECIALS."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrapper.add_child(hint)
+
+	return wrapper
+
+
+# ── Release expander ─────────────────────────────────────────────────────────
+
+
+# Mode blurbs shown under the dropdown — only the selected mode's fields appear.
+const _RELEASE_MODE_HINTS: Dictionary = {
+	"stamp_flag":
+	"SETS A RUN FLAG WHEN PRESSED, THEN KEEPS PLAYING. BRANCH LATER WITH A FLAG-CONDITIONAL FORK.",
+	"fail_jump":
+	"STOPS THE ROUND AND JUMPS TO A NODE YOU PICK (FLAGS ARE KEPT). USE FOR FAIL / EPILOGUE PATHS.",
+	"timed_window":
+	"PRESS STAMPS A RELEASE BEFORE THE DEADLINE. AT THE DEADLINE, AWARD HIT OR MISS SCORE.",
+	"loop_until_clean":
+	"PRESSING RESTARTS THIS ROUND. FINISHING WITHOUT PRESSING ADVANCES NORMALLY.",
+	"punish_polarity":
+	"OFF: PRESSING FAILS (JUMP). ON (INVERT): PRESSING SUCCEEDS; FINISHING WITHOUT PRESSING FAILS.",
+}
+
+
+# Toggle + fields for the mid-round Release control. Only parameters used by the
+# selected mode are shown (unused blanks are ignored at runtime).
+func _make_release_expander(arr: Array, idx: int, reselect: Callable) -> Control:
+	var cfg: Dictionary = JourneyData.normalize_release_round(arr[idx])
+	for k: String in cfg.keys():
+		if not arr[idx].has(k):
+			arr[idx][k] = cfg[k]
+
+	var enabled: bool = bool(arr[idx].get("release_enabled", false))
+	var mode: String = str(arr[idx].get("release_mode", "stamp_flag"))
+
+	var wrapper: VBoxContainer = VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 6)
+
+	var toggle_btn: Button = Button.new()
+	toggle_btn.text = ("▼  RELEASE" if enabled else "▶  RELEASE")
+	toggle_btn.toggle_mode = true
+	toggle_btn.button_pressed = enabled
+	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(toggle_btn, UITheme.CYAN)
+	wrapper.add_child(toggle_btn)
+
+	var panel: VBoxContainer = VBoxContainer.new()
+	panel.add_theme_constant_override("separation", 8)
+	panel.visible = enabled
+	wrapper.add_child(panel)
+
+	var intro: Label = Label.new()
+	intro.text = "SHOWS A RELEASE BUTTON (HOTKEY R) DURING THIS ROUND. PICK A MODE — ONLY THAT MODE'S FIELDS APPEAR BELOW."
+	intro.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	intro.add_theme_font_size_override("font_size", 10)
+	intro.uppercase = true
+	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	panel.add_child(intro)
+
+	toggle_btn.toggled.connect(
+		func(pressed: bool) -> void:
+			arr[idx]["release_enabled"] = pressed
+			toggle_btn.text = "▼  RELEASE" if pressed else "▶  RELEASE"
+			panel.visible = pressed
+			_owner._refresh_graph()
+	)
+
+	panel.add_child(_side_field_label("MODE"))
+	var modes: Array[String] = ReleaseLogic.MODES.duplicate()
+	var mode_labels: Array[String] = [
+		"Stamp flag — set flag, keep playing",
+		"Fail jump — stop and jump to a node",
+		"Timed window — score at a deadline",
+		"Loop until clean — press restarts round",
+		"Punish polarity — fail or must-release",
+	]
+	var mode_dd: OptionButton = OptionButton.new()
+	for i: int in modes.size():
+		mode_dd.add_item(mode_labels[i])
+	mode_dd.selected = maxi(0, modes.find(mode))
+	mode_dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_option_button(mode_dd)
+	mode_dd.item_selected.connect(
+		func(i: int) -> void:
+			arr[idx]["release_mode"] = modes[i]
+			reselect.call(idx)
+	)
+	panel.add_child(mode_dd)
+
+	var mode_hint: Label = Label.new()
+	mode_hint.text = str(_RELEASE_MODE_HINTS.get(mode, ""))
+	mode_hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	mode_hint.add_theme_font_size_override("font_size", 10)
+	mode_hint.uppercase = true
+	mode_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	panel.add_child(mode_hint)
+
+	# Mode-specific parameters only (not overrides — blanks for unused modes are ignored).
+	match mode:
+		"stamp_flag":
+			panel.add_child(
+				_make_effect_text_field(
+					arr, idx, "release_flag", "FLAG TO SET (REQUIRED)", "released"
+				)
+			)
+			panel.add_child(_make_release_hide_after_press(arr, idx))
+		"fail_jump":
+			panel.add_child(
+				_make_release_jump_picker(arr, idx, "JUMP TO NODE (REQUIRED)")
+			)
+			panel.add_child(_make_release_hide_after_press(arr, idx))
+		"timed_window":
+			panel.add_child(
+				_make_effect_int_field(
+					arr, idx, "release_deadline_ms", "DEADLINE MS (REQUIRED)", 0
+				)
+			)
+			panel.add_child(
+				_make_effect_int_field(arr, idx, "release_score_hit", "SCORE IF RELEASED IN TIME", 0)
+			)
+			panel.add_child(
+				_make_release_signed_int_field(
+					arr, idx, "release_score_miss", "SCORE IF MISSED DEADLINE", 0
+				)
+			)
+			panel.add_child(
+				_make_effect_text_field(
+					arr, idx, "release_flag", "FLAG TO SET ON PRESS (OPTIONAL)", "released"
+				)
+			)
+			panel.add_child(
+				_make_effect_text_field(
+					arr,
+					idx,
+					"release_disabled_if_flag",
+					"HIDE IF THIS FLAG IS ALREADY SET (OPTIONAL)",
+					"early_release"
+				)
+			)
+			panel.add_child(_make_release_hide_after_press(arr, idx))
+		"loop_until_clean":
+			var loop_note: Label = Label.new()
+			loop_note.text = "NO EXTRA FIELDS — PRESSING RESTARTS; CLEAN FINISH ADVANCES."
+			loop_note.add_theme_color_override("font_color", UITheme.SEPARATOR)
+			loop_note.add_theme_font_size_override("font_size", 10)
+			loop_note.uppercase = true
+			loop_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			panel.add_child(loop_note)
+		"punish_polarity":
+			panel.add_child(_make_release_invert_toggle(arr, idx))
+			panel.add_child(
+				_make_release_jump_picker(arr, idx, "FAIL JUMP NODE (REQUIRED)")
+			)
+			panel.add_child(
+				_make_effect_text_field(
+					arr, idx, "release_flag", "FLAG ON SUCCESS (OPTIONAL)", "released"
+				)
+			)
+			panel.add_child(_make_release_hide_after_press(arr, idx))
+
+	return wrapper
+
+
+# Dropdown of journey nodes by readable name (fork "Leads to" style). Stores the
+# graph node id in release_jump_to — authors never type opaque n_… ids.
+func _make_release_jump_picker(arr: Array, idx: int, label: String) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 4)
+	box.add_child(_side_field_label(label))
+
+	var current_id: String = str(_owner._selected_graph_node_id)
+	var stored: String = str(arr[idx].get("release_jump_to", ""))
+	var nodes: Dictionary = _owner._graph_model.get("nodes", {})
+
+	# Build (label, id) pairs — exclude self; sort by label.
+	var choices: Array = []  # [{id, label}]
+	for nid: Variant in nodes.keys():
+		var id: String = str(nid)
+		if id == "" or id == current_id:
+			continue
+		choices.append({"id": id, "label": _graph_node_label(id)})
+	choices.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return str(a["label"]).to_lower() < str(b["label"]).to_lower()
+	)
+
+	var dd: OptionButton = OptionButton.new()
+	dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_option_button(dd)
+	dd.add_item("(not set)")
+	dd.set_item_metadata(0, "")
+	var selected: int = 0
+	for i: int in choices.size():
+		var c: Dictionary = choices[i]
+		dd.add_item(str(c["label"]))
+		dd.set_item_metadata(i + 1, str(c["id"]))
+		if str(c["id"]) == stored:
+			selected = i + 1
+	# Stale id (deleted node) — keep it visible so the author can see it's broken.
+	if stored != "" and selected == 0:
+		dd.add_item("%s (missing)" % stored)
+		dd.set_item_metadata(dd.item_count - 1, stored)
+		selected = dd.item_count - 1
+	dd.selected = selected
+	dd.item_selected.connect(
+		func(i: int) -> void:
+			arr[idx]["release_jump_to"] = str(dd.get_item_metadata(i))
+			_owner._refresh_graph()
+	)
+	box.add_child(dd)
+
+	var hint: Label = Label.new()
+	hint.text = "PICK ANOTHER NODE ON THE JOURNEY GRAPH — NO NEED TO COPY IDS."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(hint)
+	return box
+
+
+func _make_release_hide_after_press(arr: Array, idx: int) -> Control:
+	var rem_row: HBoxContainer = HBoxContainer.new()
+	rem_row.add_theme_constant_override("separation", ROW_SEP)
+	var rem_lbl: Label = Label.new()
+	rem_lbl.text = "HIDE BUTTON AFTER PRESS"
+	rem_lbl.add_theme_color_override("font_color", UITheme.CYAN)
+	rem_lbl.add_theme_font_size_override("font_size", 12)
+	rem_lbl.uppercase = true
+	rem_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rem_row.add_child(rem_lbl)
+	var rem_btn: Button = Button.new()
+	rem_btn.toggle_mode = true
+	rem_btn.button_pressed = bool(arr[idx].get("release_remove_on_press", true))
+	rem_btn.focus_mode = Control.FOCUS_NONE
+	UITheme.style_button(rem_btn, UITheme.CYAN)
+	rem_btn.text = "✓ ON" if rem_btn.button_pressed else "OFF"
+	rem_btn.toggled.connect(
+		func(pressed: bool) -> void:
+			arr[idx]["release_remove_on_press"] = pressed
+			rem_btn.text = "✓ ON" if pressed else "OFF"
+	)
+	rem_row.add_child(rem_btn)
+	return rem_row
+
+
+func _make_release_invert_toggle(arr: Array, idx: int) -> Control:
+	var wrap: VBoxContainer = VBoxContainer.new()
+	wrap.add_theme_constant_override("separation", 4)
+	var inv_row: HBoxContainer = HBoxContainer.new()
+	inv_row.add_theme_constant_override("separation", ROW_SEP)
+	wrap.add_child(inv_row)
+	var inv_lbl: Label = Label.new()
+	inv_lbl.text = "INVERT (MUST-RELEASE)"
+	inv_lbl.add_theme_color_override("font_color", UITheme.CYAN)
+	inv_lbl.add_theme_font_size_override("font_size", 12)
+	inv_lbl.uppercase = true
+	inv_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inv_row.add_child(inv_lbl)
+	var inv_btn: Button = Button.new()
+	inv_btn.toggle_mode = true
+	inv_btn.button_pressed = bool(arr[idx].get("release_invert", false))
+	inv_btn.focus_mode = Control.FOCUS_NONE
+	UITheme.style_button(inv_btn, UITheme.CYAN)
+	inv_btn.text = "✓ ON" if inv_btn.button_pressed else "OFF"
+	inv_btn.toggled.connect(
+		func(pressed: bool) -> void:
+			arr[idx]["release_invert"] = pressed
+			inv_btn.text = "✓ ON" if pressed else "OFF"
+	)
+	inv_row.add_child(inv_btn)
+	var inv_hint: Label = Label.new()
+	inv_hint.text = "OFF = PRESS FAILS. ON = PLAYER MUST PRESS TO SUCCEED; CLEAN FINISH WITHOUT PRESS JUMPS TO FAIL NODE."
+	inv_hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	inv_hint.add_theme_font_size_override("font_size", 10)
+	inv_hint.uppercase = true
+	inv_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	wrap.add_child(inv_hint)
+	return wrap
+
+
+# SpinBox that allows negative values (timed-window miss penalty).
+func _make_release_signed_int_field(
+	arr: Array, idx: int, key: String, label: String, def: int
+) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 4)
+	box.add_child(_side_field_label(label))
+	var spin: SpinBox = SpinBox.new()
+	spin.min_value = -999999
+	spin.max_value = 999999
+	spin.step = 1
+	spin.allow_greater = true
+	spin.allow_lesser = true
+	spin.value = int(arr[idx].get(key, def))
+	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(spin)
+	spin.value_changed.connect(func(v: float) -> void: arr[idx][key] = int(v))
+	box.add_child(spin)
+	return box
 
 
 # ── Boss round expander ──────────────────────────────────────────────────────

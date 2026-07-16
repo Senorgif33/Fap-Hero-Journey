@@ -6,75 +6,23 @@ extends RefCounted
 ## so it's unit-tested directly (tests/import_scanner_test.gd). JourneyBuilder owns the graph-node
 ## creation that consumes build_rounds(); BuilderSidePanel uses autofill_round_siblings for single drops.
 
-# Funscript filename suffixes that mark a secondary axis or a vibrator channel. Kept in sync with
-# detect_funscript_axis / detect_vib_channel — used to strip the suffix so "scene1", "scene1_L1",
-# "scene1.vib1" all share a round key during bulk import.
-const SCRIPT_SUFFIXES: Array[String] = [
-	"_l1",
-	".l1",
-	"_l2",
-	".l2",
-	"_r0",
-	".r0",
-	"_r1",
-	".r1",
-	"_r2",
-	".r2",
-	"_surge",
-	".surge",
-	"_sway",
-	".sway",
-	"_twist",
-	".twist",
-	"_roll",
-	".roll",
-	"_pitch",
-	".pitch",
-	".vib1",
-	"_vib1",
-	".vibe1",
-	"_vibe1",
-	".vib2",
-	"_vib2",
-	".vibe2",
-	"_vibe2",
-]
+# Funscript filename suffixes — Restim kit from restim.ini + SSR + vib. See RestimAxisKit.
+static func script_suffixes() -> PackedStringArray:
+	var out: PackedStringArray = RestimAxisKit.all_script_suffixes()
+	for s: String in [".vib1", "_vib1", ".vibe1", "_vibe1", ".vib2", "_vib2", ".vibe2", "_vibe2"]:
+		if not out.has(s):
+			out.append(s)
+	return out
 
 
-# Infers the T-code axis from a funscript filename. Checks T-code axis-code suffixes first (_L1, .L1)
-# then human-readable names (_surge, .pitch, …). Returns "L0" if no axis marker (main stroke script).
+# Infers the axis_scripts key from a funscript filename.
+# Returns "L0" for the unmarked main stroke script.
+# Restim kit names (alpha, beta, e1, volume, …) come from restim.ini funscript_names.
 static func detect_funscript_axis(path: String) -> String:
 	var stem: String = path.get_file().get_basename().to_lower()
-	var axis_codes: Dictionary = {
-		"_l1": "L1",
-		".l1": "L1",
-		"_l2": "L2",
-		".l2": "L2",
-		"_r0": "R0",
-		".r0": "R0",
-		"_r1": "R1",
-		".r1": "R1",
-		"_r2": "R2",
-		".r2": "R2",
-	}
-	for suffix: String in axis_codes:
-		if stem.ends_with(suffix):
-			return axis_codes[suffix]
-	var name_codes: Dictionary = {
-		"_surge": "L1",
-		".surge": "L1",
-		"_sway": "L2",
-		".sway": "L2",
-		"_twist": "R0",
-		".twist": "R0",
-		"_roll": "R1",
-		".roll": "R1",
-		"_pitch": "R2",
-		".pitch": "R2",
-	}
-	for suffix: String in name_codes:
-		if stem.ends_with(suffix):
-			return name_codes[suffix]
+	var restim: String = RestimAxisKit.detect_axis(stem)
+	if restim != "":
+		return restim
 	return "L0"
 
 
@@ -94,12 +42,7 @@ static func detect_vib_channel(path: String) -> String:
 # The file's basename with any recognised axis/vib suffix removed, so a secondary-axis or vib script
 # groups with its main round during bulk import. Preserves the original casing of the stem.
 static func strip_script_suffix(path: String) -> String:
-	var stem: String = path.get_file().get_basename()
-	var low: String = stem.to_lower()
-	for s: String in SCRIPT_SUFFIXES:
-		if low.ends_with(s):
-			return stem.substr(0, stem.length() - s.length())
-	return stem
+	return RestimAxisKit.strip_suffix(path.get_file().get_basename())
 
 
 # Round grouping key: directory + base name (suffix stripped), lowercased — so a video and its scripts
@@ -190,7 +133,7 @@ static func find_sibling_scripts(dir: String, base: String) -> Dictionary:
 					if axis == "L0":
 						if result["funscript"] == "":
 							result["funscript"] = full
-					elif not result["axis"].has(axis):
+					elif RestimAxisKit.should_autofill(axis) and not result["axis"].has(axis):
 						result["axis"][axis] = full
 		fname = d.get_next()
 	d.list_dir_end()
@@ -268,7 +211,7 @@ static func build_rounds(files: PackedStringArray) -> Dictionary:
 					groups[key]["funscript"] = f
 					if groups[key]["name"] == "":
 						groups[key]["name"] = f.get_file().get_basename()
-				else:
+				elif RestimAxisKit.should_autofill(axis):
 					groups[key]["axis"][axis] = f
 
 	var rounds: Array = []

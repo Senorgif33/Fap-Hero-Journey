@@ -99,6 +99,12 @@ func test_apply_effects_scale_local_centre() -> void:
 	assert_int(int((out[1] as Dictionary)["x"])).is_equal(60)
 
 
+# volume_attenuate softens linear Handy the same way as scale.
+func test_apply_effects_volume_attenuate_like_scale() -> void:
+	var out: Array = HandyPoints.apply_effects(PTS, [{"kind": "volume_attenuate", "factor": 0.6}])
+	assert_int(int((out[1] as Dictionary)["x"])).is_equal(60)
+
+
 # Block → flat hold line at hold_pos, timestamps intact.
 func test_apply_effects_block_holds() -> void:
 	var out: Array = HandyPoints.apply_effects(PTS, [{"kind": "block"}], 50)

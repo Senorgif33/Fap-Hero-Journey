@@ -204,21 +204,27 @@ func _make_card(id: String, data: Dictionary) -> Control:
 	dur_lbl.add_theme_font_size_override("font_size", 11)
 	col.add_child(dur_lbl)
 
-	# Price row
+	# Price row — PPU modifiers show USE cost; classic / utilities show purchase price.
+	var is_modifier: bool = InventoryService.IsModifier(id)
+	var ppu: bool = InventoryService.UnlockPayPerUse
 	var price: int = _price_of(data)
 	var price_row: HBoxContainer = HBoxContainer.new()
 	price_row.add_theme_constant_override("separation", 6)
 	col.add_child(price_row)
 
 	var price_lbl: Label = Label.new()
-	price_lbl.text = "♦ %d" % price
+	if ppu and is_modifier:
+		price_lbl.text = "USE: ♦ %d" % price
+		price_lbl.add_theme_font_size_override("font_size", 16)
+	else:
+		price_lbl.text = "♦ %d" % price
+		price_lbl.add_theme_font_size_override("font_size", 22)
 	price_lbl.add_theme_color_override("font_color", UITheme.MAGENTA)
-	price_lbl.add_theme_font_size_override("font_size", 22)
 	price_row.add_child(price_lbl)
 
-	# BUY button
+	# PPU modifiers: free UNLOCK. Otherwise: BUY a charge.
 	var buy: Button = Button.new()
-	buy.text = "> BUY"
+	buy.text = "> UNLOCK" if (ppu and is_modifier) else "> BUY"
 	buy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_style_button(buy, UITheme.PURPLE_BRIGHT)
 	buy.pressed.connect(_on_buy_pressed.bind(id, buy, card))
@@ -231,6 +237,19 @@ func _make_card(id: String, data: Dictionary) -> Control:
 func _on_buy_pressed(id: String, buy: Button, card: PanelContainer) -> void:
 	if _purchased.get(id, false):
 		return
+	if InventoryService.UnlockPayPerUse and InventoryService.IsModifier(id):
+		# Free unlock for the run — no coin spend, no inventory charge.
+		if InventoryService.IsUnlocked(id):
+			_purchased[id] = true
+			_update_buy_button(id, buy, card)
+			return
+		if not InventoryService.UnlockItem(id):
+			return
+		_purchased[id] = true
+		_update_buy_button(id, buy, card)
+		_pulse_card(card)
+		return
+
 	var data: Dictionary = InventoryService.GetItemData(id)
 	var price: int = _price_of(data)
 	if not CoinService.SpendCoins(price):
@@ -270,6 +289,17 @@ func _update_buy_button(id: String, buy: Button, card: PanelContainer) -> void:
 	buy.set_meta("item_id", id)
 	var data: Dictionary = InventoryService.GetItemData(id)
 	var price: int = _price_of(data)
+	var is_modifier: bool = InventoryService.IsModifier(id)
+	var ppu: bool = InventoryService.UnlockPayPerUse
+
+	# PPU modifiers: already unlocked this run (or unlocked earlier this visit).
+	if ppu and is_modifier and (InventoryService.IsUnlocked(id) or _purchased.get(id, false)):
+		buy.text = "✓ OWNED"
+		buy.disabled = true
+		card.add_theme_stylebox_override("panel", _card_stylebox(true))
+		buy.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)
+		buy.add_theme_color_override("font_disabled_color", UITheme.TOXIC_GREEN)
+		return
 
 	if _purchased.get(id, false):
 		buy.text = "✓ OWNED"
@@ -277,6 +307,12 @@ func _update_buy_button(id: String, buy: Button, card: PanelContainer) -> void:
 		card.add_theme_stylebox_override("panel", _card_stylebox(true))
 		buy.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)
 		buy.add_theme_color_override("font_disabled_color", UITheme.TOXIC_GREEN)
+		return
+
+	if ppu and is_modifier:
+		# Free unlock — always available while not yet owned.
+		buy.text = "> UNLOCK"
+		buy.disabled = false
 		return
 
 	if CoinService.CanAfford(price):

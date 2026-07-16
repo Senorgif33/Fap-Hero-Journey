@@ -17,7 +17,36 @@ extends RefCounted
 # ---------------------------------------------------------------------------
 
 const IMAGE_EXTS: Array[String] = ["png", "jpg", "jpeg", "webp"]
-const EXTRA_AXIS_SUFFIXES: Array[String] = ["_L1", "_L2", "_R0", "_R1", "_R2"]
+# Suffixes that mark secondary / Restim-kit funscripts (not the main L0 stroke).
+const EXTRA_AXIS_SUFFIXES: Array[String] = [
+	"_L1",
+	"_L2",
+	"_R0",
+	"_R1",
+	"_R2",
+	".alpha",
+	".beta",
+	".e1",
+	".e2",
+	".e3",
+	".e4",
+	".volume",
+	".frequency",
+	".pulse_frequency",
+	".pulse_width",
+	".pulse_interval_random",
+	".pulse_rise_time",
+	".L1",
+	".L2",
+	".R0",
+	".R1",
+	".R2",
+	".surge",
+	".sway",
+	".twist",
+	".roll",
+	".pitch",
+]
 
 
 # Scans `journeys_dir` for sub-folders containing a journey.json and returns the
@@ -77,6 +106,9 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		"map_fog": bool(data.get("MapFog", false)),
 		# Fog reveal depth: ghost levels shown ahead of the visited trail (< 0 = whole structure ghosted).
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
+		# Shop economy: false (default) = classic buy-charge / free activate;
+		# true = unlock modifiers free in shop, pay price per mid-round activation.
+		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
 		# Redirect overlay (skip/converge/end), composed onto the graph in parse_graph.
 		"redirects": data.get("Redirects", {}),
 		"rounds": [],
@@ -197,6 +229,8 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 			"axis_scripts": axis_scripts,
 			"vib_scripts": vib_scripts,
 			"is_checkpoint": bool(raw.get("IsCheckpoint", raw.get("is_checkpoint", false))),
+			"cooldown_days": int(raw.get("CooldownDays", raw.get("cooldown_days", 0))),
+			"items_blocked": bool(raw.get("ItemsBlocked", raw.get("items_blocked", false))),
 			"boss_image": boss_image,
 			"boss_tagline": raw.get("BossTagline", ""),
 			"boss_modifiers": boss_modifiers,
@@ -344,6 +378,7 @@ static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dicti
 		"map_enabled": bool(data.get("MapEnabled", true)),
 		"map_fog": bool(data.get("MapFog", false)),
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
+		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
 		"cover_path": find_cover_image(path),
 		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
 		"rounds": [],
@@ -664,6 +699,10 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				"vib_scripts": pr_vib_scripts,
 				"is_checkpoint":
 				bool(raw_pr.get("IsCheckpoint", raw_pr.get("is_checkpoint", false))),
+				"cooldown_days":
+				int(raw_pr.get("CooldownDays", raw_pr.get("cooldown_days", 0))),
+				"items_blocked":
+				bool(raw_pr.get("ItemsBlocked", raw_pr.get("items_blocked", false))),
 				"boss_image": pr_boss_image,
 				"boss_tagline": raw_pr.get("BossTagline", ""),
 				"boss_modifiers": pr_boss_modifiers,
@@ -894,19 +933,15 @@ static func _read_funscript_stats(folder: String) -> Dictionary:
 	var fname: String = dir.get_next()
 	while fname != "":
 		if not dir.current_is_dir() and fname.get_extension() in ["funscript", "json"]:
-			# Skip secondary-axis scripts (e.g. "Name_L1.funscript") — not the L0 main script.
-			var stem: String = fname.get_basename()
-			var is_axis: bool = false
-			for ax: String in EXTRA_AXIS_SUFFIXES:
-				if stem.ends_with(ax):
-					is_axis = true
-					break
-			if not is_axis:
-				var full_path: String = folder + "/" + fname
-				dir.list_dir_end()
-				var stats: Dictionary = JourneyData.read_funscript_stats(full_path)
-				stats["path"] = full_path
-				return stats
+			var full_path: String = folder + "/" + fname
+			# Skip secondary-axis / Restim-kit scripts — not the main L0 stroke.
+			if ImportScanner.detect_funscript_axis(full_path) != "L0":
+				fname = dir.get_next()
+				continue
+			dir.list_dir_end()
+			var stats: Dictionary = JourneyData.read_funscript_stats(full_path)
+			stats["path"] = full_path
+			return stats
 		fname = dir.get_next()
 	dir.list_dir_end()
 	return {"count": 0, "length_ms": 0, "path": ""}

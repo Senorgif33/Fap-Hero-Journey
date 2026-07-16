@@ -26,9 +26,11 @@ extends Node
 #     "coins":            int        — CoinService balance
 #     "score":            int        — ScoreService cumulative score
 #     "total_actions":    int        — for end-screen stat
-#     "inventory":        Array      — owned items (active effects NOT saved)
+#     "inventory":        Array      — owned utility charges (active effects NOT saved)
+#     "unlocked":         Array      — unlocked modifier ids (pay-per-use; optional on old saves)
 #     "round_names":      Array      — round-name log for the end screen
 #     "route_trail":      Array      — visited node ids for the end-screen recap
+#     "cooldown_until":   int        — unix seconds; Resume blocked until this time (0 = none)
 #   }
 #
 # C# callers reach this via the autoload node:
@@ -148,3 +150,82 @@ func delete_save(journey_folder_name: String) -> void:
 func get_save_timestamp(journey_folder_name: String) -> String:
 	var data: Dictionary = read_save(journey_folder_name)
 	return data.get("saved_at", "") as String
+
+
+# ── Calendar cooldowns ────────────────────────────────────────────────────────
+
+
+# Unix-seconds unlock time stamped on the save, or 0 if none / no save.
+func get_cooldown_until(journey_folder_name: String) -> int:
+	var data: Dictionary = read_save(journey_folder_name)
+	return int(data.get("cooldown_until", 0))
+
+
+# True when a save exists and its cooldown_until is still in the future.
+# Honours SettingsService.ignore_journey_cooldowns (dev override).
+func is_cooldown_active(journey_folder_name: String) -> bool:
+	if SettingsService.get_ignore_journey_cooldowns():
+		return false
+	var until: int = get_cooldown_until(journey_folder_name)
+	if until <= 0:
+		return false
+	return Time.get_unix_time_from_system() < until
+
+
+# Seconds remaining until unlock (0 if unlocked / no cooldown).
+func get_cooldown_remaining_sec(journey_folder_name: String) -> int:
+	var until: int = get_cooldown_until(journey_folder_name)
+	if until <= 0:
+		return 0
+	return maxi(0, until - int(Time.get_unix_time_from_system()))
+
+
+# Human-readable remaining lockout, e.g. "2d 5h" / "3h 12m" / "45s".
+func format_cooldown_remaining(journey_folder_name: String) -> String:
+	var sec: int = get_cooldown_remaining_sec(journey_folder_name)
+	if sec <= 0:
+		return ""
+	var days: int = int(sec / 86400)
+	var hours: int = int((sec % 86400) / 3600)
+	var mins: int = int((sec % 3600) / 60)
+	var secs: int = sec % 60
+	if days > 0:
+		return "%dd %dh" % [days, hours]
+	if hours > 0:
+		return "%dh %dm" % [hours, mins]
+	if mins > 0:
+		return "%dm %ds" % [mins, secs]
+	return "%ds" % secs
+
+
+# Stamp cooldown_until = now + days*86400 on an existing save (or no-op if missing).
+# Used when writing a Force Save & Quit from a cooldown round.
+func stamp_cooldown_days(journey_folder_name: String, days: int) -> int:
+	if days <= 0:
+		return 0
+	return int(Time.get_unix_time_from_system()) + days * 86400
+
+
+# Reduce cooldown_until on disk by hours. Returns true if a save was updated.
+# Used from Journey Select (or mid-run) by shave_cooldown utilities.
+func shave_cooldown_hours(journey_folder_name: String, hours: int) -> bool:
+	if hours <= 0 or journey_folder_name.is_empty():
+		return false
+	var data: Dictionary = read_save(journey_folder_name)
+	if data.is_empty():
+		return false
+	var until: int = int(data.get("cooldown_until", 0))
+	if until <= 0:
+		return false
+	data["cooldown_until"] = maxi(0, until - hours * 3600)
+	# Preserve inventory etc. — write_save re-stamps version/saved_at/folder.
+	return write_save(journey_folder_name, data)
+
+
+# Rewrite save inventory after consuming a cooldown-shave item at Journey Select.
+func write_save_inventory(journey_folder_name: String, inventory: Array) -> bool:
+	var data: Dictionary = read_save(journey_folder_name)
+	if data.is_empty():
+		return false
+	data["inventory"] = inventory
+	return write_save(journey_folder_name, data)

@@ -173,6 +173,13 @@ var _effect_resolved: bool = false
 var _effect_cleanse_btn: Button = null
 var _effect_cleanse_cost: int = CLEANSE_COST_DEFAULT  # per-round, set on enter
 
+# Mid-round Release control (see ReleaseLogic + round release_* fields).
+var _release_btn: Button = null
+var _release_cfg: Dictionary = {}
+var _release_pressed: bool = false
+var _release_deadline_resolved: bool = false
+var _release_jumping: bool = false  # suppresses normal end path during fail_jump
+
 # Optional beat-bar visualiser — created only when the setting is enabled.
 var _beat_bar: Control = null
 
@@ -192,6 +199,14 @@ var _test_seed_flags: Array = []
 # or when leaving via Save & Quit (a resume, not an abandon) — so the menu exit
 # doesn't also record an abandoned run.
 var _run_accounted: bool = false
+# Calendar lockout stamped when entering a round with cooldown_days > 0.
+# Written into the Force Save & Quit payload; 0 = no pending cooldown.
+var _pending_cooldown_until: int = 0
+# True while the cooldown Force-Quit modal is on screen (dev Continue / F9).
+var _cooldown_banner_open: bool = false
+var _cooldown_modal: Control = null
+# Dev F8: treat round end as clean even for must-release / fail_on_clean_finish.
+var _dev_bypass_release_fail: bool = false
 
 
 func _ready() -> void:
@@ -205,6 +220,10 @@ func _ready() -> void:
 	_map_enabled = bool(GameState.Journey.get("map_enabled", true))
 	_map_fog = bool(GameState.Journey.get("map_fog", false))
 	_map_fog_reveal = int(GameState.Journey.get("map_fog_reveal", 1))
+	# Shop economy mode — must be set before any shop/inventory use (and before
+	# resume inventory load has already run in JourneySelect; re-apply here so
+	# a fresh start after Reset() still gets the journey's authored value).
+	InventoryService.SetUnlockPayPerUse(bool(GameState.Journey.get("unlock_pay_per_use", false)))
 	_build_map()
 	_connect_signals()
 	# Resume vs fresh start: when the player picked Resume from the catalogue,
@@ -284,6 +303,7 @@ func _process(delta: float) -> void:
 		_update_effect_frame()
 	if _beat_bar != null:
 		_beat_bar.set_time(FunscriptPlayer.PositionMs)
+	_tick_release_deadline()
 
 
 # Drains score while the player has actively paused (pause button or Options) —
@@ -550,14 +570,19 @@ func _load_current_round() -> void:
 			"%s %d / %d  —  %s" % [prefix, num, total, (round.get("name", "") as String).to_upper()]
 		)
 
-	# Author-marked checkpoint rounds offer a Save & Quit opt-in before round
-	# playback — honoured on every round type, bosses included (the banner
-	# precedes the boss intro). Continuing proceeds to the round's normal start.
-	if round.get("is_checkpoint", false):
+	# Calendar cooldown rounds force Save & Quit (no Continue). Wins over a
+	# voluntary checkpoint on the same round. Otherwise author checkpoints offer
+	# Save & Quit or Continue before playback.
+	var cooldown_days: int = int(round.get("cooldown_days", 0))
+	if cooldown_days > 0:
+		_pending_cooldown_until = JourneySaveService.stamp_cooldown_days(
+			GameState.Journey.get("folder_name", ""), cooldown_days
+		)
+		_show_cooldown_banner(round, cooldown_days)
+	elif round.get("is_checkpoint", false):
 		_show_checkpoint_banner(round)
 	else:
 		_start_round_after_gates(round)
-
 
 # Starts a round once any checkpoint gate is cleared: boss rounds telegraph with
 # their intro card first (playback waits for BEGIN); everything else begins now.
@@ -643,6 +668,7 @@ func _begin_round(round: Dictionary) -> void:
 	if video_path == "":
 		video_path = _find_video(round.get("folder", ""))
 	_load_video(video_path)
+	_setup_release(round)
 
 
 # ---------------------------------------------------------------------------
@@ -710,9 +736,85 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 	add_child(modal)
 
 
-# ---------------------------------------------------------------------------
-# Boss rounds
-# ---------------------------------------------------------------------------
+# FORCE SAVE & QUIT banner for calendar cooldown rounds (cooldown_days > 0).
+# No Continue in normal play — the player must save out and wait for cooldown_until.
+# Save advances past this gap first so Resume lands on the next node (see
+# _on_cooldown_save_and_quit) — otherwise Resume would re-enter this round and
+# lock out again forever.
+# Dev/QA: Ignore Cooldowns or Dev Cheats adds Continue (advance without quitting).
+func _show_cooldown_banner(round: Dictionary, days: int) -> void:
+	_is_overlay_open = true
+	_cooldown_banner_open = true
+	_halt_playback_for_gate()
+
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"⏳  COOLDOWN  ⏳", UITheme.DANGER, Vector2i(620, 380)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
+	vbox.add_theme_constant_override("separation", 18)
+
+	var subtitle: Label = Label.new()
+	subtitle.text = (round.get("name", "") as String).to_upper()
+	UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
+	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(subtitle)
+
+	var hint: Label = Label.new()
+	hint.text = (
+		(
+			"This starts a %d-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
+			% days
+		)
+		if days != 1
+		else "This starts a 1-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
+	)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(hint, UITheme.PURPLE_MID, 12, false)
+	vbox.add_child(hint)
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 16)
+	vbox.add_child(btn_row)
+
+	var save_btn: Button = Button.new()
+	save_btn.text = "💾  SAVE & QUIT"
+	save_btn.custom_minimum_size = Vector2(200, 0)
+	UITheme.style_button(save_btn, UITheme.AMBER)
+	save_btn.pressed.connect(
+		func() -> void:
+			_dismiss_cooldown_banner()
+			_on_cooldown_save_and_quit()
+	)
+	btn_row.add_child(save_btn)
+
+	if (
+		SettingsService.get_ignore_journey_cooldowns()
+		or SettingsService.get_dev_cheats_enabled()
+	):
+		var cont_btn: Button = Button.new()
+		cont_btn.text = "▶  CONTINUE (DEV)"
+		cont_btn.custom_minimum_size = Vector2(200, 0)
+		UITheme.style_button(cont_btn, UITheme.PURPLE_BRIGHT)
+		cont_btn.pressed.connect(
+			func() -> void:
+				_dismiss_cooldown_banner()
+				_dev_skip_cooldown_gap()
+		)
+		btn_row.add_child(cont_btn)
+
+	add_child(modal)
+	_cooldown_modal = modal
+
+
+func _dismiss_cooldown_banner() -> void:
+	if is_instance_valid(_cooldown_modal):
+		_cooldown_modal.queue_free()
+	_cooldown_modal = null
+	_is_overlay_open = false
+	_cooldown_banner_open = false
 
 
 # Freezes playback while a pre-round modal (boss intro / checkpoint banner) is up.
@@ -1199,6 +1301,157 @@ func _remove_cleanse_button() -> void:
 	_effect_cleanse_btn = null
 
 
+# ---------------------------------------------------------------------------
+# Release
+# ---------------------------------------------------------------------------
+
+
+func _setup_release(round: Dictionary) -> void:
+	_remove_release_button()
+	_release_cfg = JourneyData.normalize_release_round(round)
+	_release_pressed = false
+	_release_deadline_resolved = false
+	_release_jumping = false
+	if ReleaseLogic.is_available(_release_cfg, func(f: String) -> bool: return GameState.HasFlag(f)):
+		_show_release_button()
+
+
+func _show_release_button() -> void:
+	_remove_release_button()
+	var btn: Button = Button.new()
+	btn.text = "RELEASE  (R)"
+	btn.tooltip_text = "Release (hotkey R) — outcome depends on this round's release mode."
+	UITheme.style_button(btn, UITheme.MAGENTA)
+	btn.anchor_left = 0.5
+	btn.anchor_right = 0.5
+	btn.anchor_top = 1.0
+	btn.anchor_bottom = 1.0
+	# Sit above the cleanse button when both are visible.
+	btn.offset_top = -148
+	btn.offset_bottom = -108
+	btn.offset_left = -110
+	btn.offset_right = 110
+	btn.pressed.connect(_on_release_pressed)
+	add_child(btn)
+	_release_btn = btn
+
+
+func _remove_release_button() -> void:
+	if is_instance_valid(_release_btn):
+		_release_btn.queue_free()
+	_release_btn = null
+
+
+func _on_release_pressed() -> void:
+	if _is_overlay_open or _release_jumping:
+		return
+	if not ReleaseLogic.is_available(_release_cfg, func(f: String) -> bool: return GameState.HasFlag(f)):
+		return
+	# After the first press, ignore further presses unless looping (restart clears).
+	if _release_pressed and str(_release_cfg.get("release_mode", "")) != "loop_until_clean":
+		return
+
+	var action: String = ReleaseLogic.press_action(_release_cfg)
+	match action:
+		ReleaseLogic.ACTION_SET_FLAG, ReleaseLogic.ACTION_SUCCESS_STAMP:
+			_release_pressed = true
+			var flag: String = str(_release_cfg.get("release_flag", ""))
+			if flag != "":
+				GameState.SetFlag(flag)
+			if bool(_release_cfg.get("release_remove_on_press", true)):
+				_remove_release_button()
+			_show_save_toast(
+				"RELEASED" if action == ReleaseLogic.ACTION_SET_FLAG else "RELEASED — SUCCESS"
+			)
+		ReleaseLogic.ACTION_STAMP:
+			_release_pressed = true
+			var stamp_flag: String = str(_release_cfg.get("release_flag", ""))
+			if stamp_flag != "":
+				GameState.SetFlag(stamp_flag)
+			if bool(_release_cfg.get("release_remove_on_press", true)):
+				_remove_release_button()
+			_show_save_toast("RELEASED")
+		ReleaseLogic.ACTION_FAIL_JUMP:
+			_release_pressed = true
+			await _release_fail_jump()
+		ReleaseLogic.ACTION_RESTART:
+			await _release_restart_round()
+		_:
+			pass
+
+
+func _tick_release_deadline() -> void:
+	if _release_deadline_resolved or _release_jumping:
+		return
+	if str(_release_cfg.get("release_mode", "")) != "timed_window":
+		return
+	if not bool(_release_cfg.get("release_enabled", false)):
+		return
+	var deadline: int = int(_release_cfg.get("release_deadline_ms", 0))
+	if deadline <= 0:
+		return
+	if int(FunscriptPlayer.PositionMs) < deadline:
+		return
+	_release_deadline_resolved = true
+	var delta: int = ReleaseLogic.deadline_score(_release_cfg, _release_pressed)
+	if delta != 0:
+		ScoreService.AddScore(delta)
+		if delta > 0:
+			_show_save_toast("RELEASE WINDOW  +%d" % delta)
+		else:
+			_show_save_toast("RELEASE WINDOW  %d" % delta)
+	# Hide the button once the window closes (further presses no longer matter).
+	_remove_release_button()
+
+
+# Stop the round and JumpToNode(release_jump_to), preserving run flags.
+func _release_fail_jump() -> void:
+	if _release_jumping:
+		return
+	_release_jumping = true
+	_remove_release_button()
+	_handy_stop()
+	FunscriptPlayer.Stop()
+	_video.stop()
+	if _end_timer != null:
+		_end_timer.stop()
+	ScoreService.EndRound()
+	_exit_boss_mode()
+	var target: String = str(_release_cfg.get("release_jump_to", ""))
+	if target == "" or not GameState.JumpToNode(target):
+		_release_jumping = false
+		_show_save_toast("✕  RELEASE JUMP TARGET MISSING")
+		return
+	_show_save_toast("RELEASED — JUMP")
+	await _transition_swap(
+		func() -> void:
+			_release_jumping = false
+			_load_current_item()
+	)
+
+
+# loop_until_clean: seek/restart the same round without advancing.
+func _release_restart_round() -> void:
+	_handy_stop()
+	FunscriptPlayer.Stop()
+	_video.stop()
+	if _end_timer != null:
+		_end_timer.stop()
+	if not GameState.RestartCurrentRound():
+		return
+	_exit_boss_mode()
+	_remove_release_button()
+	_release_pressed = false
+	_release_deadline_resolved = false
+	var round: Dictionary = GameState.CurrentRound().duplicate(true)
+	round.merge(JourneyData.normalize_effect_round(round), true)
+	var rtype: String = str(round.get("round_type", "normal"))
+	_is_boss_round = rtype == "boss"
+	_is_effect_round = rtype == "effect"
+	_show_save_toast("RESTART — GO AGAIN")
+	await _begin_round(round)
+
+
 func _on_cleanse_pressed() -> void:
 	# Prefer a held Cleanse item (free); fall back to coins.
 	if InventoryService.OwnsItem("cleanse"):
@@ -1262,6 +1515,7 @@ func _exit_boss_mode() -> void:
 	_clear_curse_hexes()
 	_hide_effect_overlay()
 	_remove_cleanse_button()
+	_remove_release_button()
 	# A "Lingering" boon un-freezes the effect clock at round end.
 	if _effect_lingering:
 		_effect_lingering = false
@@ -1526,6 +1780,16 @@ func _start_no_video_fallback() -> void:
 
 
 func _on_round_ended() -> void:
+	if _release_jumping:
+		return
+	# Must-release fail: finishing without pressing jumps to the punishment node.
+	# Dev F8 complete sets _dev_bypass_release_fail so QA can clean-finish those rounds.
+	var bypass_fail: bool = _dev_bypass_release_fail
+	_dev_bypass_release_fail = false
+	if not bypass_fail and ReleaseLogic.fail_on_clean_finish(_release_cfg, _release_pressed):
+		await _release_fail_jump()
+		return
+	_remove_release_button()
 	_handy_stop()  # the device would otherwise keep playing into the transition
 	# Extract the name here in GDScript where Dictionary access is reliable,
 	# then pass it explicitly so C# never needs to look up the key itself.
@@ -1545,6 +1809,8 @@ func _on_round_ended() -> void:
 	GameState.set_meta("_round_names", _names)
 	ScoreService.EndRound()
 	FunscriptPlayer.Stop()
+	# Round-scoped volume attenuate must not leak into the next node.
+	InventoryService.ClearRoundScopedEffects()
 	# Capture coin modifiers BEFORE _exit_boss_mode clears the boss-effect list:
 	# a "Fortune" boon (coin_jackpot) and a "Greed"/"Pauper" curse (coin_penalty)
 	# both live there, alongside any active shop jackpot.
@@ -1917,6 +2183,9 @@ func _show_test_banner() -> void:
 # resume point. We don't preserve mid-round position — the player restarts
 # the current round from action 0 on resume. This keeps the save model
 # simple and predictable (you replay the round you were doing).
+#
+# Cooldown gaps are special: _on_cooldown_save_and_quit Advances past the gap
+# before calling this, so Resume lands on the next node after the calendar wait.
 func _write_journey_save() -> bool:
 	# Real saves are disabled during a test play — a preview must never write a
 	# run-save (the Safe Word item and checkpoint Save & Quit both route here).
@@ -1937,9 +2206,12 @@ func _write_journey_save() -> bool:
 		"score": score_data.get("score", 0),
 		"total_actions": score_data.get("strokes", 0),
 		"inventory": InventoryService.CaptureSaveData(),
+		"unlocked": InventoryService.CaptureUnlockedSaveData(),
 		"round_names": GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray,
 		"route_trail": GameState.get_meta("_route_trail", []),
 	}
+	if _pending_cooldown_until > 0:
+		payload["cooldown_until"] = _pending_cooldown_until
 	# GameState owns the graph-native position fields (current_node,
 	# rounds_entered, flags, discovered) — merge them in under their own names so
 	# LoadFromSave finds them. (Re-keying these through the old tree-model names
@@ -1947,6 +2219,90 @@ func _write_journey_save() -> bool:
 	# resume to the journey start and lost pre-save flags + fog discovery.)
 	payload.merge(GameState.CaptureSaveData())
 	return JourneySaveService.write_save(folder_name, payload)
+
+
+# Cooldown Force Save & Quit: advance past the gap before writing so the save's
+# current_node is the next out target (punish session / landing). cooldown_until
+# still gates Resume; after the wait the player starts that next node, not this
+# gap (which would re-fire cooldown_days).
+func _on_cooldown_save_and_quit() -> void:
+	if not GameState.IsLastRound():
+		GameState.Advance()
+	else:
+		push_warning(
+			"GameLoop: cooldown gap has no out edge — save will resume on this node"
+		)
+	_on_save_and_quit()
+
+
+# Dev/QA: leave a cooldown gap without quitting — same Advance as save, then play.
+func _dev_skip_cooldown_gap() -> void:
+	_pending_cooldown_until = 0
+	_cooldown_banner_open = false
+	if not GameState.IsLastRound():
+		GameState.Advance()
+	_show_save_toast("DEV  SKIPPED COOLDOWN")
+	_load_current_item()
+
+
+func _dev_cheats_on() -> bool:
+	return SettingsService.get_dev_cheats_enabled()
+
+
+# F8: clean-finish the current round (coins/score), bypassing must-release fail.
+func _dev_complete_round() -> void:
+	if not _dev_cheats_on():
+		return
+	if _cooldown_banner_open:
+		_dismiss_cooldown_banner()
+		_dev_skip_cooldown_gap()
+		return
+	if _is_overlay_open:
+		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
+		return
+	if GameState.CurrentItemType() != "round":
+		_show_save_toast("DEV  NOT IN A ROUND")
+		return
+	_show_save_toast("DEV  COMPLETE ROUND")
+	_release_pressed = true
+	_dev_bypass_release_fail = true
+	_end_timer.stop()
+	_video.paused = false
+	await _on_round_ended()
+
+
+# F9: jump to the next node without awards (or skip cooldown gap).
+func _dev_skip_node() -> void:
+	if not _dev_cheats_on():
+		return
+	if _cooldown_banner_open:
+		_dismiss_cooldown_banner()
+		_dev_skip_cooldown_gap()
+		return
+	if _is_overlay_open:
+		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
+		return
+	if GameState.CurrentItemType() != "round":
+		_show_save_toast("DEV  NOT IN A ROUND")
+		return
+	_show_save_toast("DEV  SKIP NODE")
+	_end_timer.stop()
+	_handy_stop()
+	FunscriptPlayer.Stop()
+	InventoryService.ClearRoundScopedEffects()
+	_remove_release_button()
+	_exit_boss_mode()
+	_video.stop()
+	_video.stream = null
+	_paused = false
+	if GameState.IsLastRound():
+		_transition_to_end_screen()
+		return
+	await _transition_swap(
+		func() -> void:
+			GameState.Advance()
+			_load_current_item()
+	)
 
 
 # Triggered by the checkpoint banner's "Save & Quit" button (also by the
@@ -1980,6 +2336,95 @@ func _on_save_item_used() -> void:
 		_show_save_toast("✓  PROGRESS SAVED")
 	else:
 		_show_save_toast("✕  SAVE FAILED")
+
+
+# Divine Summoning — same lift as the resolvable-round clear button (item already consumed).
+func _on_clear_effects_requested() -> void:
+	_cleanse_curse()
+
+
+# Time Control — early-end as a clean finish (item already consumed).
+func _on_skip_round_requested() -> void:
+	# Close inventory if open so the transition isn't under the panel.
+	if is_instance_valid(_inventory_panel):
+		_inventory_panel.close()
+	await _on_round_ended()
+
+
+# shave_cooldown mid-run: only meaningful if a pending Force-Quit cooldown was
+# stamped this session (usually used from Journey Select instead).
+func _on_shave_cooldown_requested(hours: int) -> void:
+	if _pending_cooldown_until <= 0:
+		_show_save_toast("✕  NO ACTIVE COOLDOWN")
+		return
+	_pending_cooldown_until = maxi(0, _pending_cooldown_until - hours * 3600)
+	_show_save_toast("✓  COOLDOWN −%dh" % hours)
+
+
+# ---------------------------------------------------------------------------
+# Inventory item gates (called by InventoryPanel before consuming)
+# ---------------------------------------------------------------------------
+
+
+# "" = ok to activate; "disabled" = grey out (clear_effects); otherwise toast and keep item.
+func inventory_activation_gate(data: Dictionary) -> String:
+	var kind: String = str(data.get("kind", ""))
+	match kind:
+		"clear_effects":
+			return "" if _can_use_clear_effects() else "disabled"
+		"skip_round":
+			return _skip_round_block_reason()
+		"shave_cooldown":
+			if _pending_cooldown_until > int(Time.get_unix_time_from_system()):
+				return ""
+			return "✕  NO ACTIVE COOLDOWN"
+		_:
+			return ""
+
+
+func _can_use_clear_effects() -> bool:
+	if _is_overlay_open:
+		return false
+	var round: Dictionary = GameState.CurrentRound()
+	if round.is_empty():
+		return false
+	if bool(round.get("items_blocked", false)):
+		return false
+	if str(round.get("round_type", "normal")) != "effect":
+		return false
+	if not _effect_resolvable or _effect_resolved:
+		return false
+	return true
+
+
+# Non-empty = blocked (toast). Empty = allowed.
+func _skip_round_block_reason() -> String:
+	if _is_overlay_open:
+		return "✕  NOT DURING OVERLAY"
+	var round: Dictionary = GameState.CurrentRound()
+	if round.is_empty():
+		return "✕  NOT IN A ROUND"
+	if str(round.get("round_type", "normal")) == "boss":
+		return "✕  BLOCKED ON BOSS"
+	if bool(round.get("items_blocked", false)):
+		return "✕  ITEMS BLOCKED HERE"
+	# Must-release fail: skip would bypass punishment if we short-circuit; block.
+	if ReleaseLogic.fail_on_clean_finish(_release_cfg, false):
+		return "✕  MUST RELEASE — CAN'T SKIP"
+	if GameState.IsLastRound():
+		return "✕  LAST ROUND — CAN'T SKIP"
+	return ""
+
+
+# Duration override for round-scoped modifiers (remaining round ms).
+func inventory_duration_override_ms(data: Dictionary) -> int:
+	if not bool(data.get("round_scoped", false)):
+		return -1
+	var left: float = _round_time_left()
+	if left > 0.0:
+		return maxi(1000, int(left * 1000.0))
+	# Unknown length — keep attenuation for a long fallback window.
+	return 3_600_000
 
 
 # Brief auto-dismissing notification used after the save_now item fires. Keeps
@@ -2395,6 +2840,21 @@ func _input(event: InputEvent) -> void:
 					if not _is_overlay_open:
 						_on_session_settings_pressed()
 						get_viewport().set_input_as_handled()
+				KEY_R:
+					# R: Release — same as the HUD button when the round enables it.
+					if not _is_overlay_open:
+						_on_release_pressed()
+						get_viewport().set_input_as_handled()
+				KEY_F8:
+					# Dev: complete current round (or skip cooldown gap).
+					if SettingsService.get_dev_cheats_enabled():
+						_dev_complete_round()
+						get_viewport().set_input_as_handled()
+				KEY_F9:
+					# Dev: skip node without awards (or skip cooldown gap).
+					if SettingsService.get_dev_cheats_enabled():
+						_dev_skip_node()
+						get_viewport().set_input_as_handled()
 				# Arrow keys nudge the stroke range, but only while the drawer is open: ↑/↓ max, →/← min.
 				KEY_UP:
 					if is_instance_valid(_session_panel):
@@ -2531,6 +2991,9 @@ func _connect_signals() -> void:
 	# save_now utility item: writes a save mid-round so the player can resume
 	# from the start of this round if they quit later. Doesn't end the run.
 	InventoryService.connect("SaveRequested", _on_save_item_used)
+	InventoryService.connect("ClearEffectsRequested", _on_clear_effects_requested)
+	InventoryService.connect("SkipRoundRequested", _on_skip_round_requested)
+	InventoryService.connect("ShaveCooldownRequested", _on_shave_cooldown_requested)
 
 	# Device-connection signals — surface a banner when the currently selected
 	# output device drops its connection, and clear it on reconnect. We watch

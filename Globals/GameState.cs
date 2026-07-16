@@ -68,6 +68,27 @@ public partial class GameState : Node
         return true;
     }
 
+    // Mid-run teleport used by Release fail_jump / punish miss: move to `nodeId`
+    // while preserving flags, discovery, play log, and RoundNumber. Lands via
+    // EnterCurrent so the target's set_flags still apply. Returns false when
+    // the id is missing (caller should not wipe the current node).
+    public bool JumpToNode(string nodeId)
+    {
+        if (nodeId == "" || !_nodes.ContainsKey(nodeId))
+            return false;
+        _currentId = nodeId;
+        EnterCurrent();
+        return true;
+    }
+
+    // Mid-round loop_until_clean: stay on the current round node without bumping
+    // RoundNumber or clearing flags. Returns false when not on a round. GameLoop
+    // reloads media after this returns true.
+    public bool RestartCurrentRound()
+    {
+        return TypeOf(_currentId) == "round";
+    }
+
     // ---------------------------------------------------------------------------
     // Walking
     // ---------------------------------------------------------------------------
@@ -117,6 +138,13 @@ public partial class GameState : Node
 
     // Whether a run flag is currently set (used by flag-conditional fork resolution).
     public bool HasFlag(string name) => _flags.Contains(name);
+
+    // Mid-round flag write (Release stamp_flag / punish success). Idempotent.
+    public void SetFlag(string name)
+    {
+        if (name != "")
+            _flags.Add(name);
+    }
 
     // Test-play: pre-set flags so a Test-From-Here run can exercise flag-gated forks. Adds on top of
     // whatever the start/seek node already set.

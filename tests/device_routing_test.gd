@@ -30,6 +30,11 @@ func test_parse_actuator_id_malformed() -> void:
 	assert_bool(DeviceRouting.parse_actuator_id("Edge 2#0:vibrate:x").is_empty()).is_true()
 
 
+func test_device_routing_restim_stroke_target() -> void:
+	var plan: Dictionary = DeviceRouting.resolve("restim", {}, {}, _catalog())
+	assert_str(str((plan["stroke"] as Dictionary).get("backend", ""))).is_equal("restim")
+
+
 func test_serial_stroke_target() -> void:
 	var plan: Dictionary = DeviceRouting.resolve("serial", {}, {}, _catalog())
 	assert_str(str((plan["stroke"] as Dictionary).get("backend", ""))).is_equal("serial")
