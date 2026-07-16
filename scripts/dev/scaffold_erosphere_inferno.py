@@ -1,23 +1,90 @@
 #!/usr/bin/env python3
 """Scaffold Erosphere Inferno Format 2 journey under local/journeys/erosphere-inferno/.
 
-Canto I main path + all C01 EP subgraphs (cooldown gaps, punish sessions, unlocks).
-Media: content/ should be a directory junction/symlink to E:\\CYOA-Erosphere\\v1
+Canto I main path + all C01 EP subgraphs (cooldown gaps, punish sessions).
+Skill unlock video/shop chains come from erosphere-inferno/skill_unlocks.json
+(copied into the journey folder on generate). Media: content/ junctions to v1
 (see scripts/dev/scaffold-erosphere-inferno.ps1).
 """
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+DATA_DIR = Path(__file__).resolve().parent / "erosphere-inferno"
+UNLOCKS_PATH = DATA_DIR / "skill_unlocks.json"
 OUT_DIR = REPO / "local" / "journeys" / "erosphere-inferno"
 OUT_JSON = OUT_DIR / "journey.json"
 
 X_STEP = 280
 Y_MAIN = 0
 Y_EP = 420
+
+
+def load_skill_unlocks() -> dict:
+    raw = json.loads(UNLOCKS_PATH.read_text(encoding="utf-8"))
+    if not isinstance(raw.get("skills"), list):
+        raise ValueError(f"{UNLOCKS_PATH} missing skills[]")
+    return raw
+
+
+def _set_out(nodes_by_id: dict[str, dict], nid: str, to: str) -> None:
+    n = nodes_by_id.get(nid)
+    if n is None:
+        raise KeyError(f"skill_unlocks insert_after/video missing node: {nid}")
+    n["out"] = [{"to": to}]
+
+
+def apply_skill_unlocks(nodes: list[dict], unlocks: dict, *, y_row: float = Y_EP + 1000) -> None:
+    """Wire unlock video + fixed shop chains from skill_unlocks.json."""
+    nodes_by_id = {n["id"]: n for n in nodes}
+    x = 0.0
+    for skill in unlocks.get("skills", []):
+        if not skill.get("enabled", False):
+            continue
+        item_id = skill["item_id"]
+        name = skill.get("name", item_id)
+        video = skill.get("unlock_video", "")
+        vid_id = skill["video_node_id"]
+        shop_id = skill["shop_node_id"]
+        continue_to = skill.get("continue_to")
+        insert_after = skill.get("insert_after")
+
+        if shop_id not in nodes_by_id:
+            shop = shop_node(
+                shop_id,
+                name,
+                [item_id],
+                out=continue_to,
+                pos=(x + X_STEP, y_row),
+            )
+            nodes.append(shop)
+            nodes_by_id[shop_id] = shop
+        elif continue_to:
+            _set_out(nodes_by_id, shop_id, continue_to)
+
+        if vid_id in nodes_by_id:
+            # Unlock video already in graph (e.g. Inferno_C01_A01) — attach shop after it.
+            _set_out(nodes_by_id, vid_id, shop_id)
+        else:
+            vid = round_node(
+                vid_id,
+                name,
+                video,
+                items_blocked=True,
+                out=shop_id,
+                pos=(x, y_row),
+            )
+            nodes.append(vid)
+            nodes_by_id[vid_id] = vid
+
+        if insert_after:
+            _set_out(nodes_by_id, insert_after, vid_id)
+
+        x += 3 * X_STEP
+        y_row += 120
+
 
 
 def round_node(
@@ -275,7 +342,7 @@ def build() -> dict:
         )
     )
 
-    # Divine Summoning unlock video → Anjelica's Dream
+    # Divine Summoning unlock video — shop attached from skill_unlocks.json
     nodes.append(
         round_node(
             "inferno_C01_A01",
@@ -283,20 +350,11 @@ def build() -> dict:
             "Inferno_C01_A01_Divine_Summoning.mp4",
             length_s=6.249,
             items_blocked=True,
-            out="c01_divine_shop",
+            out="inferno_C01_009",
             pos=(x, Y_MAIN + 160),
         )
     )
-    nodes.append(
-        shop_node(
-            "c01_divine_shop",
-            "Divine Summoning",
-            ["erosphere_divine_summoning"],
-            out="inferno_C01_009",
-            pos=(x + X_STEP, Y_MAIN + 160),
-        )
-    )
-    x2 = x + 2 * X_STEP
+    x2 = x + X_STEP
 
     nodes.append(
         round_node(
@@ -421,7 +479,7 @@ def build() -> dict:
             )
         )
 
-    # EP5: 5× (gap 1d → Charon) → amulet unlock → C01_006; +75 on final only
+    # EP5: 5× (gap 1d → Charon); unlock chain from skill_unlocks.json after s5
     y = Y_EP + 520
     nodes += [
         round_node(
@@ -444,7 +502,7 @@ def build() -> dict:
     for i in range(1, 6):
         sess = f"c01_ep5_s{i}"
         cd = f"c01_ep5_cd{i}"
-        nxt = f"c01_ep5_cd{i + 1}" if i < 5 else "c01_amulet_vid"
+        nxt = f"c01_ep5_cd{i + 1}" if i < 5 else "inferno_C01_006"
         coins = 75 if i == 5 else 0
         nodes.append(gap(cd, 1, sess, pos=(ep_x0 + (1 + i * 2) * X_STEP, y), label=f"EP5 wait {i}"))
         nodes.append(
@@ -460,25 +518,8 @@ def build() -> dict:
                 pos=(ep_x0 + (2 + i * 2) * X_STEP, y),
             )
         )
-    nodes += [
-        round_node(
-            "c01_amulet_vid",
-            "The Amulet of Sustenance",
-            "Inferno_C01_I01_The_Amulet_of_Sustenance.mp4",
-            items_blocked=True,
-            out="c01_amulet_shop",
-            pos=(ep_x0 + 13 * X_STEP, y),
-        ),
-        shop_node(
-            "c01_amulet_shop",
-            "Amulet of Sustenance",
-            ["erosphere_amulet"],
-            out="inferno_C01_006",
-            pos=(ep_x0 + 14 * X_STEP, y),
-        ),
-    ]
 
-    # EP6: 5× (gap 2d → Charon + Battle) → Psychic Divorce → C01_006_5
+    # EP6: 5× (gap 2d → Charon + Battle); unlock chain from skill_unlocks.json after s5b
     y = Y_EP + 680
     nodes += [
         round_node(
@@ -502,7 +543,7 @@ def build() -> dict:
         cd = f"c01_ep6_cd{i}"
         s_a = f"c01_ep6_s{i}a"
         s_b = f"c01_ep6_s{i}b"
-        nxt_cd = f"c01_ep6_cd{i + 1}" if i < 5 else "c01_psychic_vid"
+        nxt_cd = f"c01_ep6_cd{i + 1}" if i < 5 else "inferno_C01_006_5"
         coins_b = 90 if i == 5 else 0
         nodes.append(gap(cd, 2, s_a, pos=(ep_x0 + (1 + i * 3) * X_STEP, y), label=f"EP6 wait {i}"))
         nodes.append(
@@ -530,23 +571,6 @@ def build() -> dict:
                 pos=(ep_x0 + (3 + i * 3) * X_STEP, y),
             )
         )
-    nodes += [
-        round_node(
-            "c01_psychic_vid",
-            "Psychic Divorce",
-            "Inferno_C01_S01_Psychic_Divorce.mp4",
-            items_blocked=True,
-            out="c01_psychic_shop",
-            pos=(ep_x0 + 18 * X_STEP, y),
-        ),
-        shop_node(
-            "c01_psychic_shop",
-            "Psychic Divorce",
-            ["erosphere_psychic_divorce"],
-            out="inferno_C01_006_5",
-            pos=(ep_x0 + 19 * X_STEP, y),
-        ),
-    ]
 
     # EP7: EP → Fate → back to C01_009 (no Freeplay)
     y = Y_EP + 840
@@ -569,33 +593,22 @@ def build() -> dict:
         ),
     ]
 
-    # First skill shop after Charon: only Feign Death (free unlock + pay-on-use).
-    # Later skills unlock via their story shops / Canto II (not this stop).
-    nodes.append(
-        shop_node(
-            "c01_skills_shop",
-            "Feign Death",
-            ["erosphere_feign_death"],
-            out="inferno_C01_006",
-            pos=(X_STEP * 5, Y_MAIN - 280),
-        )
-    )
-    # Rewire Charon out through skills shop
-    for n in nodes:
-        if n["id"] == "inferno_C01_005":
-            n["out"] = [{"to": "c01_skills_shop"}]
-            break
+    unlocks = load_skill_unlocks()
+    apply_skill_unlocks(nodes, unlocks)
 
     journey = {
         "Name": "Erosphere Inferno",
         "Author": "Erosphere (port)",
-        "Description": "Canto I scaffold + EP punishment matrix. Canto II TBD. Media via content/ → v1 junction.",
+        "Description": (
+            "Canto I scaffold + EP punishment matrix. Skill unlocks from "
+            "skill_unlocks.json. Canto II TBD."
+        ),
         "Difficulty": "Hard",
         "Tags": ["erosphere", "inferno", "canto-i"],
         "MapEnabled": True,
         "MapFog": False,
         "MapFogReveal": 1,
-        "UnlockPayPerUse": True,
+        "UnlockPayPerUse": bool(unlocks.get("unlock_pay_per_use", True)),
         "Format": 2,
         "Start": "c01_intro_sb",
         "Nodes": nodes,
@@ -609,7 +622,12 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     data = build()
     OUT_JSON.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # Pack-local copy so the journey folder owns the unlock schedule.
+    (OUT_DIR / "skill_unlocks.json").write_text(
+        UNLOCKS_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     print(f"Wrote {OUT_JSON} ({len(data['Nodes'])} nodes)")
+    print(f"Wrote {OUT_DIR / 'skill_unlocks.json'}")
 
 
 if __name__ == "__main__":
