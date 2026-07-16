@@ -165,6 +165,7 @@ public partial class GameState : Node
         foreach (var edgeVariant in OutEdges(_currentId))
         {
             var e = edgeVariant.AsGodotDictionary();
+            var to = e.ContainsKey("to") ? e["to"].AsString() : "";
             paths.Add(new Dictionary
             {
                 ["name"] = e.ContainsKey("name") ? e["name"].AsString() : "",
@@ -175,6 +176,10 @@ public partial class GameState : Node
                 ["required_item"] = e.ContainsKey("required_item") ? e["required_item"].AsString() : "",
                 ["cost"] = e.ContainsKey("cost") ? e["cost"].AsInt32() : 0,
                 ["required_flag"] = e.ContainsKey("required_flag") ? e["required_flag"].AsString() : "",
+                // Rounds reachable down this branch (longest path — matches TotalRounds'
+                // progress-bar semantics). ForkScreen renders this as the "N ROUNDS" tag;
+                // it was never populated after the graph migration, so it always read 0.
+                ["round_count"] = LongestRoundPath(to),
             });
         }
         return new Dictionary

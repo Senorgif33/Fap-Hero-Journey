@@ -122,6 +122,10 @@ var _overlay_map_allowed: bool = false
 # True for the duration of a boss round (set when the round loads, cleared at
 # round end). Drives item lockout, the red frame, and the climax pulse.
 var _is_boss_round: bool = false
+# Pool ("encounter") round: set when a picked entry still owes its mystery reveal card. The
+# card is played in _start_round_after_gates (before any boss intro), not in _begin_round, so
+# a rolled boss stays a surprise until the card slides away.
+var _pending_encounter_card: bool = false
 var _boss_frame: Panel = null
 
 # Cursed round: random negative effect(s) rolled at the start. Distinct from a
@@ -526,6 +530,15 @@ func _load_current_round() -> void:
 	# so every downstream reader (label, enter mode, reveal card) sees generic fields.
 	round.merge(JourneyData.normalize_effect_round(round), true)
 
+	# Pool ("encounter") round: weighted-pick one entry NOW and fold its media + type onto this
+	# round copy, so everything below (type flags, label, boss intro) sees the CHOSEN encounter's
+	# type — a rolled boss telegraphs with its own intro card. The mystery reveal card is deferred
+	# to _start_round_after_gates so it plays before that boss intro. Must run before the flags.
+	_pending_encounter_card = false
+	if str(round.get("round_type", "normal")) == "pool":
+		_resolve_pool_round(round)
+		_pending_encounter_card = bool(round.get("show_encounter", true))
+
 	var total: int = GameState.TotalRounds()
 	var num: int = GameState.RoundNumber
 
@@ -537,6 +550,42 @@ func _load_current_round() -> void:
 	var rtype: String = round.get("round_type", "normal")
 	_is_boss_round = rtype == "boss"
 	_is_effect_round = rtype == "effect"
+	# A pool round mid-mystery keeps a neutral "???" label until its card slides away, so the HUD
+	# never flashes "BOSS" and spoils a rolled encounter; _start_round_after_gates reveals it.
+	if _pending_encounter_card:
+		_round_lbl.text = "ROUND  %d / %d  —  ???" % [num, total]
+	else:
+		_apply_round_label(round)
+
+	# Author-marked checkpoint rounds offer a Save & Quit opt-in before round
+	# playback — honoured on every round type, bosses included (the banner
+	# precedes the boss intro). Continuing proceeds to the round's normal start.
+	if round.get("is_checkpoint", false):
+		_show_checkpoint_banner(round)
+	else:
+		_start_round_after_gates(round)
+
+
+# Starts a round once any checkpoint gate is cleared: a pool round plays its mystery reveal
+# first (before any boss intro, so a rolled boss stays hidden until the card slides away),
+# then boss rounds telegraph with their intro card (playback waits for BEGIN); everything
+# else begins now.
+func _start_round_after_gates(round: Dictionary) -> void:
+	if _pending_encounter_card:
+		_pending_encounter_card = false
+		await _show_encounter_card()
+		_apply_round_label(round)  # reveal the real (possibly BOSS) label now the card is done
+	if _is_boss_round:
+		_show_boss_intro(round)
+	else:
+		_begin_round(round)
+
+
+# Sets the HUD round label from the round's resolved type. Split out so a pool round can defer
+# it until after its mystery card (see _load_current_round / _start_round_after_gates).
+func _apply_round_label(round: Dictionary) -> void:
+	var total: int = GameState.TotalRounds()
+	var num: int = GameState.RoundNumber
 	if _is_boss_round:
 		_round_lbl.text = (
 			"⚔  BOSS  %d / %d  —  %s" % [num, total, (round.get("name", "") as String).to_upper()]
@@ -550,23 +599,6 @@ func _load_current_round() -> void:
 			"%s %d / %d  —  %s" % [prefix, num, total, (round.get("name", "") as String).to_upper()]
 		)
 
-	# Author-marked checkpoint rounds offer a Save & Quit opt-in before round
-	# playback — honoured on every round type, bosses included (the banner
-	# precedes the boss intro). Continuing proceeds to the round's normal start.
-	if round.get("is_checkpoint", false):
-		_show_checkpoint_banner(round)
-	else:
-		_start_round_after_gates(round)
-
-
-# Starts a round once any checkpoint gate is cleared: boss rounds telegraph with
-# their intro card first (playback waits for BEGIN); everything else begins now.
-func _start_round_after_gates(round: Dictionary) -> void:
-	if _is_boss_round:
-		_show_boss_intro(round)
-	else:
-		_begin_round(round)
-
 
 # Loads the round's scripts + video and starts playback. For boss rounds this
 # runs after the intro card's BEGIN; for normal rounds, immediately.
@@ -576,17 +608,9 @@ func _begin_round(round: Dictionary) -> void:
 	# _video.play() below doesn't reset the paused flag on its own.
 	_video.paused = false
 
-	# Pool ("encounter") round: weighted-pick one entry and swap its media into this
-	# round (a deep copy — safe to mutate), then (unless the author turned it off)
-	# reveal it behind a mystery card. Playback waits for the card. Must run before
-	# the media loads below.
-	if str(round.get("round_type", "normal")) == "pool":
-		_resolve_pool_round(round)
-		if bool(round.get("show_encounter", true)):
-			await _show_encounter_card()
-
-	# The round's effective length (pool rounds carry the chosen entry's after the
-	# resolve above; everything else its own). Read at round end for the play log.
+	# The round's effective length (a pool round already folded the chosen entry's media +
+	# stats in during _load_current_round; everything else carries its own). Read at round end
+	# for the play log.
 	_active_round_length_ms = int(round.get("length_ms", 0))
 
 	var fs_path: String = round.get("funscript_path", "")
@@ -1062,6 +1086,15 @@ func _resolve_pool_round(round: Dictionary) -> void:
 	# no-video timer, and the end-screen recap) reflect what actually played.
 	round["length_ms"] = int(e.get("length_ms", 0))
 	round["action_count"] = int(e.get("action_count", 0))
+	# Adopt the chosen entry's TYPE so the round plays as that type. "pool" collapses to the
+	# picked encounter's own type — normal, or boss (with its forced modifiers / intro card).
+	var etype: String = str(e.get("round_type", "normal"))
+	round["round_type"] = etype
+	if etype == "boss":
+		round["boss_modifiers"] = (e.get("boss_modifiers", []) as Array).duplicate(true)
+		round["boss_tagline"] = str(e.get("boss_tagline", ""))
+		round["boss_image"] = str(e.get("boss_image", ""))
+		round["sensory"] = (e.get("sensory", []) as Array).duplicate(true)
 
 
 # The mystery "ENCOUNTER!" reveal for a pool round: slides in from the right, holds,
@@ -1579,6 +1612,17 @@ func _on_round_ended() -> void:
 		CoinService.AddCoins(coins)
 	if endure_reward > 0:
 		_show_save_toast("✦  CURSE ENDURED  +♦ %d" % endure_reward)
+
+	# Optional item reward — granted when the round ends (parity with storyboards). Read from
+	# `_cur` (the round captured above, still current — Advance happens inside the transition).
+	# Skip silently if the id no longer resolves (item deleted from the registry after authoring),
+	# so a stale reward never shows a misleading "RECEIVED" toast.
+	var award_item: String = str(_cur.get("award_item", ""))
+	if award_item != "":
+		var award_data: Dictionary = InventoryService.GetItemData(award_item)
+		if not award_data.is_empty():
+			InventoryService.AddItem(award_item)
+			_show_save_toast("✦  RECEIVED: %s" % str(award_data.get("name", award_item)).to_upper())
 
 	if GameState.IsLastRound():
 		_transition_to_end_screen()

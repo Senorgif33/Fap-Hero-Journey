@@ -144,9 +144,13 @@ func _make_card(index: int, path_data: Dictionary) -> Control:
 		desc_lbl.add_theme_font_size_override("font_size", 13)
 		col.add_child(desc_lbl)
 
-	var rounds: Array = path_data.get("rounds", [])
+	# round_count = rounds reachable down this branch (GameState.CurrentFork fills it from
+	# LongestRoundPath). Fall back to a legacy "rounds" array if ever present.
+	var round_count: int = int(
+		path_data.get("round_count", (path_data.get("rounds", []) as Array).size())
+	)
 	var rounds_lbl: Label = Label.new()
-	rounds_lbl.text = "%d ROUND%s" % [rounds.size(), "S" if rounds.size() != 1 else ""]
+	rounds_lbl.text = "%d ROUND%s" % [round_count, "S" if round_count != 1 else ""]
 	rounds_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	rounds_lbl.add_theme_color_override("font_color", UITheme.PURPLE_BRIGHT)
 	rounds_lbl.add_theme_font_size_override("font_size", 13)

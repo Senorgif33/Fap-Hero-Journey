@@ -77,6 +77,9 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		"map_fog": bool(data.get("MapFog", false)),
 		# Fog reveal depth: ghost levels shown ahead of the visited trail (< 0 = whole structure ghosted).
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
+		# Version stamps (absent on pre-0.6.0 journeys → blank, which always passes the gate).
+		"min_version": str(data.get("MinVersion", "")),
+		"created_with": str(data.get("CreatedWith", "")),
 		# Redirect overlay (skip/converge/end), composed onto the graph in parse_graph.
 		"redirects": data.get("Redirects", {}),
 		"rounds": [],
@@ -344,6 +347,9 @@ static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dicti
 		"map_enabled": bool(data.get("MapEnabled", true)),
 		"map_fog": bool(data.get("MapFog", false)),
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
+		# Version stamps (absent on pre-0.6.0 journeys → blank, which always passes the gate).
+		"min_version": str(data.get("MinVersion", "")),
+		"created_with": str(data.get("CreatedWith", "")),
 		"cover_path": find_cover_image(path),
 		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
 		"rounds": [],

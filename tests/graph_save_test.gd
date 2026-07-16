@@ -69,6 +69,7 @@ func test_coerce_fork_fields() -> void:
 func test_coerce_round_fills_baseline_defaults() -> void:
 	var out := JourneyData.coerce_node_save_data("round", {"name": "A"})
 	assert_str(out["round_type"]).is_equal("normal")
+	assert_str(out["award_item"]).is_equal("")  # no reward by default
 	assert_bool(out["is_checkpoint"]).is_false()
 	assert_bool(out["effect_random"]).is_true()
 	assert_bool(out["resolvable"]).is_false()
@@ -82,6 +83,13 @@ func test_coerce_round_fills_baseline_defaults() -> void:
 	# Retired legacy keys are dropped on save (migrate-on-save).
 	assert_bool(out.has("curses")).is_false()
 	assert_bool(out.has("boons")).is_false()
+
+
+# A round's optional item reward (award_item) is preserved and stringified on save, so the
+# runtime can grant it at round end (parity with the storyboard reward).
+func test_coerce_round_preserves_award_item() -> void:
+	var out := JourneyData.coerce_node_save_data("round", {"name": "A", "award_item": "cleanse"})
+	assert_str(out["award_item"]).is_equal("cleanse")
 
 
 # Node-level keys (type / node_id / paths) never belong inside on-disk node.data.

@@ -416,10 +416,12 @@ static func _resolve_round_paths(d: Dictionary, base: String) -> void:
 	d["boss_image"] = _abs(str(d.get("boss_image", "")), base)
 	_resolve_channels(d.get("axis_scripts", {}), base)
 	_resolve_channels(d.get("vib_scripts", {}), base)
-	# Pool round: each encounter entry carries its own media set — resolve them too.
+	# Pool round: each encounter entry carries its own media set — resolve them too (incl. a
+	# boss entry's intro image).
 	for entry: Dictionary in d.get("pool_entries", []):
 		entry["funscript_path"] = _abs(str(entry.get("funscript_path", "")), base)
 		entry["video_path"] = _abs(str(entry.get("video_path", "")), base)
+		entry["boss_image"] = _abs(str(entry.get("boss_image", "")), base)
 		_resolve_channels(entry.get("axis_scripts", {}), base)
 		_resolve_channels(entry.get("vib_scripts", {}), base)
 

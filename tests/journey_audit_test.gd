@@ -360,6 +360,45 @@ func test_statistics() -> void:
 		assert_float(float(arrive_score[id])).is_equal_approx(50.0, 0.01)
 
 
+# A pool ("encounter") round's score/length is a RANGE — the runtime rolls one entry — so the
+# interval walk must bound it with round_score_bounds / round_length_bounds rather than collapse
+# it to the flat mean. (Before this, a pool round had no round-level funscript and audited as a
+# zero-score, zero-length round.)
+func test_pool_round_score_and_length_bounds() -> void:
+	var graph := {
+		"start": "p",
+		"nodes": {"p": {"type": "round", "data": {"coins": 0, "round_type": "pool"}, "out": []}},
+	}
+	var result := _audit(
+		graph,
+		{
+			"round_scores": {"p": 40},  # weighted mean (what the MC pass models)
+			"round_lengths": {"p": 60000},
+			"round_score_bounds": {"p": {"lo": 10, "hi": 90}},
+			"round_length_bounds": {"p": {"lo": 30000, "hi": 120000}},
+		}
+	)
+	var stats: Dictionary = result["stats"]
+	assert_int(int((stats["total_score"] as Dictionary)["lo"])).is_equal(10)
+	assert_int(int((stats["total_score"] as Dictionary)["hi"])).is_equal(90)
+	assert_int(int((stats["duration_ms"] as Dictionary)["lo"])).is_equal(30000)
+	assert_int(int((stats["duration_ms"] as Dictionary)["hi"])).is_equal(120000)
+
+
+# The bounds keys are optional: an ordinary round supplies none, and its flat score/length must
+# still bound itself (the new ctx keys must not disturb existing journeys).
+func test_round_without_bounds_uses_flat_value() -> void:
+	var graph := {
+		"start": "r1", "nodes": {"r1": {"type": "round", "data": {"coins": 0}, "out": []}}
+	}
+	var result := _audit(graph, {"round_scores": {"r1": 50}, "round_lengths": {"r1": 60000}})
+	var stats: Dictionary = result["stats"]
+	assert_int(int((stats["total_score"] as Dictionary)["lo"])).is_equal(50)
+	assert_int(int((stats["total_score"] as Dictionary)["hi"])).is_equal(50)
+	assert_int(int((stats["duration_ms"] as Dictionary)["lo"])).is_equal(60000)
+	assert_int(int((stats["duration_ms"] as Dictionary)["hi"])).is_equal(60000)
+
+
 # Coverage: a flag set but never required by any fork choice is an orphan;
 # adding a checker clears the finding.
 func test_flag_unused_coverage() -> void:

@@ -32,3 +32,5 @@ Desktop.ini
 HANDOFF.md
 export_presets.cfg
 *.md
+!CHANGELOG.md
+!README.md
