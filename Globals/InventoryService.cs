@@ -249,7 +249,7 @@ public partial class InventoryService : Node
             ["id"] = "erosphere_amulet",
             ["name"] = "Amulet of Sustenance",
             ["description"] = "Shaves 24 hours off an active journey cooldown. Single-use.",
-            ["category"] = "utility",
+            ["category"] = "modifier",
             ["price"] = 0,
             ["duration_ms"] = 0,
             ["kind"] = "shave_cooldown",
@@ -260,7 +260,7 @@ public partial class InventoryService : Node
             ["id"] = "erosphere_divine_summoning",
             ["name"] = "Divine Summoning",
             ["description"] = "Clears active effects on a resolvable effect round. Only usable when effects can be cleared.",
-            ["category"] = "utility",
+            ["category"] = "modifier",
             ["price"] = 40,
             ["duration_ms"] = 0,
             ["kind"] = "clear_effects",
@@ -270,7 +270,7 @@ public partial class InventoryService : Node
             ["id"] = "erosphere_psychic_divorce",
             ["name"] = "Psychic Divorce",
             ["description"] = "Shaves 48 hours off an active journey cooldown.",
-            ["category"] = "utility",
+            ["category"] = "modifier",
             ["price"] = 60,
             ["duration_ms"] = 0,
             ["kind"] = "shave_cooldown",
@@ -304,7 +304,7 @@ public partial class InventoryService : Node
             ["id"] = "erosphere_time_control",
             ["name"] = "Time Control",
             ["description"] = "Ends the current round early and advances as a clean finish. Blocked on bosses and item-gated rounds.",
-            ["category"] = "utility",
+            ["category"] = "modifier",
             ["price"] = 40,
             ["duration_ms"] = 0,
             ["kind"] = "skip_round",
@@ -475,6 +475,8 @@ public partial class InventoryService : Node
     // Pays registry price and starts the modifier effect. Does not consume an
     // inventory slot. Returns false if PPU is off, not unlocked, not a modifier, or broke.
     // durationOverrideMs >= 0 replaces item duration (round-scoped volume attenuate).
+    // Instant kinds (clear_effects / skip_round / shave_cooldown) fire the same
+    // signals as ActivateItem after the coin spend.
     public bool ActivateUnlocked(string id, int durationOverrideMs = -1)
     {
         if (!UnlockPayPerUse || !IsUnlocked(id) || !IsModifier(id))
@@ -490,6 +492,31 @@ public partial class InventoryService : Node
             return false;
         if (price > 0 && !coins.SpendCoins(price))
             return false;
+
+        string itemKind = item.ContainsKey("kind") ? item["kind"].AsString() : "";
+        if (itemKind == "clear_effects")
+        {
+            EmitSignal(SignalName.ClearEffectsRequested);
+            return true;
+        }
+        if (itemKind == "skip_round")
+        {
+            EmitSignal(SignalName.SkipRoundRequested);
+            return true;
+        }
+        if (itemKind == "shave_cooldown")
+        {
+            int hours = item.ContainsKey("shave_hours") ? item["shave_hours"].AsInt32() : 24;
+            // Amulet is single-use once unlocked — drop the unlock after shaving.
+            if (id == "erosphere_amulet")
+            {
+                _unlocked.Remove(id);
+                EmitSignal(SignalName.UnlockedChanged);
+                EmitSignal(SignalName.InventoryChanged);
+            }
+            EmitSignal(SignalName.ShaveCooldownRequested, hours);
+            return true;
+        }
 
         return _StartEffectFromItem(item, durationOverrideMs);
     }

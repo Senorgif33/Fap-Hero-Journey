@@ -989,17 +989,29 @@ func _clear_cooldown_shave_buttons() -> void:
 	_cooldown_shave_btns.clear()
 
 
-# When Resume is cooldown-locked, offer inventory shave items from the save.
+# When Resume is cooldown-locked, offer shave items from save inventory charges
+# and from unlocked modifiers (Inferno PPU amulet / psychic divorce).
 func _offer_cooldown_shave_buttons(folder_name: String) -> void:
 	_clear_cooldown_shave_buttons()
 	var save_data: Dictionary = JourneySaveService.read_save(folder_name)
-	var inv: Array = save_data.get("inventory", []) as Array
 	var action_row: HBoxContainer = _play_btn.get_parent()
 	var seen: Dictionary = {}
-	for entry: Variant in inv:
-		if not entry is Dictionary:
+	var candidates: Array = []
+
+	for entry: Variant in save_data.get("inventory", []) as Array:
+		if entry is Dictionary:
+			candidates.append({"src": "charge", "item": entry})
+	for uid: Variant in save_data.get("unlocked", []) as Array:
+		var id: String = str(uid)
+		if id == "":
 			continue
-		var item: Dictionary = entry
+		var data: Dictionary = InventoryService.GetItemData(id)
+		if not data.is_empty():
+			candidates.append({"src": "unlocked", "item": data})
+
+	for c: Variant in candidates:
+		var wrap: Dictionary = c
+		var item: Dictionary = wrap.get("item", {})
 		if str(item.get("kind", "")) != "shave_cooldown":
 			continue
 		var id: String = str(item.get("id", ""))
@@ -1007,40 +1019,65 @@ func _offer_cooldown_shave_buttons(folder_name: String) -> void:
 			continue
 		seen[id] = true
 		var hours: int = int(item.get("shave_hours", 24))
+		var price: int = int(item.get("price", 0))
 		var btn: Button = Button.new()
-		btn.text = "✧  %s (−%dh)" % [str(item.get("name", id)).to_upper(), hours]
+		var label: String = str(item.get("name", id)).to_upper()
+		if price > 0 and str(wrap.get("src", "")) == "unlocked":
+			btn.text = "✧  %s (−%dh, ♦ %d)" % [label, hours, price]
+		else:
+			btn.text = "✧  %s (−%dh)" % [label, hours]
 		_style_button(btn, UITheme.PURPLE_BRIGHT)
-		btn.pressed.connect(_on_cooldown_shave_pressed.bind(folder_name, id, hours))
+		btn.pressed.connect(
+			_on_cooldown_shave_pressed.bind(folder_name, id, hours, str(wrap.get("src", "charge")), price)
+		)
 		action_row.add_child(btn)
-		# Place after Resume.
 		if _resume_btn != null:
 			action_row.move_child(btn, _resume_btn.get_index() + 1)
 		UISound.mute_button(btn)
 		_cooldown_shave_btns.append(btn)
 
 
-func _on_cooldown_shave_pressed(folder_name: String, item_id: String, hours: int) -> void:
+func _on_cooldown_shave_pressed(
+	folder_name: String, item_id: String, hours: int, src: String, price: int
+) -> void:
 	var save_data: Dictionary = JourneySaveService.read_save(folder_name)
 	if save_data.is_empty():
 		return
 	var until: int = int(save_data.get("cooldown_until", 0))
 	if until <= 0 or hours <= 0:
 		return
-	var inv: Array = (save_data.get("inventory", []) as Array).duplicate()
-	var removed: bool = false
-	for i in range(inv.size()):
-		var entry: Variant = inv[i]
-		if entry is Dictionary and str((entry as Dictionary).get("id", "")) == item_id:
-			inv.remove_at(i)
-			removed = true
-			break
-	if not removed:
-		return
-	save_data["inventory"] = inv
+
+	if src == "unlocked":
+		var unlocked: Array = (save_data.get("unlocked", []) as Array).duplicate()
+		var idx: int = unlocked.find(item_id)
+		if idx < 0:
+			return
+		var coins: int = int(save_data.get("coins", 0))
+		if price > 0 and coins < price:
+			return
+		if price > 0:
+			save_data["coins"] = coins - price
+		unlocked.remove_at(idx)
+		# Amulet is single-use; Psychic stays re-unlockable via shop but this
+		# consume matches ActivateUnlocked amulet behavior. Psychic: remove too
+		# so one shave per unlock (rebuy/re-unlock at shop).
+		save_data["unlocked"] = unlocked
+	else:
+		var inv: Array = (save_data.get("inventory", []) as Array).duplicate()
+		var removed: bool = false
+		for i in range(inv.size()):
+			var entry: Variant = inv[i]
+			if entry is Dictionary and str((entry as Dictionary).get("id", "")) == item_id:
+				inv.remove_at(i)
+				removed = true
+				break
+		if not removed:
+			return
+		save_data["inventory"] = inv
+
 	save_data["cooldown_until"] = maxi(0, until - hours * 3600)
 	if not JourneySaveService.write_save(folder_name, save_data):
 		return
-	# Refresh Resume / shave UI for the current modal journey.
 	if not _current_journey.is_empty():
 		_refresh_resume_button(_current_journey)
 
