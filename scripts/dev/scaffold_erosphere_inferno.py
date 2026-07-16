@@ -569,22 +569,18 @@ def build() -> dict:
         ),
     ]
 
-    # Mid-path skill shops (optional pickups) — Feign / Blinding / Time Control after Charon
+    # First skill shop after Charon: only Feign Death (free unlock + pay-on-use).
+    # Later skills unlock via their story shops / Canto II (not this stop).
     nodes.append(
         shop_node(
             "c01_skills_shop",
-            "Inferno Skills",
-            [
-                "erosphere_feign_death",
-                "erosphere_blinding_light",
-                "erosphere_time_control",
-                "erosphere_psychic_divorce",
-            ],
+            "Feign Death",
+            ["erosphere_feign_death"],
             out="inferno_C01_006",
             pos=(X_STEP * 5, Y_MAIN - 280),
         )
     )
-    # Rewire Charon out through skills shop (optional stop)
+    # Rewire Charon out through skills shop
     for n in nodes:
         if n["id"] == "inferno_C01_005":
             n["out"] = [{"to": "c01_skills_shop"}]
@@ -599,7 +595,7 @@ def build() -> dict:
         "MapEnabled": True,
         "MapFog": False,
         "MapFogReveal": 1,
-        "UnlockPayPerUse": False,
+        "UnlockPayPerUse": True,
         "Format": 2,
         "Start": "c01_intro_sb",
         "Nodes": nodes,
