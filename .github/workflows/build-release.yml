@@ -167,6 +167,31 @@ jobs:
           Write-Host "Godot: $($console.FullName)"
           "GODOT_CONSOLE=$($console.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Godot's project initialization instantiates the C# autoloads (GameState, ScoreService,
+      # FunscriptPlayer, ...). The assembly they live in is built to .godot/mono/temp/bin/Debug,
+      # which is gitignored - so on a fresh checkout it does not exist, every C# autoload fails
+      # with "script '...cs' is not compiling", and the editor carries on in a broken state. That
+      # is what crashed the export on teardown: locally this never shows up because a build from
+      # the editor (Alt+B) has already produced the assembly.
+      #
+      # Debug is the configuration the editor loads; the export runs its own `dotnet publish` for
+      # the shipped binaries. Done with dotnet rather than Godot's --build-solutions because that
+      # would have to initialize the project first - the very thing that needs the assembly.
+      - name: Build C# assemblies
+        shell: pwsh
+        run: dotnet build "Fap Hero Journey.sln" -c Debug
+
+      # Guard: if the assembly is missing here, every C# autoload will fail during project init
+      # and the export will crash after packing. Fail now, where the cause is obvious.
+      - name: Verify C# assembly exists
+        shell: pwsh
+        run: |
+          $dll = ".godot/mono/temp/bin/Debug/Fap Hero Journey.dll"
+          if (-not (Test-Path -LiteralPath $dll)) {
+            throw "C# assembly not found at '$dll' - Godot's autoloads will fail to compile."
+          }
+          Write-Host "C# assembly OK: $((Get-Item -LiteralPath $dll).Length) bytes"
+
       # A fresh checkout has no .godot/ import cache. Exporting without importing first can
       # produce a broken pack, so do it explicitly rather than hoping the export covers it.
       #

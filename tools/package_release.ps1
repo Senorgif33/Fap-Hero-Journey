@@ -103,6 +103,12 @@ function Resolve-GodotExe {
 
 # Exports one preset headlessly. Godot can exit 0 having written nothing (bad preset name,
 # missing templates), so the output file is verified rather than trusted.
+#
+# Both facts are reported before deciding: Godot can also crash AFTER writing a complete pack
+# (it has been seen access-violating on teardown once "savepack" is DONE), and "crashed with no
+# output" vs "crashed with a full-size binary" are very different problems. We still refuse to
+# package from a crashed exporter - a build whose exporter segfaulted is not one to ship - but
+# the error should say which case it was.
 function Invoke-GodotExport {
     param([string]$GodotBin, [string]$PresetName, [string]$OutFile)
 
@@ -110,8 +116,24 @@ function Invoke-GodotExport {
     Write-Host "==> Exporting preset '$PresetName'" -ForegroundColor Cyan
     & $GodotBin --headless --path $RepoRoot --export-release $PresetName $OutFile
     $code = $LASTEXITCODE
-    if ($code -ne 0) { throw "Godot export failed for '$PresetName' (exit $code)." }
-    if (-not (Test-Path -LiteralPath $OutFile)) {
+
+    $produced = Test-Path -LiteralPath $OutFile
+    $size = 0
+    if ($produced) { $size = (Get-Item -LiteralPath $OutFile).Length }
+    Write-Host "    exit=$code  output_written=$produced  size=$size bytes"
+
+    if ($code -ne 0) {
+        $hint = ''
+        # 0xC0000005 - Windows access violation (reported as "signal 11" by Godot's handler).
+        if ($code -eq -1073741819 -or $code -eq 3221225477) {
+            $hint = " This is an access violation (0xC0000005)."
+            if ($produced) {
+                $hint += " The pack WAS written ($size bytes), so the crash is on teardown, after the export work."
+            }
+        }
+        throw "Godot export failed for '$PresetName' (exit $code).$hint"
+    }
+    if (-not $produced) {
         throw "Godot exited 0 but did not write '$OutFile' (preset '$PresetName')."
     }
 }
