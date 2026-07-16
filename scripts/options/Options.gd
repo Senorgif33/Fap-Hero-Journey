@@ -125,7 +125,6 @@ var _beat_bar_toggle: Button = null
 var _handy_status_lbl: Label = null
 var _update_check_toggle: Button = null
 var _ignore_cooldowns_toggle: Button = null
-var _dev_cheats_toggle: Button = null
 var _ui_sound_toggle: Button = null
 var _ui_sound_slider: HSlider = null
 var _ui_sound_value_lbl: Label = null
@@ -520,41 +519,12 @@ func _apply_layout() -> void:
 	)
 
 	var cd_hint: Label = Label.new()
-	cd_hint.text = "Dev/QA: Resume ignores calendar lockouts. Also unlocks Continue on cooldown Force-Quit banners."
+	cd_hint.text = (
+		"Dev/QA: Resume ignores calendar lockouts. Also unlocks Continue on cooldown Force-Quit banners."
+	)
 	cd_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(cd_hint, UITheme.SEPARATOR, 11, false)
 	display_section.add_child(cd_hint)
-
-	# ── Dev cheats (in-run hotkeys) ───────────────────────────────────────────
-	var cheat_row: HBoxContainer = HBoxContainer.new()
-	cheat_row.add_theme_constant_override("separation", 16)
-	display_section.add_child(cheat_row)
-
-	var cheat_lbl: Label = Label.new()
-	cheat_lbl.text = "DEV CHEATS (IN-RUN)"
-	cheat_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_label(cheat_lbl, UITheme.WHITE_SOFT, 14, false)
-	cheat_row.add_child(cheat_lbl)
-
-	_dev_cheats_toggle = Button.new()
-	_dev_cheats_toggle.toggle_mode = true
-	_dev_cheats_toggle.focus_mode = Control.FOCUS_NONE
-	_style_toggle(_dev_cheats_toggle, false)
-	cheat_row.add_child(_dev_cheats_toggle)
-	_dev_cheats_toggle.toggled.connect(
-		func(pressed: bool) -> void:
-			_style_toggle(_dev_cheats_toggle, pressed)
-			_save_settings()
-	)
-
-	var cheat_hint: Label = Label.new()
-	cheat_hint.text = (
-		"While playing: F8 = complete round (clean, awards coins). "
-		+ "F9 = skip node (no coins). Cooldown banners get Continue. Leave OFF for normal play."
-	)
-	cheat_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_style_label(cheat_hint, UITheme.SEPARATOR, 11, false)
-	display_section.add_child(cheat_hint)
 
 	for label_path in [
 		"ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeLabel",
@@ -1429,11 +1399,6 @@ func _load_settings() -> void:
 		_ignore_cooldowns_toggle.button_pressed = cd_on
 		_style_toggle(_ignore_cooldowns_toggle, cd_on)
 
-	if _dev_cheats_toggle != null:
-		var cheats_on: bool = SettingsService.get_dev_cheats_enabled()
-		_dev_cheats_toggle.button_pressed = cheats_on
-		_style_toggle(_dev_cheats_toggle, cheats_on)
-
 	if _ui_sound_toggle != null:
 		var ui_snd_on: bool = SettingsService.get_ui_sound_enabled()
 		# no_signal so opening Options doesn't fire the toggled handler (which would
@@ -1535,9 +1500,6 @@ func _save_settings() -> void:
 
 	if _ignore_cooldowns_toggle != null:
 		SettingsService.set_ignore_journey_cooldowns(_ignore_cooldowns_toggle.button_pressed)
-
-	if _dev_cheats_toggle != null:
-		SettingsService.set_dev_cheats_enabled(_dev_cheats_toggle.button_pressed)
 
 	if _ui_sound_toggle != null:
 		SettingsService.set_ui_sound_enabled(_ui_sound_toggle.button_pressed)

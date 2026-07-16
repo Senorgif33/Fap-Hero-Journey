@@ -202,11 +202,9 @@ var _run_accounted: bool = false
 # Calendar lockout stamped when entering a round with cooldown_days > 0.
 # Written into the Force Save & Quit payload; 0 = no pending cooldown.
 var _pending_cooldown_until: int = 0
-# True while the cooldown Force-Quit modal is on screen (dev Continue / F9).
+# True while the cooldown Force-Quit modal is on screen (Ignore Cooldowns Continue).
 var _cooldown_banner_open: bool = false
 var _cooldown_modal: Control = null
-# Dev F8: treat round end as clean even for must-release / fail_on_clean_finish.
-var _dev_bypass_release_fail: bool = false
 
 
 func _ready() -> void:
@@ -741,7 +739,7 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 # Save advances past this gap first so Resume lands on the next node (see
 # _on_cooldown_save_and_quit) — otherwise Resume would re-enter this round and
 # lock out again forever.
-# Dev/QA: Ignore Cooldowns or Dev Cheats adds Continue (advance without quitting).
+# Dev/QA: Ignore Journey Cooldowns unlocks Continue (advance without quitting).
 func _show_cooldown_banner(round: Dictionary, days: int) -> void:
 	_is_overlay_open = true
 	_cooldown_banner_open = true
@@ -790,18 +788,15 @@ func _show_cooldown_banner(round: Dictionary, days: int) -> void:
 	)
 	btn_row.add_child(save_btn)
 
-	if (
-		SettingsService.get_ignore_journey_cooldowns()
-		or SettingsService.get_dev_cheats_enabled()
-	):
+	if SettingsService.get_ignore_journey_cooldowns():
 		var cont_btn: Button = Button.new()
-		cont_btn.text = "▶  CONTINUE (DEV)"
+		cont_btn.text = "▶  CONTINUE"
 		cont_btn.custom_minimum_size = Vector2(200, 0)
 		UITheme.style_button(cont_btn, UITheme.PURPLE_BRIGHT)
 		cont_btn.pressed.connect(
 			func() -> void:
 				_dismiss_cooldown_banner()
-				_dev_skip_cooldown_gap()
+				_skip_cooldown_gap()
 		)
 		btn_row.add_child(cont_btn)
 
@@ -1783,10 +1778,7 @@ func _on_round_ended() -> void:
 	if _release_jumping:
 		return
 	# Must-release fail: finishing without pressing jumps to the punishment node.
-	# Dev F8 complete sets _dev_bypass_release_fail so QA can clean-finish those rounds.
-	var bypass_fail: bool = _dev_bypass_release_fail
-	_dev_bypass_release_fail = false
-	if not bypass_fail and ReleaseLogic.fail_on_clean_finish(_release_cfg, _release_pressed):
+	if ReleaseLogic.fail_on_clean_finish(_release_cfg, _release_pressed):
 		await _release_fail_jump()
 		return
 	_remove_release_button()
@@ -2235,74 +2227,14 @@ func _on_cooldown_save_and_quit() -> void:
 	_on_save_and_quit()
 
 
-# Dev/QA: leave a cooldown gap without quitting — same Advance as save, then play.
-func _dev_skip_cooldown_gap() -> void:
+# Ignore Cooldowns: leave a cooldown gap without quitting — same Advance as save, then play.
+func _skip_cooldown_gap() -> void:
 	_pending_cooldown_until = 0
 	_cooldown_banner_open = false
 	if not GameState.IsLastRound():
 		GameState.Advance()
-	_show_save_toast("DEV  SKIPPED COOLDOWN")
+	_show_save_toast("SKIPPED COOLDOWN")
 	_load_current_item()
-
-
-func _dev_cheats_on() -> bool:
-	return SettingsService.get_dev_cheats_enabled()
-
-
-# F8: clean-finish the current round (coins/score), bypassing must-release fail.
-func _dev_complete_round() -> void:
-	if not _dev_cheats_on():
-		return
-	if _cooldown_banner_open:
-		_dismiss_cooldown_banner()
-		_dev_skip_cooldown_gap()
-		return
-	if _is_overlay_open:
-		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
-		return
-	if GameState.CurrentItemType() != "round":
-		_show_save_toast("DEV  NOT IN A ROUND")
-		return
-	_show_save_toast("DEV  COMPLETE ROUND")
-	_release_pressed = true
-	_dev_bypass_release_fail = true
-	_end_timer.stop()
-	_video.paused = false
-	await _on_round_ended()
-
-
-# F9: jump to the next node without awards (or skip cooldown gap).
-func _dev_skip_node() -> void:
-	if not _dev_cheats_on():
-		return
-	if _cooldown_banner_open:
-		_dismiss_cooldown_banner()
-		_dev_skip_cooldown_gap()
-		return
-	if _is_overlay_open:
-		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
-		return
-	if GameState.CurrentItemType() != "round":
-		_show_save_toast("DEV  NOT IN A ROUND")
-		return
-	_show_save_toast("DEV  SKIP NODE")
-	_end_timer.stop()
-	_handy_stop()
-	FunscriptPlayer.Stop()
-	InventoryService.ClearRoundScopedEffects()
-	_remove_release_button()
-	_exit_boss_mode()
-	_video.stop()
-	_video.stream = null
-	_paused = false
-	if GameState.IsLastRound():
-		_transition_to_end_screen()
-		return
-	await _transition_swap(
-		func() -> void:
-			GameState.Advance()
-			_load_current_item()
-	)
 
 
 # Triggered by the checkpoint banner's "Save & Quit" button (also by the
@@ -2844,16 +2776,6 @@ func _input(event: InputEvent) -> void:
 					# R: Release — same as the HUD button when the round enables it.
 					if not _is_overlay_open:
 						_on_release_pressed()
-						get_viewport().set_input_as_handled()
-				KEY_F8:
-					# Dev: complete current round (or skip cooldown gap).
-					if SettingsService.get_dev_cheats_enabled():
-						_dev_complete_round()
-						get_viewport().set_input_as_handled()
-				KEY_F9:
-					# Dev: skip node without awards (or skip cooldown gap).
-					if SettingsService.get_dev_cheats_enabled():
-						_dev_skip_node()
 						get_viewport().set_input_as_handled()
 				# Arrow keys nudge the stroke range, but only while the drawer is open: ↑/↓ max, →/← min.
 				KEY_UP:

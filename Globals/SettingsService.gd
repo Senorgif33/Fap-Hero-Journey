@@ -79,7 +79,6 @@ const DEFAULT_UPDATE_CHECK: bool = true  # check GitHub for a newer build on lau
 const DEFAULT_UI_SOUND_ENABLED: bool = true  # click/hover feedback blips
 const DEFAULT_UI_SOUND_VOLUME: float = 0.6  # linear, 0–1
 const DEFAULT_IGNORE_JOURNEY_COOLDOWNS: bool = false  # dev: skip calendar lockouts
-const DEFAULT_DEV_CHEATS: bool = false  # in-run F8/F9 + cooldown Continue
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -391,11 +390,6 @@ func get_ignore_journey_cooldowns() -> bool:
 	)
 
 
-# When true, GameLoop enables F8 complete / F9 skip and cooldown-banner Continue.
-func get_dev_cheats_enabled() -> bool:
-	return bool(_config.get_value("debug", "dev_cheats", DEFAULT_DEV_CHEATS))
-
-
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
 
@@ -573,10 +567,6 @@ func set_ui_sound_volume(value: float) -> void:
 
 func set_ignore_journey_cooldowns(value: bool) -> void:
 	_config.set_value("debug", "ignore_journey_cooldowns", value)
-
-
-func set_dev_cheats_enabled(value: bool) -> void:
-	_config.set_value("debug", "dev_cheats", value)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
