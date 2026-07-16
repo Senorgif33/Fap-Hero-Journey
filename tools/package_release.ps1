@@ -62,7 +62,12 @@
     needs a zip writer that stores Unix modes; out of scope here.
 
     -Export assumes the project has been imported at least once (a .godot/ cache exists). On a
-    clean clone, run Godot once with --headless --path <repo> --import first.
+    clean clone, run Godot once with --headless --path <repo> --import first. It also assumes the
+    C# assembly is built (.godot/mono/temp/bin/Debug) - without it Godot's project init cannot
+    create the C# autoloads. The CI workflow does both explicitly.
+
+    Godot's export can crash on teardown AFTER writing a complete binary (seen on the GitHub
+    Actions windows runner, never locally). That exact case is tolerated; see Invoke-GodotExport.
 #>
 [CmdletBinding()]
 param(
@@ -84,6 +89,16 @@ $RequiredWinBins = @('ffmpeg.exe', 'ffprobe.exe')
 # Preset names as they appear in export_presets.cfg. Must match exactly.
 $WindowsPreset = 'Windows Desktop'
 $LinuxPreset   = 'Linux'
+
+# Windows access violation (0xC0000005), which Godot's crash handler reports as "signal 11".
+# PowerShell surfaces it signed; compare against both forms.
+$ACCESS_VIOLATION_SIGNED   = -1073741819
+$ACCESS_VIOLATION_UNSIGNED = 3221225477
+
+# Floor for "Godot actually wrote a binary rather than a stub". Both presets' outputs are tens of
+# MB (Windows embeds the PCK at ~124 MB; the Linux binary is ~71 MB), so this only catches an
+# empty/stub file - it is a sanity check, not an integrity check. See Invoke-GodotExport.
+$MIN_EXPORT_BYTES = 1MB
 
 # The console build prints to stdout and returns a real exit code; the plain GUI binary
 # detaches on Windows and gives neither.
@@ -122,20 +137,39 @@ function Invoke-GodotExport {
     if ($produced) { $size = (Get-Item -LiteralPath $OutFile).Length }
     Write-Host "    exit=$code  output_written=$produced  size=$size bytes"
 
-    if ($code -ne 0) {
-        $hint = ''
-        # 0xC0000005 - Windows access violation (reported as "signal 11" by Godot's handler).
-        if ($code -eq -1073741819 -or $code -eq 3221225477) {
-            $hint = " This is an access violation (0xC0000005)."
-            if ($produced) {
-                $hint += " The pack WAS written ($size bytes), so the crash is on teardown, after the export work."
-            }
+    if ($code -eq 0) {
+        if (-not $produced) {
+            throw "Godot exited 0 but did not write '$OutFile' (preset '$PresetName')."
         }
-        throw "Godot export failed for '$PresetName' (exit $code).$hint"
+        return
     }
-    if (-not $produced) {
-        throw "Godot exited 0 but did not write '$OutFile' (preset '$PresetName')."
+
+    # --- Tolerated failure: teardown crash after a completed export -------------------------
+    # Godot 4.6.2 access-violates while unwinding at the END of a headless export on the GitHub
+    # Actions windows runner: "savepack" reports DONE, the full binary is written, and the process
+    # then dies on the way out. Locally the identical command exits 0, and CI's binary matched a
+    # fully verified local build to within ~200 bytes (explained by the runner's dotnet SDK
+    # emitting a slightly different assembly).
+    #
+    # Two candidate causes were investigated and ruled out: the ffmpeg GDExtension (loads cleanly
+    # in CI - the errors around it only appear locally) and the C# autoloads failing to compile
+    # (a real bug, fixed by building the assembly before export; the crash outlives that fix).
+    #
+    # So this tolerates EXACTLY that crash, and only with a real binary on disk. Any other exit
+    # code, or a crash with no output, still hard-fails: "the exporter crashed but the file looked
+    # fine" must not become a general rule.
+    #
+    # Residual risk, stated plainly: a crash DURING packing could leave a large-but-truncated file
+    # that passes these checks. The size floor cannot detect truncation. What argues against it
+    # here is that Godot itself reports "[ DONE ] savepack" before dying.
+    $crashed = ($code -eq $ACCESS_VIOLATION_SIGNED) -or ($code -eq $ACCESS_VIOLATION_UNSIGNED)
+    if ($crashed -and $produced -and $size -ge $MIN_EXPORT_BYTES) {
+        Write-Host ("::warning::Godot crashed on teardown exporting '{0}' (0xC0000005) AFTER writing a complete {1}-byte binary. Accepting the artifact - see Invoke-GodotExport in tools/package_release.ps1." -f $PresetName, $size)
+        Write-Host "    TOLERATED: teardown crash after a completed export; continuing." -ForegroundColor Yellow
+        return
     }
+
+    throw "Godot export failed for '$PresetName' (exit $code, output_written=$produced, size=$size bytes)."
 }
 
 function Get-ProjectVersion {
