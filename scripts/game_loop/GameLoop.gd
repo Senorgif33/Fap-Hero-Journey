@@ -202,10 +202,10 @@ var _run_accounted: bool = false
 # Calendar lockout stamped when entering a round with cooldown_days > 0.
 # Written into the Force Save & Quit payload; 0 = no pending cooldown.
 var _pending_cooldown_until: int = 0
-# True while the cooldown Force-Quit modal is on screen (dev Continue / F9).
+# True while the cooldown Force-Quit modal is on screen (dev Continue / ↑).
 var _cooldown_banner_open: bool = false
 var _cooldown_modal: Control = null
-# Dev F8/→: treat round end as clean even for must-release / fail_on_clean_finish.
+# Dev → complete: treat round end as clean even for must-release / fail_on_clean_finish.
 var _dev_bypass_release_fail: bool = false
 
 
@@ -1783,7 +1783,7 @@ func _on_round_ended() -> void:
 	if _release_jumping:
 		return
 	# Must-release fail: finishing without pressing jumps to the punishment node.
-	# Dev F8 complete sets _dev_bypass_release_fail so QA can clean-finish those rounds.
+	# Dev → complete sets _dev_bypass_release_fail so QA can clean-finish those rounds.
 	var bypass_fail: bool = _dev_bypass_release_fail
 	_dev_bypass_release_fail = false
 	if not bypass_fail and ReleaseLogic.fail_on_clean_finish(_release_cfg, _release_pressed):
