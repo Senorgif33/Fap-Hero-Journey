@@ -237,11 +237,20 @@ function New-ReleaseZip {
     }
 }
 
-# GitHub replaces spaces with dots in uploaded asset names, and UpdateService looks the hash up
-# by the name it downloaded - so checksums.txt must list the DOTTED name, not the local one.
-function ConvertTo-GitHubAssetName {
+# Every spelling of an asset name GitHub might serve, so the checksum can be found whichever
+# upload path was used:
+#   - the API (softprops/action-gh-release, i.e. the release workflow) PRESERVES the filename;
+#   - the web UI rewrites spaces to dots ("Fap.Hero.JOURNEY.v0.6.1.-.Windows.Build.zip").
+# UpdateService looks the hash up by the name it downloaded and matches the line as a substring,
+# so listing both spellings makes verification work either way. This matters because a name
+# mismatch does not fail loudly - _verify_checksum returns "skip" and the update installs
+# UNVERIFIED, which is exactly how a dotted-only checksums.txt sat there doing nothing.
+function Get-AssetNameVariants {
     param([string]$LocalName)
-    return $LocalName -replace ' ', '.'
+    $variants = @($LocalName)
+    $dotted = $LocalName -replace ' ', '.'
+    if ($dotted -ne $LocalName) { $variants += $dotted }
+    return $variants
 }
 
 if (-not $Version) { $Version = Get-ProjectVersion }
@@ -334,10 +343,12 @@ Write-Host "==> Writing checksums.txt" -ForegroundColor Cyan
 $lines = @()
 foreach ($zip in $built) {
     $hash      = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
-    $assetName = ConvertTo-GitHubAssetName -LocalName ([System.IO.Path]::GetFileName($zip))
-    $lines    += "$hash  $assetName"
-    Write-Host "    $assetName"
+    $localName = [System.IO.Path]::GetFileName($zip)
+    Write-Host "    $localName"
     Write-Host "      $hash"
+    foreach ($variant in (Get-AssetNameVariants -LocalName $localName)) {
+        $lines += "$hash  $variant"
+    }
 }
 $checksums = Join-Path $OutDir 'checksums.txt'
 [System.IO.File]::WriteAllText($checksums, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
@@ -360,4 +371,5 @@ Write-Host ""
 Write-Host "Release checklist:" -ForegroundColor Yellow
 Write-Host "  1. Tag v$Version  (clean 'v' + dotted - 'v.$Version' mis-parses in UpdateService)"
 Write-Host "  2. Paste the CHANGELOG.md section for this version as the Release body (max 3900 chars for Discord)"
-Write-Host "  3. Attach the zips above AND checksums.txt (hashes are for the DOTTED names GitHub serves)"
+Write-Host "  3. Attach the zips above AND checksums.txt (it lists each asset under both the"
+Write-Host "     spaced and dotted spellings, so verification works however GitHub names them)"
