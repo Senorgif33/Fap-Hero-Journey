@@ -46,6 +46,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Windows Error Reporting latches onto a crashed native process and can stall it for many
+      # minutes, holding the step open long after the process is dead (a Godot export crash sat
+      # for ~10 minutes before the runner gave up). Turn it off so a crash dies immediately and
+      # the real error surfaces fast.
+      - name: Disable Windows Error Reporting
+        shell: pwsh
+        run: |
+          $k = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+          New-Item -Path $k -Force | Out-Null
+          Set-ItemProperty -Path $k -Name DontShowUI -Value 1 -Type DWord
+          Set-ItemProperty -Path $k -Name Disabled  -Value 1 -Type DWord
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -157,13 +169,23 @@ jobs:
 
       # A fresh checkout has no .godot/ import cache. Exporting without importing first can
       # produce a broken pack, so do it explicitly rather than hoping the export covers it.
+      #
+      # Import legitimately reports non-fatal errors on a cold cache (GDExtension probing), so a
+      # non-zero exit is not automatically fatal - but it must never be swallowed silently: an
+      # import that CRASHES (access violation = -1073741819) is the likely root of a crash in the
+      # export that follows. Report the code, and fail only on a crash.
       - name: Import project
         shell: pwsh
         run: |
           & "$env:GODOT_CONSOLE" --headless --path . --import
-          # Import reports non-fatal errors on a cold cache (e.g. GDExtension probing); the
-          # export step is the real gate, so don't fail the build here.
-          exit 0
+          $code = $LASTEXITCODE
+          Write-Host "godot --import exit code: $code"
+          if ($code -eq -1073741819 -or $code -eq 3221225477) {
+            throw "Godot CRASHED during --import (access violation). The import cache is unreliable."
+          }
+          if ($code -ne 0) {
+            Write-Host "::warning::godot --import exited $code (non-fatal on a cold cache); continuing."
+          }
 
       - name: Export + package
         shell: pwsh
