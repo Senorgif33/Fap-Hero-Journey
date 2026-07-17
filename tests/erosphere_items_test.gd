@@ -6,7 +6,6 @@ extends GdUnitTestSuite
 func test_erosphere_items_in_registry() -> void:
 	var ids: Array = [
 		"erosphere_amulet",
-		"erosphere_divine_summoning",
 		"erosphere_psychic_divorce",
 		"erosphere_feign_death",
 		"erosphere_blinding_light",
@@ -38,11 +37,6 @@ func test_cooldown_shave_hours() -> void:
 	assert_int(
 		int(InventoryService.GetItemData("erosphere_psychic_divorce").get("shave_hours", 0))
 	).is_equal(48)
-
-
-func test_divine_summoning_clear_effects_kind() -> void:
-	var data: Dictionary = InventoryService.GetItemData("erosphere_divine_summoning")
-	assert_str(str(data.get("kind", ""))).is_equal("clear_effects")
 
 
 func test_round_coerce_calendar_defaults() -> void:

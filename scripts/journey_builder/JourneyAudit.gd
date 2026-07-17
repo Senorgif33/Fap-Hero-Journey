@@ -535,6 +535,24 @@ static func _flow_analysis(graph: Dictionary, ctx: Dictionary) -> Dictionary:
 				if reward != "":
 					exit_guar[reward] = true
 					exit_poss[reward] = true
+			"cutscene":
+				exit_coins["lo"] = int(exit_coins["lo"]) + int(data.get("coins", 0))
+				exit_coins["hi"] = int(exit_coins["hi"]) + int(data.get("coins", 0))
+				var cut_reward: String = str(data.get("award_item", ""))
+				if cut_reward != "":
+					exit_guar[cut_reward] = true
+					exit_poss[cut_reward] = true
+				# Checkpoint at cutscene start — closes the prior stretch (parity with rounds).
+				if bool(data.get("is_checkpoint", false)):
+					cp["count"] = int(cp["count"]) + 1
+					_note_completed_stretch(cp, entry["gap_r"], entry["gap_ms"])
+					var cut_ms: int = maxi(0, int(data.get("length_ms", 0)))
+					exit_gap_r = {"lo": 0, "hi": 0}
+					exit_gap_ms = {"lo": cut_ms, "hi": cut_ms}
+					if cut_ms > int(cp["max_ms"]):
+						cp["max_ms"] = cut_ms
+						cp["max_rounds"] = 0
+						cp["at_node"] = id
 			"shop":
 				# Coins assume no purchase; availability uses acquire cost
 				# (free modifier unlocks only when unlock_pay_per_use).
@@ -946,6 +964,8 @@ static func _coverage_findings(graph: Dictionary, ctx: Dictionary) -> Array:
 		match str(node.get("type", "")):
 			"storyboard":
 				_note_key_source(key_source_at, items, str(data.get("item", "")), id)
+			"cutscene":
+				_note_key_source(key_source_at, items, str(data.get("award_item", "")), id)
 			"round":
 				if (
 					str(data.get("round_type", "")) == "effect"
@@ -1124,6 +1144,16 @@ static func simulate(
 					var reward: String = str(data.get("item", ""))
 					if reward != "":
 						owned[reward] = int(owned.get(reward, 0)) + 1
+				"cutscene":
+					coins += int(data.get("coins", 0))
+					var cut_reward: String = str(data.get("award_item", ""))
+					if cut_reward != "":
+						owned[cut_reward] = int(owned.get(cut_reward, 0)) + 1
+					if bool(data.get("is_checkpoint", false)) and seg_rounds > 0:
+						stretch_total_ms += seg_ms
+						stretch_count += 1
+						seg_ms = 0
+						seg_rounds = 0
 				"shop":
 					# Gate-purchase policy. Classic: buy needed offered items when
 					# affordable. PPU: unlock offered modifiers free; buy needed

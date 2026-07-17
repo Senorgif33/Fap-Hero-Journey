@@ -197,6 +197,8 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 			if rel != "":
 				axis_scripts[axis] = path + "/" + rel
 
+		var restim_axis_scripts: Dictionary = _resolve_restim_axis_scripts_raw(raw, path, axis_scripts)
+
 		# Vib scripts — {ch_key: relative_path} in JSON, resolved to absolute paths.
 		var raw_vib: Dictionary = raw.get("VibScripts", raw.get("vib_scripts", {}))
 		var vib_scripts: Dictionary = {}
@@ -227,6 +229,7 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 			"video_path": video_path,
 			"funscript_path": funscript_stats["path"],
 			"axis_scripts": axis_scripts,
+			"restim_axis_scripts": restim_axis_scripts,
 			"vib_scripts": vib_scripts,
 			"is_checkpoint": bool(raw.get("IsCheckpoint", raw.get("is_checkpoint", false))),
 			"cooldown_days": int(raw.get("CooldownDays", raw.get("cooldown_days", 0))),
@@ -669,6 +672,10 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				if rel != "":
 					pr_axis_scripts[axis] = journey_path + "/" + rel
 
+			var pr_restim_axis_scripts: Dictionary = _resolve_restim_axis_scripts_raw(
+				raw_pr, journey_path, pr_axis_scripts
+			)
+
 			var pr_raw_vib: Dictionary = raw_pr.get("VibScripts", raw_pr.get("vib_scripts", {}))
 			var pr_vib_scripts: Dictionary = {}
 			for ch_key: String in pr_raw_vib:
@@ -696,6 +703,7 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				"video_path": pr_video_path,
 				"funscript_path": pr_fs["path"],
 				"axis_scripts": pr_axis_scripts,
+				"restim_axis_scripts": pr_restim_axis_scripts,
 				"vib_scripts": pr_vib_scripts,
 				"is_checkpoint":
 				bool(raw_pr.get("IsCheckpoint", raw_pr.get("is_checkpoint", false))),
@@ -898,6 +906,31 @@ static func find_cover_image(path: String) -> String:
 		fname = dir.get_next()
 	dir.list_dir_end()
 	return ""
+
+
+# Resolves RestimAxisScripts / restim_axis_scripts from raw JSON into absolute
+# paths, merging legacy flat axis_scripts into shared when needed.
+static func _resolve_restim_axis_scripts_raw(
+	raw: Dictionary, base_path: String, resolved_axis_scripts: Dictionary
+) -> Dictionary:
+	var seed: Dictionary = {
+		"axis_scripts": resolved_axis_scripts,
+		"restim_axis_scripts": {},
+	}
+	var raw_ras: Variant = raw.get("RestimAxisScripts", raw.get("restim_axis_scripts", {}))
+	if raw_ras is Dictionary:
+		var abs_ras: Dictionary = JourneyData.empty_restim_axis_scripts()
+		for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+			var slot_map: Variant = (raw_ras as Dictionary).get(slot, {})
+			if slot_map is Dictionary:
+				var out_slot: Dictionary = {}
+				for axis: String in slot_map:
+					var rel: String = str(slot_map[axis])
+					if rel != "":
+						out_slot[axis] = base_path + "/" + rel
+				abs_ras[slot] = out_slot
+		seed["restim_axis_scripts"] = abs_ras
+	return JourneyData.coerce_restim_axis_scripts(seed)
 
 
 # Resolves a round's funscript stats as {count, length_ms, path}.

@@ -58,6 +58,22 @@ func test_coin_interval_linear() -> void:
 	assert_int(int((coins["r2"] as Dictionary)["hi"])).is_equal(105)
 
 
+# Cutscene coins accumulate into the next node's entry (parity with storyboards).
+func test_coin_interval_cutscene() -> void:
+	var graph := {
+		"start": "r1",
+		"nodes":
+		{
+			"r1": {"type": "round", "data": {"coins": 100}, "out": [_edge("cut")]},
+			"cut": {"type": "cutscene", "data": {"coins": 25, "name": "EP"}, "out": [_edge("r2")]},
+			"r2": _round(0),
+		}
+	}
+	var coins: Dictionary = _audit(graph)["coins"]
+	assert_int(int((coins["r2"] as Dictionary)["lo"])).is_equal(125)
+	assert_int(int((coins["r2"] as Dictionary)["hi"])).is_equal(125)
+
+
 # Fixed Toll curse: endure = payout + reward - 40; cleanse = payout - cost - 40.
 # The next node's entry spans [cleanse, endure].
 func test_cursed_round_interval() -> void:

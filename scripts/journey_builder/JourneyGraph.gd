@@ -8,9 +8,9 @@ extends RefCounted
 #   { "start": <id>, "nodes": { <id>: Node, ... } }
 #
 #   Node = {
-#     "type": "round" | "shop" | "storyboard" | "fork",
-#     "data": Dictionary,   # item payload — the round/shop/storyboard fields, or for
-#                           #   a fork: title/description/resolution/cond_metric/default_path
+#     "type": "round" | "shop" | "storyboard" | "fork" | "cooldown" | "cutscene",
+#     "data": Dictionary,   # item payload — the round/shop/storyboard/cooldown/cutscene
+#                           #   fields, or for a fork: title/description/resolution/…
 #     "out":  Array,        # outgoing edges; 0 = an end, 1 = linear, N = fork choices
 #   }
 #   Edge = { "to": <id>, ...fork-choice config: name/description/image_path/
@@ -211,10 +211,71 @@ static func is_end(graph: Dictionary, id: String) -> bool:
 	return id == "" or out_edges(graph, id).is_empty()
 
 
+# The set (Dictionary-as-set) of node ids reachable from `from_id` (or journey start) following
+# out-edges only. Used by Builder connect to reject true DAG cycles. Does not follow
+# release_jump_to — those are intentional play-time loops back into EP islands.
+static func out_reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary:
+	var seen: Dictionary = {}
+	var stack: Array = [from_id if from_id != "" else str(graph.get("start", ""))]
+	while not stack.is_empty():
+		var id: String = str(stack.pop_back())
+		if id == "" or seen.has(id):
+			continue
+		seen[id] = true
+		for e: Dictionary in out_edges(graph, id):
+			stack.append(str(e.get("to", "")))
+	return seen
+
+
+# True when wiring (or keeping) out-edge source→target would close a *disallowed* cycle.
+# Hub-style loops are allowed when a fork sits on the cycle (either endpoint is a fork, or
+# some path target→…→source visits a fork — e.g. freeplay 006→006_5→hub→006). Pure
+# round↔round (and other non-fork) cycles stay blocked. release_jump_to is irrelevant —
+# only out-edges. Self-links: disallowed for non-forks (Builder also rejects source==target).
+static func would_create_disallowed_cycle(
+	graph: Dictionary, source: String, target: String
+) -> bool:
+	var nodes: Dictionary = graph.get("nodes", {})
+	if source == "" or target == "" or not nodes.has(source) or not nodes.has(target):
+		return false
+	# No out-cycle unless target can already reach source (always true for source==target).
+	if source != target and not out_reachable_ids(graph, target).has(source):
+		return false
+	if is_fork(graph, source) or is_fork(graph, target):
+		return false
+	# Round→round (etc.) inside a hub loop: allow if a return path visits a fork.
+	if _path_visits_fork(graph, target, source):
+		return false
+	return true
+
+
+# True if some simple out-path from `from_id` to `to_id` visits at least one fork node.
+static func _path_visits_fork(graph: Dictionary, from_id: String, to_id: String) -> bool:
+	return _path_visits_fork_dfs(graph, from_id, to_id, {}, false)
+
+
+static func _path_visits_fork_dfs(
+	graph: Dictionary, id: String, to_id: String, seen: Dictionary, saw_fork: bool
+) -> bool:
+	var saw: bool = saw_fork or is_fork(graph, id)
+	if id == to_id:
+		return saw
+	seen[id] = true
+	for e: Dictionary in out_edges(graph, id):
+		var nxt: String = str(e.get("to", ""))
+		if nxt == "" or not (graph.get("nodes", {}) as Dictionary).has(nxt) or seen.has(nxt):
+			continue
+		if _path_visits_fork_dfs(graph, nxt, to_id, seen, saw):
+			seen.erase(id)
+			return true
+	seen.erase(id)
+	return false
+
+
 # The set (Dictionary-as-set) of node ids reachable from the journey start, following out-edges
-# (post-redirect, when apply_redirects has run). Any node NOT in this set is orphaned — a redirect
-# skipped past it and nothing else leads there. DAG → terminates; `seen` also backstops a malformed
-# cycle. Feeds the builder's live "unreachable" warning.
+# and release_jump_to targets on rounds (fail/EP side-paths are not wired as out-edges — counting
+# them here keeps EP islands from looking like orphans). DAG → terminates; `seen` also backstops a
+# malformed cycle. Feeds the builder's live "unreachable" warning.
 static func reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary:
 	var seen: Dictionary = {}
 	var stack: Array = [from_id if from_id != "" else str(graph.get("start", ""))]
@@ -225,6 +286,11 @@ static func reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary
 		seen[id] = true
 		for e: Dictionary in out_edges(graph, id):
 			stack.append(str(e.get("to", "")))
+		# Release / EP jumps are runtime edges, not graph outs — still reachable in play.
+		var data: Dictionary = (node(graph, id) as Dictionary).get("data", {})
+		var jump: String = str(data.get("release_jump_to", "")).strip_edges()
+		if jump != "":
+			stack.append(jump)
 	return seen
 
 
@@ -250,12 +316,12 @@ static func apply_redirects(graph: Dictionary, redirects: Dictionary) -> void:
 
 
 # Checks a graph for the invariants the runtime assumes: a real start, every edge resolving to a
-# node, acyclicity (the runtime walks the DAG and would loop forever on a back-edge), and which
-# nodes are reachable. Returns a list of issues [{kind, id, to?}] — pure (no UI strings), so it's
-# unit-tested and the builder formats its own user-facing messages. Kinds:
+# node, no *disallowed* out-edge cycles (hub loops via forks are allowed; round↔round softlocks
+# are not), and which nodes are reachable. Returns a list of issues [{kind, id, to?}] — pure
+# (no UI strings), so it's unit-tested and the builder formats its own user-facing messages. Kinds:
 #   "no_start"    — start is empty or not a node (graph non-empty)
 #   "dangling"    — node `id` has an out-edge whose target `to` is not a node
-#   "cycle"       — node `id` is closed onto by a back-edge (it participates in a loop)
+#   "cycle"       — node `id` is involved in a disallowed (non-fork-hub) out-edge cycle
 #   "unreachable" — node `id` can't be reached from start (it would never play)
 static func validate_graph(graph: Dictionary) -> Array:
 	var issues: Array = []
@@ -272,8 +338,8 @@ static func validate_graph(graph: Dictionary) -> Array:
 			var to: String = str(e.get("to", ""))
 			if to != "" and not nodes.has(to):
 				issues.append({"kind": "dangling", "id": id, "to": to})
-	# Cycles (DFS three-colouring; report each node a back-edge closes onto).
-	for id: String in _find_cycle_nodes(graph):
+	# Disallowed cycles only (fork-hub loops are intentional freeplay / menu back-edges).
+	for id: String in _disallowed_cycle_nodes(graph):
 		issues.append({"kind": "cycle", "id": id})
 	# Unreachable nodes (only meaningful with a valid start).
 	if start_ok:
@@ -284,28 +350,19 @@ static func validate_graph(graph: Dictionary) -> Array:
 	return issues
 
 
-# The set of node ids that a back-edge closes onto — i.e. nodes that participate in a cycle.
-# Standard DFS three-colouring (gray = on the current DFS stack). Empty for a DAG.
-static func _find_cycle_nodes(graph: Dictionary) -> Dictionary:
-	var color: Dictionary = {}  # id -> 1 gray (on stack) · 2 black (finished)
+# Nodes that participate in a disallowed out-edge cycle (see would_create_disallowed_cycle).
+static func _disallowed_cycle_nodes(graph: Dictionary) -> Dictionary:
 	var found: Dictionary = {}
-	for id: String in graph.get("nodes", {}):
-		if not color.has(id):
-			_cycle_dfs(graph, id, color, found)
+	var nodes: Dictionary = graph.get("nodes", {})
+	for id: String in nodes:
+		for e: Dictionary in out_edges(graph, id):
+			var to: String = str(e.get("to", ""))
+			if to == "" or not nodes.has(to):
+				continue
+			if would_create_disallowed_cycle(graph, id, to):
+				found[id] = true
+				found[to] = true
 	return found
-
-
-static func _cycle_dfs(graph: Dictionary, id: String, color: Dictionary, found: Dictionary) -> void:
-	color[id] = 1
-	for e: Dictionary in out_edges(graph, id):
-		var to: String = str(e.get("to", ""))
-		if to == "" or not (graph.get("nodes", {}) as Dictionary).has(to):
-			continue
-		if color.get(to, 0) == 1:
-			found[to] = true  # back-edge onto a node still on the stack → cycle
-		elif not color.has(to):
-			_cycle_dfs(graph, to, color, found)
-	color[id] = 2
 
 
 # Longest count of `round` nodes along any path from `from_id` to an end (inclusive of
@@ -403,6 +460,9 @@ static func resolve_paths(graph: Dictionary, base: String) -> void:
 		match n.get("type", ""):
 			"round":
 				_resolve_round_paths(n.get("data", {}), base)
+			"cutscene":
+				var cd: Dictionary = n.get("data", {})
+				cd["video_path"] = _abs(str(cd.get("video_path", "")), base)
 			"storyboard":
 				_resolve_storyboard_paths(n.get("data", {}), base)
 			"fork":
@@ -414,14 +474,32 @@ static func _resolve_round_paths(d: Dictionary, base: String) -> void:
 	d["funscript_path"] = _abs(str(d.get("funscript_path", "")), base)
 	d["video_path"] = _abs(str(d.get("video_path", "")), base)
 	d["boss_image"] = _abs(str(d.get("boss_image", "")), base)
-	_resolve_channels(d.get("axis_scripts", {}), base)
+	_resolve_restim_axis_scripts(d, base)
 	_resolve_channels(d.get("vib_scripts", {}), base)
-	# Pool round: each encounter entry carries its own media set — resolve them too.
+	# Pool round: each encounter entry carries its own media set — resolve them too (incl. a
+	# boss entry's intro image).
 	for entry: Dictionary in d.get("pool_entries", []):
 		entry["funscript_path"] = _abs(str(entry.get("funscript_path", "")), base)
 		entry["video_path"] = _abs(str(entry.get("video_path", "")), base)
-		_resolve_channels(entry.get("axis_scripts", {}), base)
+		entry["boss_image"] = _abs(str(entry.get("boss_image", "")), base)
+		_resolve_restim_axis_scripts(entry, base)
 		_resolve_channels(entry.get("vib_scripts", {}), base)
+
+
+static func _resolve_restim_axis_scripts(d: Dictionary, base: String) -> void:
+	# Resolve flat axis_scripts first so coerce can merge absolute paths into shared.
+	_resolve_channels(d.get("axis_scripts", {}), base)
+	var raw_ras: Variant = d.get("restim_axis_scripts", {})
+	if raw_ras is Dictionary:
+		for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+			var slot_map: Variant = (raw_ras as Dictionary).get(slot, {})
+			if slot_map is Dictionary:
+				_resolve_channels(slot_map as Dictionary, base)
+	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(d)
+	d["restim_axis_scripts"] = ras
+	# Keep flat axis_scripts aligned with shared when it was empty / legacy-only.
+	if (d.get("axis_scripts", {}) as Dictionary).is_empty():
+		d["axis_scripts"] = (ras["shared"] as Dictionary).duplicate(true)
 
 
 # Resolves every value of a {channel: rel} media map to absolute, in place.

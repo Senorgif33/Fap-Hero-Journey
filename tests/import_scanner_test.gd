@@ -158,7 +158,81 @@ func test_build_rounds_groups_one_round() -> void:
 	assert_str(r["video_path"]).is_equal("/no_such_dir/scene.mp4")
 	assert_str(r["funscript_path"]).is_equal("/no_such_dir/scene.funscript")
 	assert_bool((r["axis_scripts"] as Dictionary).has("L1")).is_true()
+	assert_bool((r["restim_axis_scripts"]["shared"] as Dictionary).has("L1")).is_true()
 	assert_bool((r["vib_scripts"] as Dictionary).has("vib1")).is_true()
+
+
+func test_build_rounds_slotted_restim_kits() -> void:
+	var files := PackedStringArray(
+		[
+			"/no_such_dir/scene.mp4",
+			"/no_such_dir/scene.funscript",
+			"/no_such_dir/scene.a.alpha.funscript",
+			"/no_such_dir/scene.b.volume.funscript",
+			"/no_such_dir/scene.pulse_frequency.funscript",
+		]
+	)
+	var result: Dictionary = ImportScanner.build_rounds(files, "Restim A", "Restim B")
+	var r: Dictionary = result["rounds"][0]
+	assert_str(str((r["restim_axis_scripts"]["a"] as Dictionary)["alpha"])).contains("a.alpha")
+	assert_str(str((r["restim_axis_scripts"]["b"] as Dictionary)["volume"])).contains("b.volume")
+	assert_str(
+		str((r["restim_axis_scripts"]["shared"] as Dictionary)["pulse_frequency"])
+	).contains("pulse_frequency")
+
+
+func test_build_rounds_label_tagged_and_plain_kit() -> void:
+	var files := PackedStringArray(
+		[
+			"/no_such_dir/scene.mp4",
+			"/no_such_dir/scene.funscript",
+			"/no_such_dir/scene.alpha.funscript",
+			"/no_such_dir/scene.alpha-prostate.funscript",
+			"/no_such_dir/scene.pulse_width.funscript",
+		]
+	)
+	var result: Dictionary = ImportScanner.build_rounds(files, "Restim", "Prostate")
+	var r: Dictionary = result["rounds"][0]
+	assert_str(str((r["restim_axis_scripts"]["a"] as Dictionary)["alpha"])).contains(
+		"scene.alpha.funscript"
+	)
+	assert_str(str((r["restim_axis_scripts"]["b"] as Dictionary)["alpha"])).contains(
+		"alpha-prostate"
+	)
+	assert_str(str((r["restim_axis_scripts"]["shared"] as Dictionary)["pulse_width"])).contains(
+		"pulse_width"
+	)
+
+
+func test_autofill_src_siblings_backfills_library_shape() -> void:
+	_touch("scene.mp4")
+	_touch("scene.funscript")
+	_touch("scene.alpha.funscript")
+	_touch("scene.alpha-prostate.funscript")
+	_touch("scene.vib1.funscript")
+	var filled: Dictionary = ImportScanner.autofill_src_siblings(
+		"%s/scene.mp4" % _tmp, "", {}, {}, "Restim", "Prostate"
+	)
+	assert_bool(bool(filled["changed"])).is_true()
+	assert_str(str(filled["funscript_src"])).contains("scene.funscript")
+	assert_str(str((filled["restim_axis_src"]["a"] as Dictionary)["alpha"])).contains(
+		"scene.alpha.funscript"
+	)
+	assert_str(str((filled["restim_axis_src"]["b"] as Dictionary)["alpha"])).contains(
+		"alpha-prostate"
+	)
+	assert_bool((filled["vib_src"] as Dictionary).has("vib1")).is_true()
+	# Second pass must not overwrite.
+	var again: Dictionary = ImportScanner.autofill_src_siblings(
+		"%s/scene.mp4" % _tmp,
+		str(filled["funscript_src"]),
+		filled["restim_axis_src"],
+		filled["vib_src"],
+		"Restim",
+		"Prostate"
+	)
+	assert_bool(bool(again["changed"])).is_false()
+
 
 
 func test_build_rounds_skips_funscript_without_video() -> void:

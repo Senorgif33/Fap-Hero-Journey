@@ -13,7 +13,7 @@
 .EXAMPLE
   .\scripts\dev\run-tests.ps1 -GodotBin "D:\Godot\Godot_v4.6.3-stable_mono_win64_console.exe"
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
 	[string]$GodotBin = "",
 	[Parameter(ValueFromRemainingArguments = $true)]
@@ -122,14 +122,20 @@ Write-AgentLog -HypothesisId "A" -Location "run-tests.ps1:pre-runtest" -Message 
 $runSw = [System.Diagnostics.Stopwatch]::StartNew()
 # #endregion
 
-$proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$runtest`" $argLine") -WorkingDirectory $RepoRoot -Wait -PassThru -NoNewWindow
+# Use cmd /c directly — Start-Process ArgumentList mangles nested quotes around paths.
+# Temporarily allow native stderr (Godot prints to stderr) without aborting under Stop.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+cmd.exe /c "`"$runtest`" $argLine"
+$exitCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
 
 # #region agent log
 Write-AgentLog -HypothesisId "C" -Location "run-tests.ps1:post-runtest" -Message "gdUnit runtest finished" -Data @{
 	runtestElapsedMs = $runSw.ElapsedMilliseconds
-	exitCode         = $proc.ExitCode
+	exitCode         = $exitCode
 	totalElapsedMs   = $ScriptSw.ElapsedMilliseconds
 }
 # #endregion
 
-exit $proc.ExitCode
+exit $exitCode

@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "unlock_pay_per_use": true,
+  "comment": "Authoritative Inferno skill unlock schedule (from v1 skills.js). Scaffold wires unlock-video cutscenes with award_item from this file; do not invent unlocks in Python. video_node_id gets award_item=item_id; insert_after only rewires edges into that cutscene.",
+  "skills": [
+    {
+      "item_id": "erosphere_amulet",
+      "name": "Amulet of Sustenance",
+      "unlocked_by": "inferno_C01_EP5",
+      "unlock_video": "Inferno_C01_I01_The_Amulet_of_Sustenance.mp4",
+      "video_node_id": "unlock_vid_amulet",
+      "insert_after": "inferno_C01_EP5_fate",
+      "continue_to": "c01_ep5_cd1",
+      "enabled": true
+    },
+    {
+      "item_id": "erosphere_psychic_divorce",
+      "name": "Psychic Divorce",
+      "unlocked_by": "inferno_C01_EP6",
+      "unlock_video": "Inferno_C01_S01_Psychic_Divorce.mp4",
+      "video_node_id": "unlock_vid_psychic",
+      "insert_after": "inferno_C01_EP6_fate",
+      "continue_to": "c01_ep6_cd1",
+      "enabled": true
+    },
+    {
+      "item_id": "erosphere_feign_death",
+      "name": "Feign Death",
+      "unlocked_by": "inferno_C02_002",
+      "unlock_video": "Inferno_C02_S01_Feign_Death.mp4",
+      "video_node_id": "unlock_vid_feign",
+      "insert_after": "inferno_C02_002",
+      "continue_to": null,
+      "enabled": false,
+      "note": "Canto II not scaffolded yet — enable when C02_002 exists."
+    },
+    {
+      "item_id": "erosphere_blinding_light",
+      "name": "Blinding Light",
+      "unlocked_by": "inferno_C02_004",
+      "unlock_video": "Inferno_C02_S02_Blinding_Light.mp4",
+      "video_node_id": "unlock_vid_blinding",
+      "insert_after": "inferno_C02_004",
+      "continue_to": null,
+      "enabled": false,
+      "note": "Canto II not scaffolded yet."
+    },
+    {
+      "item_id": "erosphere_time_control",
+      "name": "Time Control",
+      "unlocked_by": "inferno_C02_EP5",
+      "unlock_video": "Inferno_C02_S03_Time_Control.mp4",
+      "video_node_id": "unlock_vid_time",
+      "insert_after": null,
+      "continue_to": null,
+      "enabled": false,
+      "note": "Canto II EP5 consequences — wire when C02 EP5 subgraph exists."
+    }
+  ]
+}

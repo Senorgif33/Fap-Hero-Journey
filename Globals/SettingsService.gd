@@ -48,9 +48,13 @@ const DEFAULT_STROKE_TARGET: String = ""
 const DEFAULT_VIBRATION_ROUTES: Dictionary = {}  # { actuator_id: "vibe1"|"vibe2"|"stroke" }
 const DEFAULT_CONSTRICT_ROUTES: Dictionary = {}  # { actuator_id: true }
 
-# Restim (e-stim / FOC via T-code websocket). Default URL matches Restim Preferences → Network.
-const DEFAULT_RESTIM_URL: String = "ws://127.0.0.1:12346"
+# Restim (e-stim / FOC via T-code websocket). Dual slots; path MUST be /tcode (Restim Preferences → Network).
+const DEFAULT_RESTIM_URL: String = "ws://127.0.0.1:12346/tcode"  # legacy single-URL default → slot a
+const DEFAULT_RESTIM_URL_A: String = "ws://127.0.0.1:12346/tcode"
+const DEFAULT_RESTIM_URL_B: String = "ws://127.0.0.1:12347/tcode"
 const DEFAULT_RESTIM_AUTO: bool = false
+const DEFAULT_RESTIM_LABEL_A: String = "Restim A"
+const DEFAULT_RESTIM_LABEL_B: String = "Restim B"
 
 # Constrict auto state machine (activity-driven squeeze). WHICH actuators = constrict_routes above;
 # these globals tune the level transitions. Activity is the stroke speed in funscript units/sec.
@@ -86,6 +90,7 @@ var _config: ConfigFile = ConfigFile.new()
 func _ready() -> void:
 	# A missing file is fine — getters fall back to the canonical defaults.
 	_config.load(SETTINGS_PATH)
+	_migrate_restim_settings()
 
 	# Apply boot-time audio / display settings.
 	AudioServer.set_bus_volume_db(0, linear_to_db(get_master_volume()))
@@ -146,12 +151,23 @@ func get_serial_auto_connect() -> bool:
 	return bool(_config.get_value("serial", "auto_connect", DEFAULT_SERIAL_AUTO))
 
 
-func get_restim_url() -> String:
-	return str(_config.get_value("restim", "url", DEFAULT_RESTIM_URL))
+# slot: "a" | "b". Bare get_restim_url() returns slot a (legacy callers).
+func get_restim_url(slot: String = "a") -> String:
+	if slot == "b":
+		return str(_config.get_value("restim", "url_b", DEFAULT_RESTIM_URL_B))
+	return str(_config.get_value("restim", "url_a", DEFAULT_RESTIM_URL_A))
 
 
-func get_restim_auto_connect() -> bool:
-	return bool(_config.get_value("restim", "auto_connect", DEFAULT_RESTIM_AUTO))
+func get_restim_auto_connect(slot: String = "a") -> bool:
+	if slot == "b":
+		return bool(_config.get_value("restim", "auto_connect_b", DEFAULT_RESTIM_AUTO))
+	return bool(_config.get_value("restim", "auto_connect_a", DEFAULT_RESTIM_AUTO))
+
+
+func get_restim_label(slot: String = "a") -> String:
+	if slot == "b":
+		return str(_config.get_value("restim", "label_b", DEFAULT_RESTIM_LABEL_B))
+	return str(_config.get_value("restim", "label_a", DEFAULT_RESTIM_LABEL_A))
 
 
 func get_range_min() -> int:
@@ -434,12 +450,89 @@ func set_serial_auto_connect(value: bool) -> void:
 	_config.set_value("serial", "auto_connect", value)
 
 
-func set_restim_url(value: String) -> void:
-	_config.set_value("restim", "url", value.strip_edges())
+func set_restim_url(slot_or_value: Variant, value: Variant = null) -> void:
+	# Legacy: set_restim_url(url) → slot a. New: set_restim_url(slot, url).
+	var slot: String = "a"
+	var url: String = ""
+	if value == null:
+		url = str(slot_or_value)
+	else:
+		slot = str(slot_or_value)
+		url = str(value)
+	url = ensure_restim_tcode_path(url.strip_edges())
+	if slot == "b":
+		_config.set_value("restim", "url_b", url)
+	else:
+		_config.set_value("restim", "url_a", url)
+		_config.set_value("restim", "url", url)  # keep legacy key in sync
 
 
-func set_restim_auto_connect(value: bool) -> void:
-	_config.set_value("restim", "auto_connect", value)
+func set_restim_auto_connect(slot_or_value: Variant, value: Variant = null) -> void:
+	var slot: String = "a"
+	var enabled: bool = false
+	if value == null:
+		enabled = bool(slot_or_value)
+	else:
+		slot = str(slot_or_value)
+		enabled = bool(value)
+	if slot == "b":
+		_config.set_value("restim", "auto_connect_b", enabled)
+	else:
+		_config.set_value("restim", "auto_connect_a", enabled)
+		_config.set_value("restim", "auto_connect", enabled)
+
+
+func set_restim_label(slot: String, value: String) -> void:
+	var label: String = value.strip_edges()
+	if slot == "b":
+		_config.set_value("restim", "label_b", label if label != "" else DEFAULT_RESTIM_LABEL_B)
+	else:
+		_config.set_value("restim", "label_a", label if label != "" else DEFAULT_RESTIM_LABEL_A)
+
+
+# One-time: legacy restim/url + auto_connect → slot-a keys when url_a is absent.
+# Also append /tcode when a saved host:port URL has no path (Restim rejects other paths).
+func _migrate_restim_settings() -> void:
+	var has_a: bool = _config.has_section_key("restim", "url_a")
+	if not has_a and _config.has_section_key("restim", "url"):
+		_config.set_value("restim", "url_a", str(_config.get_value("restim", "url", DEFAULT_RESTIM_URL_A)))
+	if not _config.has_section_key("restim", "auto_connect_a") and _config.has_section_key(
+		"restim", "auto_connect"
+	):
+		_config.set_value(
+			"restim",
+			"auto_connect_a",
+			bool(_config.get_value("restim", "auto_connect", DEFAULT_RESTIM_AUTO))
+		)
+	if not _config.has_section_key("restim", "url_b"):
+		_config.set_value("restim", "url_b", DEFAULT_RESTIM_URL_B)
+	var changed: bool = false
+	for key: String in ["url", "url_a", "url_b"]:
+		if not _config.has_section_key("restim", key):
+			continue
+		var raw: String = str(_config.get_value("restim", key, ""))
+		var fixed: String = ensure_restim_tcode_path(raw)
+		if fixed != raw:
+			_config.set_value("restim", key, fixed)
+			changed = true
+	if changed:
+		save()
+
+
+## Restim only accepts the /tcode websocket path; host:port alone is a 404 close.
+func ensure_restim_tcode_path(url: String) -> String:
+	var u: String = url.strip_edges()
+	if u == "" or u.contains("/tcode"):
+		return u
+	while u.ends_with("/"):
+		u = u.substr(0, u.length() - 1)
+	var scheme_end: int = u.find("://")
+	if scheme_end < 0:
+		return u + "/tcode"
+	var rest: String = u.substr(scheme_end + 3)
+	if rest.contains("/"):
+		return u  # custom non-tcode path — leave alone
+	return u + "/tcode"
 
 
 func set_range_min(value: int) -> void:

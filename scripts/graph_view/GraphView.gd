@@ -106,7 +106,7 @@ var _connect_drag_edge_idx: int = -1  # fork choice index, or -1 for a regular n
 var _connect_drag_from: Vector2 = Vector2.ZERO  # canvas-space handle position (line start)
 var _connect_drag_to: Vector2 = Vector2.ZERO  # canvas-space cursor position (line end)
 var _connect_drag_target: String = ""  # node under the cursor (the drop target), or ""
-var _connect_drag_invalid: Dictionary = {}  # node ids that can't be targets (source + ancestors → would cycle)
+var _connect_drag_invalid: Dictionary = {}  # node ids that can't be targets (self + disallowed cycles)
 
 # Marquee (box-select) state, in GraphView-local (screen) space.
 var _marquee_active: bool = false
@@ -576,7 +576,7 @@ func _on_handle_gui_input(
 			_connect_drag_from = center
 			_connect_drag_to = center
 			_connect_drag_target = ""
-			_connect_drag_invalid = _ancestors_and_self(node_id)
+			_connect_drag_invalid = _disallowed_connect_targets(node_id)
 			# A fork can't point two choices at the same node — block any node another of this fork's
 			# choices already targets (one choice per target).
 			if edge_idx >= 0:
@@ -610,7 +610,7 @@ func _handle_connect_drag_input(event: InputEvent) -> void:
 			_connect_drag_source = ""
 			_connect_drag_target = ""
 			queue_redraw()
-			# Valid drop only: a node, not the source, not an ancestor (which would form a cycle).
+			# Valid drop only: a node, not the source, not a disallowed cycle target.
 			if target != "" and target != src and not _connect_drag_invalid.has(target):
 				edge_drawn.emit(src, eidx, target)
 			get_viewport().set_input_as_handled()
@@ -625,28 +625,16 @@ func _node_at_canvas_point(p: Vector2) -> String:
 	return ""
 
 
-# Set of node ids that must NOT be wire targets for `source` — the source itself plus every node that
-# can reach it (an edge source→ancestor would close a cycle). Reverse BFS over the out-edges.
-func _ancestors_and_self(source: String) -> Dictionary:
-	var nodes: Dictionary = _graph_model.get("nodes", {})
-	var preds: Dictionary = {}
-	for id: String in nodes:
-		preds[id] = []
-	for id: String in nodes:
-		for e: Dictionary in (nodes[id] as Dictionary).get("out", []):
-			var to: String = str(e.get("to", ""))
-			if to != "" and nodes.has(to):
-				(preds[to] as Array).append(id)
+# Targets that must not be wired from `source`: the source itself, plus any node where
+# source→that node would form a disallowed (non-fork-hub) cycle. Fork hubs may be re-entered.
+func _disallowed_connect_targets(source: String) -> Dictionary:
 	var invalid: Dictionary = {source: true}
-	var queue: Array = [source]
-	var qi: int = 0
-	while qi < queue.size():
-		var cur: String = queue[qi]
-		qi += 1
-		for p: String in preds.get(cur, []) as Array:
-			if not invalid.has(p):
-				invalid[p] = true
-				queue.append(p)
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	for id: String in nodes:
+		if id == source:
+			continue
+		if JourneyGraph.would_create_disallowed_cycle(_graph_model, source, id):
+			invalid[id] = true
 	return invalid
 
 
@@ -944,6 +932,10 @@ func _type_color(item_type: String) -> Color:
 			return UITheme.CYAN
 		"fork":
 			return UITheme.MAGENTA
+		"cooldown":
+			return UITheme.DANGER
+		"cutscene":
+			return UITheme.TOXIC_GREEN
 	return UITheme.PURPLE_MID
 
 
@@ -957,6 +949,10 @@ func _type_icon(item_type: String) -> String:
 			return "◈"
 		"fork":
 			return "⑂"
+		"cooldown":
+			return "⏳"
+		"cutscene":
+			return "▣"
 	return "•"
 
 
@@ -997,6 +993,12 @@ func _type_label(item: Dictionary) -> String:
 		"fork":
 			var n3: String = item.get("title", "")
 			return n3 if n3 != "" else "Fork"
+		"cooldown":
+			var n4: String = item.get("name", "")
+			return n4 if n4 != "" else "Cooldown"
+		"cutscene":
+			var n5: String = item.get("name", "")
+			return n5 if n5 != "" else "Cutscene"
 	return "?"
 
 
@@ -1047,6 +1049,17 @@ func _type_sublabel(item: Dictionary) -> String:
 			return (
 				"%s   %d PATHS" % [_fork_type_label(item.get("resolution", "choice")), paths.size()]
 			)
+		"cooldown":
+			var days: int = maxi(1, int(item.get("days", 1)))
+			return "COOLDOWN   %d DAY%s" % [days, "S" if days != 1 else ""]
+		"cutscene":
+			var csub: String = "CUTSCENE"
+			if item.get("is_checkpoint", false):
+				csub += "   ◆ CHECKPOINT"
+			if bool(item.get("items_blocked", true)):
+				csub += "   ITEMS BLOCKED"
+			var cc: int = int(item.get("coins", 0))
+			return "%s   ♦ %d" % [csub, cc] if cc > 0 else csub
 	return ""
 
 
@@ -1578,7 +1591,7 @@ func _draw() -> void:
 		draw_rect(rect, accent, false, 1.5)
 	if _connect_drag_active:
 		# Rubber-band from the handle to the cursor, in GraphView-screen space (canvas-local × zoom +
-		# pan). Red over an invalid target (the source or an ancestor → would loop), else edge colour.
+		# pan). Red over an invalid target (self or disallowed cycle), else edge colour.
 		var bad: bool = (
 			_connect_drag_target != ""
 			and (

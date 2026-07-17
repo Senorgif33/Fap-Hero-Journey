@@ -69,6 +69,7 @@ func test_coerce_fork_fields() -> void:
 func test_coerce_round_fills_baseline_defaults() -> void:
 	var out := JourneyData.coerce_node_save_data("round", {"name": "A"})
 	assert_str(out["round_type"]).is_equal("normal")
+	assert_str(out["award_item"]).is_equal("")  # no reward by default
 	assert_bool(out["is_checkpoint"]).is_false()
 	assert_int(int(out.get("cooldown_days", -1))).is_equal(0)
 	assert_bool(bool(out.get("items_blocked", true))).is_false()
@@ -84,6 +85,36 @@ func test_coerce_round_fills_baseline_defaults() -> void:
 	# Retired legacy keys are dropped on save (migrate-on-save).
 	assert_bool(out.has("curses")).is_false()
 	assert_bool(out.has("boons")).is_false()
+
+
+# A round's optional item reward (award_item) is preserved and stringified on save, so the
+# runtime can grant it at round end (parity with the storyboard reward).
+func test_coerce_round_preserves_award_item() -> void:
+	var out := JourneyData.coerce_node_save_data("round", {"name": "A", "award_item": "cleanse"})
+	assert_str(out["award_item"]).is_equal("cleanse")
+
+
+# Cutscene optional item reward (award_item) is preserved the same way as rounds.
+func test_coerce_cutscene_preserves_award_item() -> void:
+	var out := JourneyData.coerce_node_save_data(
+		"cutscene", {"name": "Unlock", "award_item": "erosphere_amulet"}
+	)
+	assert_str(out["award_item"]).is_equal("erosphere_amulet")
+	var empty := JourneyData.coerce_node_save_data("cutscene", {"name": "X"})
+	assert_str(empty["award_item"]).is_equal("")
+
+
+# Cutscene coins + checkpoint coerce like rounds (int / bool baselines).
+func test_coerce_cutscene_coins_and_checkpoint() -> void:
+	var out := JourneyData.coerce_node_save_data(
+		"cutscene", {"name": "EP", "coins": 15.0, "is_checkpoint": 1}
+	)
+	assert_int(typeof(out["coins"])).is_equal(TYPE_INT)
+	assert_int(out["coins"]).is_equal(15)
+	assert_bool(out["is_checkpoint"]).is_true()
+	var defaults := JourneyData.coerce_node_save_data("cutscene", {"name": "X"})
+	assert_int(defaults["coins"]).is_equal(0)
+	assert_bool(defaults["is_checkpoint"]).is_false()
 
 
 # Node-level keys (type / node_id / paths) never belong inside on-disk node.data.

@@ -12,6 +12,8 @@ func test_coerce_pool_entry_canonical_shape() -> void:
 	assert_str(str(e["funscript_path"])).is_equal("")  # defaulted
 	assert_int(int(e["weight"])).is_equal(1)  # default weight
 	assert_bool((e["axis_scripts"] as Dictionary).is_empty()).is_true()
+	assert_bool(e.has("restim_axis_scripts")).is_true()
+	assert_bool((e["restim_axis_scripts"]["shared"] as Dictionary).is_empty()).is_true()
 
 
 func test_coerce_pool_entry_clamps_weight() -> void:
@@ -25,6 +27,9 @@ func test_coerce_pool_entry_deep_copies_channels() -> void:
 	var e: Dictionary = JourneyData.coerce_pool_entry({"axis_scripts": axis})
 	axis["L1"] = "MUTATED"  # mutate the source afterward
 	assert_str(str((e["axis_scripts"] as Dictionary)["L1"])).is_equal("a.funscript")
+	assert_str(str((e["restim_axis_scripts"]["shared"] as Dictionary)["L1"])).is_equal(
+		"a.funscript"
+	)
 
 
 func test_pool_entry_weights() -> void:

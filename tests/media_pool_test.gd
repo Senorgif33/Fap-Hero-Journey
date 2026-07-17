@@ -21,6 +21,23 @@ func test_pooled_media_rel_shape() -> void:
 	)
 
 
+# rel_under_journey keeps named-folder paths; rejects outside-journey sources.
+func test_rel_under_journey_keeps_named_layout() -> void:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(TEST_DIR + "/Inferno_Clip"))
+	var journey := TEST_DIR
+	var jabs := ProjectSettings.globalize_path(journey)
+	var rel_file := "Inferno_Clip/Inferno_Clip.mp4"
+	var abs_file := jabs + "/" + rel_file
+	var f := FileAccess.open(abs_file, FileAccess.WRITE)
+	f.store_string("x")
+	f.close()
+
+	assert_str(JourneyData.rel_under_journey(abs_file, jabs)).is_equal(rel_file)
+	assert_str(JourneyData.rel_under_journey(rel_file, jabs)).is_equal(rel_file)
+	assert_str(JourneyData.rel_under_journey("C:/somewhere/else.mp4", jabs)).is_equal("")
+	assert_str(JourneyData.rel_under_journey("", jabs)).is_equal("")
+
+
 # plan_media_pool: the first sighting of a (fingerprint,ext) pool path is a copy;
 # every repeat references the same rel and is skipped.
 func test_plan_media_pool_dedups_repeats() -> void:

@@ -620,10 +620,70 @@ func test_validate_clean_dag_and_empty() -> void:
 	assert_array(JourneyGraph.validate_graph(_g("", {}))).is_empty()
 
 
-# A back-edge (b → a) is flagged as a cycle.
+# A back-edge (b → a) between rounds is flagged as a disallowed cycle.
 func test_validate_flags_cycle() -> void:
 	var g := _g("a", {"a": _n("round", ["b"]), "b": _n("round", ["a"])})
 	assert_bool(_has_kind(g, "cycle")).is_true()
+
+
+# Fork-hub loops (Back between forks, round clear → hub) are allowed; round↔round is not.
+func test_fork_hub_cycles_allowed() -> void:
+	# hub1 ↔ hub2
+	var hubs := _g(
+		"h1",
+		{
+			"h1": _n("fork", ["h2"]),
+			"h2": _n("fork", ["h1"]),
+		}
+	)
+	assert_array(JourneyGraph.validate_graph(hubs)).is_empty()
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(hubs, "h2", "h1")).is_false()
+
+	# hub → round → hub
+	var hub_round := _g(
+		"h",
+		{
+			"h": _n("fork", ["r"]),
+			"r": _n("round", ["h"]),
+		}
+	)
+	assert_array(JourneyGraph.validate_graph(hub_round)).is_empty()
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(hub_round, "r", "h")).is_false()
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(hub_round, "h", "r")).is_false()
+
+	# round ↔ round still disallowed
+	var rounds := _g("a", {"a": _n("round", ["b"]), "b": _n("round", ["a"])})
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(rounds, "b", "a")).is_true()
+	assert_bool(_has_kind(rounds, "cycle")).is_true()
+
+	# hub → 006 → 006_5 → hub (freeplay Battle Styx addendum): round→round on a hub loop
+	var styx := _g(
+		"h",
+		{
+			"h": _n("fork", ["r6"]),
+			"r6": _n("round", ["r65"]),
+			"r65": _n("round", ["h"]),
+		}
+	)
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(styx, "r6", "r65")).is_false()
+	assert_array(JourneyGraph.validate_graph(styx)).is_empty()
+
+
+# Connect helper: linear back-edge to an earlier round is disallowed; back to a fork is not.
+func test_would_create_disallowed_cycle_connect_cases() -> void:
+	var linear := _g(
+		"a", {"a": _n("round", ["b"]), "b": _n("round", ["c"]), "c": _n("round", [])}
+	)
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(linear, "c", "a")).is_true()
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(linear, "a", "c")).is_false()
+
+	var with_hub := _g(
+		"a",
+		{"a": _n("round", ["h"]), "h": _n("fork", ["b"]), "b": _n("round", [])},
+	)
+	# b → h: h reaches b, but target is a fork → allowed
+	assert_bool(JourneyGraph.would_create_disallowed_cycle(with_hub, "b", "h")).is_false()
+
 
 
 # An out-edge to a non-existent node is flagged dangling, naming the bad target.
@@ -650,3 +710,54 @@ func test_validate_flags_unreachable_not_start() -> void:
 			unreachable_ids.append(i["id"])
 	assert_bool(unreachable_ids.has("b")).is_true()
 	assert_bool(unreachable_ids.has("a")).is_false()
+
+
+# EP / fail side-paths are entered via release_jump_to (not an out-edge). They must still
+# count as reachable so the builder can save Inferno-style graphs.
+func test_release_jump_makes_ep_island_reachable() -> void:
+	var main := _n("round", [])
+	(main["data"] as Dictionary)["release_jump_to"] = "ep"
+	var ep := _n("cutscene", ["ep_fate"])
+	var fate := _n("cutscene", ["cd"])
+	var cd := {"type": "cooldown", "data": {"name": "Wait", "days": 1}, "out": []}
+	var g := _g("main", {"main": main, "ep": ep, "ep_fate": fate, "cd": cd})
+	assert_array(JourneyGraph.validate_graph(g)).is_empty()
+	var reach: Dictionary = JourneyGraph.reachable_ids(g)
+	assert_bool(reach.has("ep")).is_true()
+	assert_bool(reach.has("ep_fate")).is_true()
+	assert_bool(reach.has("cd")).is_true()
+	# A true orphan (no out-edge and no release jump) is still flagged.
+	g["nodes"]["orphan"] = _n("round", [])
+	var unreachable_ids: Array = []
+	for i: Dictionary in JourneyGraph.validate_graph(g):
+		if i["kind"] == "unreachable":
+			unreachable_ids.append(i["id"])
+	assert_bool(unreachable_ids.has("orphan")).is_true()
+	assert_bool(unreachable_ids.has("ep")).is_false()
+	assert_bool(unreachable_ids.has("cd")).is_false()
+
+
+# Connect cycle checks must ignore release_jump_to: Fate→unlock→punish→main with punish
+# jumping back to EP is a valid out-DAG (Inferno EP5/EP6 unlock-after-fate shape).
+func test_out_reachable_ignores_release_jump() -> void:
+	var fate := _n("cutscene", ["unlock"])
+	var unlock := _n("cutscene", ["punish"])
+	var punish := _n("round", ["main"])
+	(punish["data"] as Dictionary)["release_jump_to"] = "ep"
+	var ep := _n("cutscene", ["fate"])
+	var main := _n("round", [])
+	(main["data"] as Dictionary)["release_jump_to"] = "ep"
+	var g := _g(
+		"ep",
+		{"ep": ep, "fate": fate, "unlock": unlock, "punish": punish, "main": main}
+	)
+	# Full reachability (used for orphans) still sees the play-time loop.
+	assert_bool(JourneyGraph.reachable_ids(g, "unlock").has("fate")).is_true()
+	assert_bool(JourneyGraph.reachable_ids(g, "main").has("ep")).is_true()
+	# Out-only reachability (used for connect) does not: unlock→punish→main never returns.
+	assert_bool(JourneyGraph.out_reachable_ids(g, "unlock").has("fate")).is_false()
+	assert_bool(JourneyGraph.out_reachable_ids(g, "unlock").has("main")).is_true()
+	assert_bool(JourneyGraph.out_reachable_ids(g, "main").has("ep")).is_false()
+	# Wiring unlock→punish would not be an out-cycle (connect allows it).
+	assert_bool(JourneyGraph.out_reachable_ids(g, "punish").has("unlock")).is_false()
+	assert_array(JourneyGraph.validate_graph(g)).is_empty()

@@ -146,10 +146,12 @@ var _routing_section: VBoxContainer = null
 var _routing_cards_vbox: VBoxContainer = null
 var _handy_section: VBoxContainer = null  # The Handy (WiFi) connection block — lives on the CONNECTION tab
 var _restim_section: VBoxContainer = null  # Restim / FOC websocket — CONNECTION tab
-var _restim_url_edit: LineEdit = null
-var _restim_status_lbl: Label = null
-var _restim_connect_btn: Button = null
-var _restim_auto_toggle: Button = null
+# Per-slot UI widgets keyed by "a" / "b".
+var _restim_label_edit: Dictionary = {}
+var _restim_url_edit: Dictionary = {}
+var _restim_status_lbl: Dictionary = {}
+var _restim_connect_btn: Dictionary = {}
+var _restim_auto_toggle: Dictionary = {}
 var _stroker_summary_lbl: Label = null
 var _serial_delay_slider: HSlider = null
 var _serial_delay_lbl: Label = null
@@ -519,9 +521,7 @@ func _apply_layout() -> void:
 	)
 
 	var cd_hint: Label = Label.new()
-	cd_hint.text = (
-		"Dev/QA: Resume ignores calendar lockouts. Also unlocks Continue on cooldown Force-Quit banners."
-	)
+	cd_hint.text = "Dev/QA: Resume ignores calendar lockouts. Also unlocks Continue on cooldown Force-Quit banners."
 	cd_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(cd_hint, UITheme.SEPARATOR, 11, false)
 	display_section.add_child(cd_hint)
@@ -2256,98 +2256,156 @@ func _build_restim_section() -> void:
 	divider.add_theme_stylebox_override("separator", _make_separator_style())
 	section.add_child(divider)
 
+	for slot: String in RestimService.SLOTS:
+		_build_restim_slot_card(section, slot)
+
+	var label_hint: Label = Label.new()
+	label_hint.text = (
+		"Filename tags use the slot label slug (e.g. label \"Prostate\" ↔ *.alpha-prostate.funscript)."
+		+ " Plain kit suffixes (.alpha, .e1, …) go to slot A; pulse_* scripts are shared."
+	)
+	label_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(label_hint, UITheme.SEPARATOR, 11, false)
+	section.add_child(label_hint)
+
+	RestimService.Connected.connect(_on_restim_slot_connected)
+	RestimService.Disconnected.connect(_on_restim_slot_disconnected)
+	RestimService.ErrorOccurred.connect(_on_restim_slot_error)
+	for slot: String in RestimService.SLOTS:
+		_sync_restim_slot_state(slot)
+
+
+func _build_restim_slot_card(parent: VBoxContainer, slot: String) -> void:
+	var card: VBoxContainer = VBoxContainer.new()
+	card.add_theme_constant_override("separation", 8)
+	parent.add_child(card)
+
+	var title_row: HBoxContainer = HBoxContainer.new()
+	title_row.add_theme_constant_override("separation", 12)
+	card.add_child(title_row)
+
+	var slot_lbl: Label = Label.new()
+	slot_lbl.text = "SLOT %s" % slot.to_upper()
+	slot_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(slot_lbl, UITheme.CYAN, 13, true)
+	title_row.add_child(slot_lbl)
+
+	var label_edit: LineEdit = LineEdit.new()
+	label_edit.placeholder_text = "Label (e.g. Prostate)"
+	label_edit.text = SettingsService.get_restim_label(slot)
+	label_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_line_edit(label_edit)
+	title_row.add_child(label_edit)
+	_restim_label_edit[slot] = label_edit
+	var captured_slot: String = slot
+	label_edit.text_changed.connect(
+		func(t: String) -> void:
+			SettingsService.set_restim_label(captured_slot, t)
+			SettingsService.save()
+	)
+
 	var url_row: HBoxContainer = HBoxContainer.new()
 	url_row.add_theme_constant_override("separation", 16)
-	section.add_child(url_row)
+	card.add_child(url_row)
 
 	var url_lbl: Label = Label.new()
-	url_lbl.text = "Restim WS URL"
+	url_lbl.text = "WS URL"
 	url_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
 	_style_label(url_lbl, UITheme.WHITE_SOFT, 14, false)
 	url_row.add_child(url_lbl)
 
-	_restim_url_edit = LineEdit.new()
-	_restim_url_edit.placeholder_text = "ws://127.0.0.1:12346"
-	_restim_url_edit.text = SettingsService.get_restim_url()
-	_restim_url_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UITheme.style_line_edit(_restim_url_edit)
-	url_row.add_child(_restim_url_edit)
+	var url_edit: LineEdit = LineEdit.new()
+	url_edit.placeholder_text = (
+		"ws://127.0.0.1:12346/tcode" if slot == "a" else "ws://127.0.0.1:12347/tcode"
+	)
+	url_edit.text = SettingsService.get_restim_url(slot)
+	url_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_line_edit(url_edit)
+	url_row.add_child(url_edit)
+	_restim_url_edit[slot] = url_edit
 
-	_restim_status_lbl = Label.new()
-	_restim_status_lbl.text = "● DISCONNECTED"
-	_style_label(_restim_status_lbl, UITheme.ERROR, 13, false)
-	url_row.add_child(_restim_status_lbl)
+	var status_lbl: Label = Label.new()
+	status_lbl.text = "● DISCONNECTED"
+	_style_label(status_lbl, UITheme.ERROR, 13, false)
+	url_row.add_child(status_lbl)
+	_restim_status_lbl[slot] = status_lbl
 
-	_restim_connect_btn = Button.new()
-	_restim_connect_btn.focus_mode = Control.FOCUS_NONE
-	_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
-	_restim_connect_btn.text = "> CONNECT"
-	url_row.add_child(_restim_connect_btn)
-	_restim_connect_btn.pressed.connect(_on_restim_connect_pressed)
+	var connect_btn: Button = Button.new()
+	connect_btn.focus_mode = Control.FOCUS_NONE
+	_style_button(connect_btn, UITheme.PURPLE_BRIGHT)
+	connect_btn.text = "> CONNECT"
+	url_row.add_child(connect_btn)
+	_restim_connect_btn[slot] = connect_btn
+	connect_btn.pressed.connect(func() -> void: _on_restim_connect_pressed(captured_slot))
 
 	var auto_row: HBoxContainer = HBoxContainer.new()
 	auto_row.add_theme_constant_override("separation", 16)
-	section.add_child(auto_row)
+	card.add_child(auto_row)
 	var auto_lbl: Label = Label.new()
 	auto_lbl.text = "Auto-connect"
 	auto_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
 	_style_label(auto_lbl, UITheme.WHITE_SOFT, 14, false)
 	auto_row.add_child(auto_lbl)
-	_restim_auto_toggle = Button.new()
-	_restim_auto_toggle.toggle_mode = true
-	_restim_auto_toggle.focus_mode = Control.FOCUS_NONE
-	_restim_auto_toggle.button_pressed = SettingsService.get_restim_auto_connect()
-	_style_toggle(_restim_auto_toggle, _restim_auto_toggle.button_pressed)
-	auto_row.add_child(_restim_auto_toggle)
-	_restim_auto_toggle.toggled.connect(
+	var auto_toggle: Button = Button.new()
+	auto_toggle.toggle_mode = true
+	auto_toggle.focus_mode = Control.FOCUS_NONE
+	auto_toggle.button_pressed = SettingsService.get_restim_auto_connect(slot)
+	_style_toggle(auto_toggle, auto_toggle.button_pressed)
+	auto_row.add_child(auto_toggle)
+	_restim_auto_toggle[slot] = auto_toggle
+	auto_toggle.toggled.connect(
 		func(pressed: bool) -> void:
-			_style_toggle(_restim_auto_toggle, pressed)
-			SettingsService.set_restim_auto_connect(pressed)
+			_style_toggle(auto_toggle, pressed)
+			SettingsService.set_restim_auto_connect(captured_slot, pressed)
 			SettingsService.save()
 	)
 
-	var disclosure: Label = Label.new()
-	disclosure.text = (
-		"Sends the Restim FOC kit over T-code: alpha→L0, beta→L1, e1–e4→E1–E4, "
-		+ "volume→V0, frequency→C0, pulse_*→P0–P3. Connect Restim Websocket (:12346) "
-		+ "and set stroke target to Restim. Authored axes only — no L0→β synthesis."
-	)
-	disclosure.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_style_label(disclosure, UITheme.SEPARATOR, 11, false)
-	section.add_child(disclosure)
 
-	RestimService.Connected.connect(_sync_restim_state)
-	RestimService.Disconnected.connect(_sync_restim_state)
-	RestimService.ErrorOccurred.connect(
-		func(msg: String) -> void:
-			_restim_status_lbl.text = "✕ %s" % msg
-			_restim_status_lbl.add_theme_color_override("font_color", UITheme.ERROR)
-	)
-	_sync_restim_state()
+func _on_restim_slot_connected(slot: String) -> void:
+	_sync_restim_slot_state(slot)
 
 
-func _sync_restim_state() -> void:
-	if _restim_status_lbl == null or _restim_connect_btn == null:
+func _on_restim_slot_disconnected(slot: String) -> void:
+	_sync_restim_slot_state(slot)
+
+
+func _on_restim_slot_error(slot: String, msg: String) -> void:
+	var lbl: Label = _restim_status_lbl.get(slot) as Label
+	if lbl == null:
 		return
-	if RestimService.RestimConnected:
-		_restim_status_lbl.text = "● CONNECTED"
-		_restim_status_lbl.add_theme_color_override("font_color", UITheme.OK)
-		_style_button(_restim_connect_btn, UITheme.MAGENTA)
-		_restim_connect_btn.text = "> DISCONNECT"
+	lbl.text = "✕ %s" % msg
+	lbl.add_theme_color_override("font_color", UITheme.ERROR)
+
+
+func _sync_restim_slot_state(slot: String) -> void:
+	var status_lbl: Label = _restim_status_lbl.get(slot) as Label
+	var connect_btn: Button = _restim_connect_btn.get(slot) as Button
+	if status_lbl == null or connect_btn == null:
+		return
+	if RestimService.IsConnected(slot):
+		status_lbl.text = "● CONNECTED"
+		status_lbl.add_theme_color_override("font_color", UITheme.OK)
+		_style_button(connect_btn, UITheme.MAGENTA)
+		connect_btn.text = "> DISCONNECT"
 	else:
-		_restim_status_lbl.text = "● DISCONNECTED"
-		_restim_status_lbl.add_theme_color_override("font_color", UITheme.ERROR)
-		_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
-		_restim_connect_btn.text = "> CONNECT"
+		status_lbl.text = "● DISCONNECTED"
+		status_lbl.add_theme_color_override("font_color", UITheme.ERROR)
+		_style_button(connect_btn, UITheme.PURPLE_BRIGHT)
+		connect_btn.text = "> CONNECT"
 
 
-func _on_restim_connect_pressed() -> void:
-	if RestimService.RestimConnected:
-		RestimService.Disconnect()
+func _on_restim_connect_pressed(slot: String) -> void:
+	if RestimService.IsConnected(slot):
+		RestimService.Disconnect(slot)
 		return
-	SettingsService.set_restim_url(_restim_url_edit.text)
+	var url_edit: LineEdit = _restim_url_edit.get(slot) as LineEdit
+	var url: String = url_edit.text if url_edit != null else ""
+	SettingsService.set_restim_url(slot, url)
+	var label_edit: LineEdit = _restim_label_edit.get(slot) as LineEdit
+	if label_edit != null:
+		SettingsService.set_restim_label(slot, label_edit.text)
 	SettingsService.save()
-	RestimService.Connect(_restim_url_edit.text)
+	RestimService.Connect(slot, url)
 
 
 func _add_delay_row(parent: VBoxContainer, label_text: String) -> Dictionary:
@@ -2389,13 +2447,13 @@ func _refresh_routing_cards() -> void:
 	var serial_body: VBoxContainer = _make_routing_card("SERIAL (T-CODE)", UITheme.AMBER)
 	_add_stroker_row(serial_body, DeviceRouting.SERIAL_TARGET, "Linear (T-code stroke)")
 
-	# Restim — FOC / e-stim via Restim's websocket T-code server (multi-axis kit).
+	# Restim — FOC / e-stim via Restim's websocket T-code server (dual-slot kits).
 	var restim_body: VBoxContainer = _make_routing_card("RESTIM (FOC / E-STIM)", UITheme.CYAN)
-	_add_stroker_row(restim_body, DeviceRouting.RESTIM_TARGET, "T-code → Restim WS")
+	_add_stroker_row(restim_body, DeviceRouting.RESTIM_TARGET, "T-code → Restim WS A+B")
 	var restim_note: Label = Label.new()
 	restim_note.text = (
-		"Sends L0/α, L1/β, E1–E4, volume, frequency, pulse_* — load a Restim kit "
-		+ "with Extra Axes. Prefer this over Intiface for FOC devices."
+		"Both connected Restim slots receive their slot kits; shared axes (e.g. pulse_*) "
+		+ "go to both. Author kits under Extra Axes. Prefer this over Intiface for FOC."
 	)
 	restim_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(restim_note, UITheme.SEPARATOR, 10, false)

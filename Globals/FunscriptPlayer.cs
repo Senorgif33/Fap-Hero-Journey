@@ -237,9 +237,12 @@ public partial class FunscriptPlayer : Node
     private (int Min, int Max) GetAxisRange(string axis) =>
         _axisRanges.TryGetValue(axis, out var r) ? r : (0, 100);
 
-    public void LoadFunscript(string path)
+    /// Drop the loaded main L0 script and beats without parking the device.
+    /// Used when entering a cutscene so a later Resume() cannot replay the prior round.
+    public void ClearFunscript()
     {
         _actions.Clear();
+        _beats.Clear();
         _actionIndex = 0;
         _positionMs = 0.0;
         _playing = false;
@@ -255,6 +258,11 @@ public partial class FunscriptPlayer : Node
             kv.Value.Index = 0;
         foreach (var kv in _vibScripts)
             kv.Value.Index = 0;
+    }
+
+    public void LoadFunscript(string path)
+    {
+        ClearFunscript();
 
         string absPath = ProjectSettings.GlobalizePath(path);
         using var funscriptFile = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
@@ -387,8 +395,21 @@ public partial class FunscriptPlayer : Node
     }
 
     // Load a secondary-axis funscript. Call before Play().
-    // axis: T-code name, e.g. "L1", "R0".
+    // axis: T-code name, e.g. "L1", "R0" (unprefixed — serial / legacy).
     public void LoadAxisScript(string axis, string path)
+    {
+        LoadAxisScriptState(axis, path);
+    }
+
+    // Dual Restim: slot is "a", "b", or "shared". Stored as "slot:axis".
+    public void LoadRestimAxisScript(string slot, string axis, string path)
+    {
+        if (string.IsNullOrEmpty(slot) || string.IsNullOrEmpty(axis))
+            return;
+        LoadAxisScriptState($"{slot}:{axis}", path);
+    }
+
+    private void LoadAxisScriptState(string key, string path)
     {
         var state = new AxisState();
         string absPath = ProjectSettings.GlobalizePath(path);
@@ -418,13 +439,44 @@ public partial class FunscriptPlayer : Node
                 Pos = action.ContainsKey("pos") ? action["pos"].AsInt32() : 0,
             });
         }
-        _axes[axis] = state;
+        _axes[key] = state;
     }
 
     // Remove all secondary axis scripts (call before loading a new round).
     public void ClearAxisScripts()
     {
         _axes.Clear();
+    }
+
+    private static void SplitAxisKey(string key, out string slot, out string axisName)
+    {
+        int colon = key.IndexOf(':');
+        if (colon > 0)
+        {
+            slot = key.Substring(0, colon);
+            axisName = key.Substring(colon + 1);
+            return;
+        }
+        slot = "";
+        axisName = key;
+    }
+
+    private bool HasAlphaAxisLoaded()
+    {
+        foreach (var key in _axes.Keys)
+        {
+            SplitAxisKey(key, out _, out string axisName);
+            if (axisName == "alpha")
+                return true;
+        }
+        return false;
+    }
+
+    private bool HasVolumeAxisForSlot(string slot)
+    {
+        if (string.IsNullOrEmpty(slot))
+            return _axes.ContainsKey("volume");
+        return _axes.ContainsKey($"{slot}:volume") || _axes.ContainsKey("shared:volume");
     }
 
     // Load a per-channel vibrator funscript. channel: 0 = vib1, 1 = vib2.
@@ -474,10 +526,27 @@ public partial class FunscriptPlayer : Node
         if (_axes.Count == 0 || !ShouldDispatchAxisScripts())
             return;
 
+        if (_strokeBackend == StrokeBackend.Restim)
+        {
+            foreach (var slot in new[] { "a", "b" })
+            {
+                if (!RestimSlotConnected(slot))
+                    continue;
+                foreach (var axis in GetAutofillAxisKeys())
+                {
+                    bool loaded = _axes.ContainsKey($"{slot}:{axis}")
+                        || _axes.ContainsKey($"shared:{axis}");
+                    if (!loaded && HasTcodeForAxis(axis))
+                        SendTcodeAxisToDest(slot, TcodeForAxisKey(axis), AxisParkMs, 0.5);
+                }
+            }
+            return;
+        }
+
         foreach (var axis in GetAutofillAxisKeys())
         {
             if (!_axes.ContainsKey(axis) && HasTcodeForAxis(axis))
-                SendTcodeAxis(TcodeForAxisKey(axis), AxisParkMs, 0.5);
+                SendTcodeAxisToDest("", TcodeForAxisKey(axis), AxisParkMs, 0.5);
         }
     }
 
@@ -625,12 +694,13 @@ public partial class FunscriptPlayer : Node
         }
         else if (IsTcodeStrokeBackend())
         {
-            SendTcodeAxis("L0", _homeEaseMs, homeNorm);
-            foreach (var axis in _axes.Keys)
+            SendTcodeAxisToDest("shared", "L0", _homeEaseMs, homeNorm);
+            foreach (var key in _axes.Keys)
             {
-                string tcode = TcodeForAxisKey(axis);
+                SplitAxisKey(key, out string slot, out string axisName);
+                string tcode = TcodeForAxisKey(axisName);
                 if (!string.IsNullOrEmpty(tcode))
-                    SendTcodeAxis(tcode, _homeEaseMs, 0.5);
+                    SendTcodeAxisToDest(string.IsNullOrEmpty(slot) ? "shared" : slot, tcode, _homeEaseMs, 0.5);
             }
         }
 
@@ -678,8 +748,8 @@ public partial class FunscriptPlayer : Node
 
             // Secondary / Restim-kit axes → Restim (when it's the stroke) or Serial (connected).
             // Alpha is sent as L0; when present it replaces the sparse main L0 on T-code stroke backends.
-            // Restim intensity is V0-only: never TransformPos FOC axes; scale/block/volume_attenuate
-            // fold into a V0 multiplier (see ComputeRestimVolumeFactor).
+            // Restim intensity: never TransformPos FOC axes; scale/volume_attenuate → V0
+            // (see ComputeRestimVolumeFactor).
             if (ShouldDispatchAxisScripts())
                 DispatchAxisScripts();
 
@@ -769,7 +839,7 @@ public partial class FunscriptPlayer : Node
         }
         else if (IsTcodeStrokeBackend())
         {
-            SendTcodeAxis("L0", dur, target / 100.0);
+            SendTcodeAxisToDest("shared", "L0", dur, target / 100.0);
         }
     }
 
@@ -1026,7 +1096,7 @@ public partial class FunscriptPlayer : Node
         // When a Restim alpha track is loaded, L0 is driven from that axis script instead.
         if (index + 1 >= _actions.Count)
             return;
-        if (IsTcodeStrokeBackend() && _axes.ContainsKey("alpha"))
+        if (IsTcodeStrokeBackend() && HasAlphaAxisLoaded())
             return;
 
         double targetNormalised = nextPos / 100.0;
@@ -1044,7 +1114,7 @@ public partial class FunscriptPlayer : Node
         if (!IsTcodeStrokeBackend())
             return;
 
-        SendTcodeAxis("L0", durationMs, targetNormalised);
+        SendTcodeAxisToDest("shared", "L0", durationMs, targetNormalised);
     }
 
     private string[] GetAutofillAxisKeys()
@@ -1080,9 +1150,9 @@ public partial class FunscriptPlayer : Node
         || (_serial != null && _serial.SerialConnected);
 
     // Dispatches secondary / Restim-kit axes. On Restim stroke backend, intensity is
-    // volume (V0) only: block mutes all axes + V0=0; scale and volume_attenuate multiply
-    // V0; α/β/E1–E4 positions are never geometrically transformed.
-    // Stock / linear journeys: when stroke backend is not Restim, volFactor stays 1 and
+    // Restim intensity: block mutes all axes + V0=0.
+    // scale / volume_attenuate → volume (V0) only.
+    // Stock / linear journeys: when stroke backend is not Restim, factors stay 1 and
     // mute/inject never run — Handy/Buttplug/serial geometry is unchanged.
     private void DispatchAxisScripts()
     {
@@ -1114,14 +1184,14 @@ public partial class FunscriptPlayer : Node
                     state.Index++;
                 }
             }
-            SendTcodeAxis("V0", 50, 0.0);
+            SendTcodeAxisToDest("shared", "V0", 50, 0.0);
             return;
         }
 
-        bool hasVolumeAxis = _axes.ContainsKey("volume");
         foreach (var multiaxis in _axes)
         {
-            string axisKey = multiaxis.Key;
+            string key = multiaxis.Key;
+            SplitAxisKey(key, out string slot, out string axisKey);
             AxisState state = multiaxis.Value;
             while (state.Index < state.Actions.Count)
             {
@@ -1139,30 +1209,49 @@ public partial class FunscriptPlayer : Node
                     nextPos = Math.Clamp(nextPos, axisMin, axisMax);
 
                     double targetNorm = nextPos / 100.0;
-                    // Restim volume track: multiply scripted V0 by the intensity factor.
                     if (restimStroke && axisKey == "volume")
-                        targetNorm = Math.Clamp(targetNorm * volFactor, 0.0, 1.0);
+                        targetNorm = ApplyRestimIntensityNorm(targetNorm, volFactor);
 
                     uint durMs = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
                     string tcode = TcodeForAxisKey(axisKey);
                     if (!string.IsNullOrEmpty(tcode))
-                        SendTcodeAxis(tcode, durMs, targetNorm);
+                    {
+                        string dest = string.IsNullOrEmpty(slot) ? "shared" : slot;
+                        SendTcodeAxisToDest(dest, tcode, durMs, targetNorm);
+                    }
                 }
                 state.Index++;
             }
         }
 
-        // No authored .volume script: inject constant V0 while intensity is attenuated.
-        if (restimStroke && !hasVolumeAxis && !Mathf.IsEqualApprox(volFactor, 1f))
-            SendTcodeAxis("V0", 50, Math.Clamp(volFactor, 0f, 1f));
+        // No authored .volume script for Restim: inject constant V0 while intensity is attenuated.
+        if (restimStroke && !Mathf.IsEqualApprox(volFactor, 1f))
+        {
+            bool anyVolume = _axes.ContainsKey("volume")
+                || _axes.ContainsKey("shared:volume")
+                || _axes.ContainsKey("a:volume")
+                || _axes.ContainsKey("b:volume");
+            if (!anyVolume)
+            {
+                SendTcodeAxisToDest("shared", "V0", 50, ApplyRestimIntensityNorm(1.0, volFactor));
+            }
+            else
+            {
+                foreach (var slot in new[] { "a", "b" })
+                {
+                    if (HasVolumeAxisForSlot(slot))
+                        continue;
+                    if (RestimSlotConnected(slot))
+                        SendTcodeAxisToDest(slot, "V0", 50, ApplyRestimIntensityNorm(1.0, volFactor));
+                }
+            }
+        }
     }
 
     /// <summary>
-    /// Restim V0 intensity factor from active inventory/boss effects.
-    /// Multiplies <c>volume_attenuate</c> factors; when <paramref name="includeScale"/>,
-    /// also folds <c>scale</c> factors (Restim maps intensity to V0, not geometry).
-    /// <c>block</c> forces 0. Result is clamped to [0, 1] at send time.
-    /// Instance method so GDScript / tests can call it on the FunscriptPlayer autoload.
+    /// Restim V0 factor from active inventory/boss effects.
+    /// Multiplies <c>volume_attenuate</c>; when <paramref name="includeScale"/>, also <c>scale</c>.
+    /// <c>block</c> forces 0. Factor is clamped to [0, 1]; final V0 send also clamps to [0, 1].
     /// </summary>
     public float ComputeRestimVolumeFactor(Godot.Collections.Array effects, bool includeScale = true)
     {
@@ -1188,6 +1277,13 @@ public partial class FunscriptPlayer : Node
         return Mathf.Clamp(factor, 0f, 1f);
     }
 
+    /// <summary>
+    /// Apply a Restim intensity factor to a scripted 0–1 axis position.
+    /// Multiplies then clamps to the T-code channel range.
+    /// </summary>
+    public double ApplyRestimIntensityNorm(double scriptedNorm, float factor) =>
+        Math.Clamp(scriptedNorm * factor, 0.0, 1.0);
+
     /// <summary>True when Restim axis scripts should be muted (block effect active).</summary>
     public bool RestimAxesMuted(Godot.Collections.Array effects) =>
         HasBlockEffect(effects);
@@ -1195,14 +1291,19 @@ public partial class FunscriptPlayer : Node
     private bool RestimConnected() =>
         _restim != null && _restim.Get("RestimConnected").AsBool();
 
-    private void SendTcodeAxis(string tcodeAxis, uint durationMs, double position)
+    private bool RestimSlotConnected(string slot) =>
+        _restim != null && _restim.Call("IsConnected", slot).AsBool();
+
+    // destination: "a" | "b" | "shared" (fan-out) | "" (serial / legacy shared).
+    private void SendTcodeAxisToDest(string destination, string tcodeAxis, uint durationMs, double position)
     {
         if (string.IsNullOrEmpty(tcodeAxis))
             return;
 
         if (_strokeBackend == StrokeBackend.Restim && RestimConnected())
         {
-            _restim.Call("SendAxis", tcodeAxis, (int)durationMs, position);
+            string dest = string.IsNullOrEmpty(destination) ? "shared" : destination;
+            _restim.Call("SendAxis", dest, tcodeAxis, (int)durationMs, position);
             return;
         }
 
@@ -1307,7 +1408,7 @@ public partial class FunscriptPlayer : Node
             return (int)Math.Round(Math.Clamp(pos, 0f, 100f));
 
         // Combined scale factor — all scale / volume_attenuate effects multiply.
-        // On Restim, intensity is folded into V0 instead (see ComputeRestimVolumeFactor);
+        // On Restim, scale/volume_attenuate fold into V0 (see ComputeRestimVolumeFactor);
         // skip geometric scale here so FOC players are not double-attenuated on L0.
         float scaleFactor = 1f;
         if (_strokeBackend != StrokeBackend.Restim)

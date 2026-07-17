@@ -122,6 +122,10 @@ var _overlay_map_allowed: bool = false
 # True for the duration of a boss round (set when the round loads, cleared at
 # round end). Drives item lockout, the red frame, and the climax pulse.
 var _is_boss_round: bool = false
+# Pool ("encounter") round: set when a picked entry still owes its mystery reveal card. The
+# card is played in _start_round_after_gates (before any boss intro), not in _begin_round, so
+# a rolled boss stays a surprise until the card slides away.
+var _pending_encounter_card: bool = false
 var _boss_frame: Panel = null
 
 # Cursed round: random negative effect(s) rolled at the start. Distinct from a
@@ -205,6 +209,9 @@ var _pending_cooldown_until: int = 0
 # True while the cooldown Force-Quit modal is on screen (Ignore Cooldowns Continue).
 var _cooldown_banner_open: bool = false
 var _cooldown_modal: Control = null
+# True while a cutscene node is playing (no funscript/score; Skip advances).
+var _cutscene_playing: bool = false
+var _cutscene_skip_btn: Button = null
 
 
 func _ready() -> void:
@@ -287,8 +294,9 @@ func _process(delta: float) -> void:
 		var len: float = _video.get_stream_length()
 		if len > 0.0:
 			_progress.value = _video.stream_position / len
-		# Keep funscript in sync with video clock
-		FunscriptPlayer.SyncTo(_video.stream_position)
+		# Keep funscript in sync with video clock (skip during cutscenes — no script).
+		if not _cutscene_playing:
+			FunscriptPlayer.SyncTo(_video.stream_position)
 		# Re-fit every frame: cheap, and keeps the video covering the screen even
 		# if the viewport or UI scale changes mid-playback.
 		_fit_video_cover()
@@ -332,8 +340,172 @@ func _load_current_item() -> void:
 			_show_shop_screen(GameState.CurrentShop())
 		"storyboard":
 			_show_storyboard_screen(GameState.CurrentStoryboard())
+		"cooldown":
+			_load_current_cooldown()
+		"cutscene":
+			_load_current_cutscene()
 		_:
 			_load_current_round()
+
+
+# Calendar lockout node — stamp cooldown_until and show Force Save & Quit.
+# No video / funscript / score. Save&Quit and Dev Continue both Advance past this node.
+func _load_current_cooldown() -> void:
+	var cd: Dictionary = GameState.CurrentCooldown().duplicate(true)
+	if cd.is_empty():
+		push_error("GameLoop: GameState has no current cooldown — returning to menu")
+		_go_to_menu()
+		return
+	_cutscene_playing = false
+	_hide_cutscene_skip()
+	var days: int = maxi(1, int(cd.get("days", 1)))
+	_round_lbl.text = "⏳  COOLDOWN  —  %s" % (cd.get("name", "") as String).to_upper()
+	_progress.value = 0.0
+	_pending_cooldown_until = JourneySaveService.stamp_cooldown_days(
+		GameState.Journey.get("folder_name", ""), days
+	)
+	_show_cooldown_banner(cd, days)
+
+
+# Watch-then-advance video (EP / Fate / Credits / unlock). No FunscriptPlayer or ScoreService.
+func _load_current_cutscene() -> void:
+	var cut: Dictionary = GameState.CurrentCutscene().duplicate(true)
+	if cut.is_empty():
+		push_error("GameLoop: GameState has no current cutscene — returning to menu")
+		_go_to_menu()
+		return
+	_paused = false
+	_pause_btn.text = "|| PAUSE"
+	_progress.value = 0.0
+	_update_muffle()
+	# Stop any leftover stroke playback from a prior round, then clear the loaded
+	# script so Options Pause→Resume cannot revive it mid-cutscene.
+	FunscriptPlayer.Stop()
+	FunscriptPlayer.ClearFunscript()
+	FunscriptPlayer.ClearAxisScripts()
+	FunscriptPlayer.ClearVibScripts()
+	if _beat_bar != null:
+		_beat_bar.set_beats([])
+	_handy_stop()
+	var cname: String = (cut.get("name", "") as String).to_upper()
+	_round_lbl.text = "◈  CUTSCENE  —  %s" % cname if cname != "" else "◈  CUTSCENE"
+
+	# Author checkpoint: Save & Quit or Continue before playback (parity with rounds).
+	if cut.get("is_checkpoint", false):
+		_show_checkpoint_banner(cut, func() -> void: _play_cutscene_video(cut))
+	else:
+		await _play_cutscene_video(cut)
+
+
+# Starts cutscene video after any checkpoint gate is cleared.
+func _play_cutscene_video(cut: Dictionary) -> void:
+	_cutscene_playing = true
+	_video.paused = false
+
+	var video_path: String = str(cut.get("video_path", ""))
+	if video_path == "":
+		push_warning("GameLoop: cutscene has no video — advancing")
+		_cutscene_playing = false
+		await _advance_after_cutscene()
+		return
+
+	_active_round_length_ms = int(cut.get("length_ms", 0))
+	_show_cutscene_skip()
+	await _load_video(video_path, false)
+
+
+func _show_cutscene_skip() -> void:
+	_hide_cutscene_skip()
+	var btn: Button = Button.new()
+	btn.text = "SKIP  ▶▶"
+	btn.anchor_left = 1.0
+	btn.anchor_right = 1.0
+	btn.anchor_top = 0.0
+	btn.anchor_bottom = 0.0
+	btn.offset_left = -110
+	btn.offset_right = -16
+	btn.offset_top = 16
+	btn.offset_bottom = 46
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.pressed.connect(_on_cutscene_skip_pressed)
+	btn.add_theme_color_override("font_color", UITheme.DARK_TEXT)
+	btn.add_theme_color_override("font_hover_color", UITheme.WHITE_SOFT)
+	btn.add_theme_color_override("font_pressed_color", UITheme.BG)
+	btn.add_theme_font_size_override("font_size", 11)
+	var sk_n: StyleBoxFlat = StyleBoxFlat.new()
+	sk_n.bg_color = Color(UITheme.DARK_TEXT.r, UITheme.DARK_TEXT.g, UITheme.DARK_TEXT.b, 0.08)
+	sk_n.border_color = UITheme.DARK_TEXT
+	sk_n.border_width_left = 1
+	sk_n.border_width_right = 1
+	sk_n.border_width_top = 1
+	sk_n.border_width_bottom = 1
+	sk_n.set_corner_radius_all(UITheme.CORNER_RADIUS)
+	sk_n.content_margin_left = 10
+	sk_n.content_margin_right = 10
+	sk_n.content_margin_top = 4
+	sk_n.content_margin_bottom = 4
+	btn.add_theme_stylebox_override("normal", sk_n)
+	var sk_h: StyleBoxFlat = sk_n.duplicate()
+	sk_h.bg_color = Color(UITheme.WHITE_SOFT.r, UITheme.WHITE_SOFT.g, UITheme.WHITE_SOFT.b, 0.15)
+	sk_h.border_color = UITheme.WHITE_SOFT
+	btn.add_theme_stylebox_override("hover", sk_h)
+	var sk_p: StyleBoxFlat = sk_n.duplicate()
+	sk_p.bg_color = UITheme.DARK_TEXT
+	btn.add_theme_stylebox_override("pressed", sk_p)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	add_child(btn)
+	_cutscene_skip_btn = btn
+
+
+func _hide_cutscene_skip() -> void:
+	if is_instance_valid(_cutscene_skip_btn):
+		_cutscene_skip_btn.queue_free()
+	_cutscene_skip_btn = null
+
+
+func _on_cutscene_skip_pressed() -> void:
+	if not _cutscene_playing and GameState.CurrentItemType() != "cutscene":
+		return
+	_cutscene_playing = true
+	_end_timer.stop()
+	_video.stop()
+	_video.stream = null
+	await _on_cutscene_ended()
+
+
+func _on_cutscene_ended() -> void:
+	if not _cutscene_playing and GameState.CurrentItemType() != "cutscene":
+		return
+	_cutscene_playing = false
+	_hide_cutscene_skip()
+	_end_timer.stop()
+	_video.stop()
+	_video.stream = null
+	await _advance_after_cutscene()
+
+
+func _advance_after_cutscene() -> void:
+	# Optional coin + item rewards — granted when the cutscene ends (natural end or
+	# Skip), parity with storyboard / round award_item. Read before Advance().
+	var cut: Dictionary = GameState.CurrentCutscene()
+	var coins: int = int(cut.get("coins", 0))
+	if coins > 0:
+		CoinService.AddCoins(coins)
+	var award_item: String = str(cut.get("award_item", ""))
+	if award_item != "":
+		var award_data: Dictionary = InventoryService.GetItemData(award_item)
+		if not award_data.is_empty():
+			InventoryService.AddItem(award_item)
+			_show_save_toast("✦  RECEIVED: %s" % str(award_data.get("name", award_item)).to_upper())
+
+	if GameState.IsLastRound():
+		_transition_to_end_screen()
+		return
+	await _transition_swap(
+		func() -> void:
+			GameState.Advance()
+			_load_current_item()
+	)
 
 
 # Appends the current node to the run's route trail (end-screen route recap).
@@ -535,6 +707,8 @@ func _on_fork_path_chosen(path_index: int) -> void:
 
 
 func _load_current_round() -> void:
+	_cutscene_playing = false
+	_hide_cutscene_skip()
 	var round: Dictionary = GameState.CurrentRound().duplicate(true)
 	if round.is_empty():
 		push_error("GameLoop: GameState has no current round — returning to menu")
@@ -543,6 +717,15 @@ func _load_current_round() -> void:
 	# Migrate any legacy cursed/blessed round to the generic effect schema here, once,
 	# so every downstream reader (label, enter mode, reveal card) sees generic fields.
 	round.merge(JourneyData.normalize_effect_round(round), true)
+
+	# Pool ("encounter") round: weighted-pick one entry NOW and fold its media + type onto this
+	# round copy, so everything below (type flags, label, boss intro) sees the CHOSEN encounter's
+	# type — a rolled boss telegraphs with its own intro card. The mystery reveal card is deferred
+	# to _start_round_after_gates so it plays before that boss intro. Must run before the flags.
+	_pending_encounter_card = false
+	if str(round.get("round_type", "normal")) == "pool":
+		_resolve_pool_round(round)
+		_pending_encounter_card = bool(round.get("show_encounter", true))
 
 	var total: int = GameState.TotalRounds()
 	var num: int = GameState.RoundNumber
@@ -555,6 +738,49 @@ func _load_current_round() -> void:
 	var rtype: String = round.get("round_type", "normal")
 	_is_boss_round = rtype == "boss"
 	_is_effect_round = rtype == "effect"
+	# A pool round mid-mystery keeps a neutral "???" label until its card slides away, so the HUD
+	# never flashes "BOSS" and spoils a rolled encounter; _start_round_after_gates reveals it.
+	if _pending_encounter_card:
+		_round_lbl.text = "ROUND  %d / %d  —  ???" % [num, total]
+	else:
+		_apply_round_label(round)
+
+	# Calendar cooldown rounds force Save & Quit (no Continue). Wins over a
+	# voluntary checkpoint on the same round. Otherwise author checkpoints offer
+	# Save & Quit or Continue before playback — honoured on every round type,
+	# bosses included (the banner precedes the boss intro).
+	var cooldown_days: int = int(round.get("cooldown_days", 0))
+	if cooldown_days > 0:
+		_pending_cooldown_until = JourneySaveService.stamp_cooldown_days(
+			GameState.Journey.get("folder_name", ""), cooldown_days
+		)
+		_show_cooldown_banner(round, cooldown_days)
+	elif round.get("is_checkpoint", false):
+		_show_checkpoint_banner(round, func() -> void: _start_round_after_gates(round))
+	else:
+		_start_round_after_gates(round)
+
+
+# Starts a round once any checkpoint gate is cleared: a pool round plays its mystery reveal
+# first (before any boss intro, so a rolled boss stays hidden until the card slides away),
+# then boss rounds telegraph with their intro card (playback waits for BEGIN); everything
+# else begins now.
+func _start_round_after_gates(round: Dictionary) -> void:
+	if _pending_encounter_card:
+		_pending_encounter_card = false
+		await _show_encounter_card()
+		_apply_round_label(round)  # reveal the real (possibly BOSS) label now the card is done
+	if _is_boss_round:
+		_show_boss_intro(round)
+	else:
+		_begin_round(round)
+
+
+# Sets the HUD round label from the round's resolved type. Split out so a pool round can defer
+# it until after its mystery card (see _load_current_round / _start_round_after_gates).
+func _apply_round_label(round: Dictionary) -> void:
+	var total: int = GameState.TotalRounds()
+	var num: int = GameState.RoundNumber
 	if _is_boss_round:
 		_round_lbl.text = (
 			"⚔  BOSS  %d / %d  —  %s" % [num, total, (round.get("name", "") as String).to_upper()]
@@ -568,28 +794,6 @@ func _load_current_round() -> void:
 			"%s %d / %d  —  %s" % [prefix, num, total, (round.get("name", "") as String).to_upper()]
 		)
 
-	# Calendar cooldown rounds force Save & Quit (no Continue). Wins over a
-	# voluntary checkpoint on the same round. Otherwise author checkpoints offer
-	# Save & Quit or Continue before playback.
-	var cooldown_days: int = int(round.get("cooldown_days", 0))
-	if cooldown_days > 0:
-		_pending_cooldown_until = JourneySaveService.stamp_cooldown_days(
-			GameState.Journey.get("folder_name", ""), cooldown_days
-		)
-		_show_cooldown_banner(round, cooldown_days)
-	elif round.get("is_checkpoint", false):
-		_show_checkpoint_banner(round)
-	else:
-		_start_round_after_gates(round)
-
-# Starts a round once any checkpoint gate is cleared: boss rounds telegraph with
-# their intro card first (playback waits for BEGIN); everything else begins now.
-func _start_round_after_gates(round: Dictionary) -> void:
-	if _is_boss_round:
-		_show_boss_intro(round)
-	else:
-		_begin_round(round)
-
 
 # Loads the round's scripts + video and starts playback. For boss rounds this
 # runs after the intro card's BEGIN; for normal rounds, immediately.
@@ -599,17 +803,9 @@ func _begin_round(round: Dictionary) -> void:
 	# _video.play() below doesn't reset the paused flag on its own.
 	_video.paused = false
 
-	# Pool ("encounter") round: weighted-pick one entry and swap its media into this
-	# round (a deep copy — safe to mutate), then (unless the author turned it off)
-	# reveal it behind a mystery card. Playback waits for the card. Must run before
-	# the media loads below.
-	if str(round.get("round_type", "normal")) == "pool":
-		_resolve_pool_round(round)
-		if bool(round.get("show_encounter", true)):
-			await _show_encounter_card()
-
-	# The round's effective length (pool rounds carry the chosen entry's after the
-	# resolve above; everything else its own). Read at round end for the play log.
+	# The round's effective length (a pool round already folded the chosen entry's media +
+	# stats in during _load_current_round; everything else carries its own). Read at round end
+	# for the play log.
 	_active_round_length_ms = int(round.get("length_ms", 0))
 
 	var fs_path: String = round.get("funscript_path", "")
@@ -623,15 +819,16 @@ func _begin_round(round: Dictionary) -> void:
 	# FunscriptPlayer's clock regardless.
 	_handy_begin_round(fs_path)
 
-	# Load secondary axis scripts (serial devices only; FunscriptPlayer ignores
-	# them if output mode is Buttplug). Clear first so stale axes from a prior
-	# round are never replayed.
+	# Load secondary axis scripts (serial + dual Restim kits). Clear first so
+	# stale axes from a prior round are never replayed.
 	FunscriptPlayer.ClearAxisScripts()
-	var axis_scripts: Dictionary = round.get("axis_scripts", {})
-	for axis: String in axis_scripts:
-		var ax_path: String = axis_scripts[axis]
-		if ax_path != "":
-			FunscriptPlayer.LoadAxisScript(axis, ax_path)
+	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(round)
+	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+		var slot_map: Dictionary = ras[slot] as Dictionary
+		for axis: String in slot_map:
+			var ax_path: String = str(slot_map[axis])
+			if ax_path != "":
+				FunscriptPlayer.LoadRestimAxisScript(slot, axis, ax_path)
 
 	# Load vibrator-channel scripts (Buttplug vibrators only; ignored for linear
 	# devices and serial output). Clear first so stale channels from a prior round
@@ -674,11 +871,11 @@ func _begin_round(round: Dictionary) -> void:
 # ---------------------------------------------------------------------------
 
 
-# CHECKPOINT REACHED banner shown at the start of any round the author marked
-# as a checkpoint. Two buttons: Save & Quit (writes a save + returns to
-# catalogue) or Continue (dismisses the banner and starts the round normally).
-# Pattern mirrors _show_boss_intro since both gate round start on user input.
-func _show_checkpoint_banner(round: Dictionary) -> void:
+# CHECKPOINT REACHED banner shown at the start of any round/cutscene the author
+# marked as a checkpoint. Two buttons: Save & Quit (writes a save + returns to
+# catalogue) or Continue (`on_continue` starts the node normally).
+# Pattern mirrors _show_boss_intro since both gate start on user input.
+func _show_checkpoint_banner(node_data: Dictionary, on_continue: Callable) -> void:
 	_is_overlay_open = true  # suppress gameplay hotkeys while the banner is up
 	_halt_playback_for_gate()  # freeze any leftover playback so the score can't tick
 
@@ -690,13 +887,13 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 	vbox.add_theme_constant_override("separation", 18)
 
 	var subtitle: Label = Label.new()
-	subtitle.text = (round.get("name", "") as String).to_upper()
+	subtitle.text = (node_data.get("name", "") as String).to_upper()
 	UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(subtitle)
 
 	var hint: Label = Label.new()
-	hint.text = "You've reached a save point. Save & Quit to resume from this round later, or continue playing now. The save is one-time — used up when you resume."
+	hint.text = "You've reached a save point. Save & Quit to resume from here later, or continue playing now. The save is one-time — used up when you resume."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	UITheme.style_label(hint, UITheme.PURPLE_MID, 12, false)
@@ -727,20 +924,21 @@ func _show_checkpoint_banner(round: Dictionary) -> void:
 		func() -> void:
 			modal.queue_free()
 			_is_overlay_open = false
-			_start_round_after_gates(round)
+			if on_continue.is_valid():
+				on_continue.call()
 	)
 	btn_row.add_child(continue_btn)
 
 	add_child(modal)
 
 
-# FORCE SAVE & QUIT banner for calendar cooldown rounds (cooldown_days > 0).
-# No Continue in normal play — the player must save out and wait for cooldown_until.
-# Save advances past this gap first so Resume lands on the next node (see
-# _on_cooldown_save_and_quit) — otherwise Resume would re-enter this round and
-# lock out again forever.
+# FORCE SAVE & QUIT banner for calendar cooldown (dedicated cooldown node, or
+# legacy round.cooldown_days > 0). No Continue in normal play — the player must
+# save out and wait for cooldown_until. Save advances past this gap first so
+# Resume lands on the next node (see _on_cooldown_save_and_quit) — otherwise
+# Resume would re-enter this node and lock out again forever.
 # Dev/QA: Ignore Journey Cooldowns unlocks Continue (advance without quitting).
-func _show_cooldown_banner(round: Dictionary, days: int) -> void:
+func _show_cooldown_banner(data: Dictionary, days: int) -> void:
 	_is_overlay_open = true
 	_cooldown_banner_open = true
 	_halt_playback_for_gate()
@@ -753,20 +951,24 @@ func _show_cooldown_banner(round: Dictionary, days: int) -> void:
 	vbox.add_theme_constant_override("separation", 18)
 
 	var subtitle: Label = Label.new()
-	subtitle.text = (round.get("name", "") as String).to_upper()
+	subtitle.text = (data.get("name", "") as String).to_upper()
 	UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(subtitle)
 
+	var custom_msg: String = str(data.get("message", "")).strip_edges()
 	var hint: Label = Label.new()
-	hint.text = (
-		(
-			"This starts a %d-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
-			% days
+	if custom_msg != "":
+		hint.text = custom_msg
+	else:
+		hint.text = (
+			(
+				"This starts a %d-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
+				% days
+			)
+			if days != 1
+			else "This starts a 1-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
 		)
-		if days != 1
-		else "This starts a 1-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
-	)
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	UITheme.style_label(hint, UITheme.PURPLE_MID, 12, false)
@@ -988,6 +1190,7 @@ func _enter_effect_mode(round: Dictionary) -> void:
 			resolved.append(r)
 	to_apply = resolved
 
+	var applied: Array = []
 	for roll: Dictionary in to_apply:
 		var fx: Dictionary = _make_boss_effect(roll)
 		fx["name"] = roll.get("name", fx["name"])
@@ -995,6 +1198,7 @@ func _enter_effect_mode(round: Dictionary) -> void:
 			fx["benefit"] = true  # green chip; hindrances/sensory stay red
 		InventoryService.AddBossEffects([fx])
 		_apply_effect(roll, round)
+		applied.append(roll)
 
 	# Optional coloured border (author-toggled); the resolvable cleanse layer when enabled.
 	var v: Dictionary = _effect_visuals(round)
@@ -1002,7 +1206,7 @@ func _enter_effect_mode(round: Dictionary) -> void:
 	if _effect_resolvable:
 		_effect_resolved = false
 		_show_cleanse_button()
-	_reveal_effects = _build_reveal_effects(to_apply)
+	_reveal_effects = _build_reveal_effects(applied)
 
 
 # Dispatches an effect to its GameLoop-side behaviour. Stroke/economy modifiers
@@ -1154,11 +1358,21 @@ func _resolve_pool_round(round: Dictionary) -> void:
 	round["video_path"] = str(e.get("video_path", ""))
 	round["funscript_path"] = str(e.get("funscript_path", ""))
 	round["axis_scripts"] = (e.get("axis_scripts", {}) as Dictionary).duplicate(true)
+	round["restim_axis_scripts"] = JourneyData.duplicate_restim_axis_scripts(e)
 	round["vib_scripts"] = (e.get("vib_scripts", {}) as Dictionary).duplicate(true)
 	# Carry the chosen entry's stats too, so round length + action count (HUD,
 	# no-video timer, and the end-screen recap) reflect what actually played.
 	round["length_ms"] = int(e.get("length_ms", 0))
 	round["action_count"] = int(e.get("action_count", 0))
+	# Adopt the chosen entry's TYPE so the round plays as that type. "pool" collapses to the
+	# picked encounter's own type — normal, or boss (with its forced modifiers / intro card).
+	var etype: String = str(e.get("round_type", "normal"))
+	round["round_type"] = etype
+	if etype == "boss":
+		round["boss_modifiers"] = (e.get("boss_modifiers", []) as Array).duplicate(true)
+		round["boss_tagline"] = str(e.get("boss_tagline", ""))
+		round["boss_image"] = str(e.get("boss_image", ""))
+		round["sensory"] = (e.get("sensory", []) as Array).duplicate(true)
 
 
 # The mystery "ENCOUNTER!" reveal for a pool round: slides in from the right, holds,
@@ -1311,24 +1525,22 @@ func _setup_release(round: Dictionary) -> void:
 		_show_release_button()
 
 
+# Release control lives in the HUD bar (same row/style as Pause / Map / Inventory)
+# so idle HUD hide fades it with the rest of the chrome.
 func _show_release_button() -> void:
 	_remove_release_button()
 	var btn: Button = Button.new()
-	btn.text = "RELEASE  (R)"
+	btn.text = "RELEASE"
+	btn.focus_mode = Control.FOCUS_NONE
 	btn.tooltip_text = "Release (hotkey R) — outcome depends on this round's release mode."
-	UITheme.style_button(btn, UITheme.MAGENTA)
-	btn.anchor_left = 0.5
-	btn.anchor_right = 0.5
-	btn.anchor_top = 1.0
-	btn.anchor_bottom = 1.0
-	# Sit above the cleanse button when both are visible.
-	btn.offset_top = -148
-	btn.offset_bottom = -108
-	btn.offset_left = -110
-	btn.offset_right = 110
+	_style_button(btn, UITheme.WHITE_SOFT)
 	btn.pressed.connect(_on_release_pressed)
-	add_child(btn)
+	btn.mouse_entered.connect(_show_hud)
+	_hud_layout.add_child(btn)
+	# Sit just before Pause (left of the action cluster).
+	_hud_layout.move_child(btn, _pause_btn.get_index())
 	_release_btn = btn
+	_show_hud()
 
 
 func _remove_release_button() -> void:
@@ -1706,7 +1918,7 @@ func _find_video(folder: String) -> String:
 	return ""
 
 
-func _load_video(path: String) -> void:
+func _load_video(path: String, with_funscript: bool = true) -> void:
 	_video.position = Vector2.ZERO
 	_video.size = get_viewport_rect().size
 	if path == "":
@@ -1721,7 +1933,8 @@ func _load_video(path: String) -> void:
 		if stream and stream is VideoStream:
 			_video.stream = stream as VideoStream
 			_video.play()
-			FunscriptPlayer.Play()
+			if with_funscript:
+				FunscriptPlayer.Play()
 			return
 		push_warning("GameLoop: could not load .ogv at %s" % path)
 		_start_no_video_fallback()
@@ -1752,9 +1965,17 @@ func _load_video(path: String) -> void:
 	if not _video.is_playing():
 		push_warning("GameLoop: video failed to open '%s' — funscript-only fallback." % abs_path)
 		_video.stream = null
-		_start_no_video_fallback()
+		if with_funscript:
+			_start_no_video_fallback()
+		elif _cutscene_playing:
+			# Cutscene with a broken/missing file — advance rather than hang.
+			await _on_cutscene_ended()
 		return
-	FunscriptPlayer.Play()
+	if with_funscript:
+		FunscriptPlayer.Play()
+	elif _cutscene_playing and _active_round_length_ms <= 0:
+		# Prefer video.finished; length_ms is optional UI metadata only.
+		pass
 
 
 func _start_no_video_fallback() -> void:
@@ -1772,6 +1993,15 @@ func _start_no_video_fallback() -> void:
 # ---------------------------------------------------------------------------
 # Round / scene transitions
 # ---------------------------------------------------------------------------
+
+
+func _on_video_finished() -> void:
+	# Prefer type over the playing flag: _video.stop() during cutscene teardown can
+	# re-emit finished after _cutscene_playing is cleared.
+	if GameState.CurrentItemType() == "cutscene" or _cutscene_playing:
+		await _on_cutscene_ended()
+	elif GameState.CurrentItemType() == "round":
+		await _on_round_ended()
 
 
 func _on_round_ended() -> void:
@@ -1837,6 +2067,17 @@ func _on_round_ended() -> void:
 		CoinService.AddCoins(coins)
 	if endure_reward > 0:
 		_show_save_toast("✦  CURSE ENDURED  +♦ %d" % endure_reward)
+
+	# Optional item reward — granted when the round ends (parity with storyboards). Read from
+	# `_cur` (the round captured above, still current — Advance happens inside the transition).
+	# Skip silently if the id no longer resolves (item deleted from the registry after authoring),
+	# so a stale reward never shows a misleading "RECEIVED" toast.
+	var award_item: String = str(_cur.get("award_item", ""))
+	if award_item != "":
+		var award_data: Dictionary = InventoryService.GetItemData(award_item)
+		if not award_data.is_empty():
+			InventoryService.AddItem(award_item)
+			_show_save_toast("✦  RECEIVED: %s" % str(award_data.get("name", award_item)).to_upper())
 
 	if GameState.IsLastRound():
 		_transition_to_end_screen()
@@ -2270,11 +2511,6 @@ func _on_save_item_used() -> void:
 		_show_save_toast("✕  SAVE FAILED")
 
 
-# Divine Summoning — same lift as the resolvable-round clear button (item already consumed).
-func _on_clear_effects_requested() -> void:
-	_cleanse_curse()
-
-
 # Time Control — early-end as a clean finish (item already consumed).
 func _on_skip_round_requested() -> void:
 	# Close inventory if open so the transition isn't under the panel.
@@ -2298,12 +2534,10 @@ func _on_shave_cooldown_requested(hours: int) -> void:
 # ---------------------------------------------------------------------------
 
 
-# "" = ok to activate; "disabled" = grey out (clear_effects); otherwise toast and keep item.
+# "" = ok to activate; "disabled" = grey out; otherwise toast and keep item.
 func inventory_activation_gate(data: Dictionary) -> String:
 	var kind: String = str(data.get("kind", ""))
 	match kind:
-		"clear_effects":
-			return "" if _can_use_clear_effects() else "disabled"
 		"skip_round":
 			return _skip_round_block_reason()
 		"shave_cooldown":
@@ -2314,25 +2548,15 @@ func inventory_activation_gate(data: Dictionary) -> String:
 			return ""
 
 
-func _can_use_clear_effects() -> bool:
-	if _is_overlay_open:
-		return false
-	var round: Dictionary = GameState.CurrentRound()
-	if round.is_empty():
-		return false
-	if bool(round.get("items_blocked", false)):
-		return false
-	if str(round.get("round_type", "normal")) != "effect":
-		return false
-	if not _effect_resolvable or _effect_resolved:
-		return false
-	return true
-
-
 # Non-empty = blocked (toast). Empty = allowed.
 func _skip_round_block_reason() -> String:
 	if _is_overlay_open:
 		return "✕  NOT DURING OVERLAY"
+	if _cutscene_playing:
+		var cut: Dictionary = GameState.CurrentCutscene()
+		if bool(cut.get("items_blocked", true)):
+			return "✕  ITEMS BLOCKED HERE"
+		return "✕  NOT IN A ROUND"
 	var round: Dictionary = GameState.CurrentRound()
 	if round.is_empty():
 		return "✕  NOT IN A ROUND"
@@ -2420,11 +2644,13 @@ func _on_options_closed() -> void:
 	_update_muffle()
 	# Only resume if the round was not separately paused via the pause button —
 	# in that case the effect clock must stay frozen until the player resumes.
+	# Cutscenes never run FunscriptPlayer — do not Resume leftover actions.
 	if not _paused:
 		_video.paused = false
-		FunscriptPlayer.Resume()
 		InventoryService.SetPaused(false)
-		_handy_resume()
+		if not _cutscene_playing:
+			FunscriptPlayer.Resume()
+			_handy_resume()
 	# Output mode may have changed in Options — re-evaluate the disconnect
 	# banner against whatever backend is now selected.
 	_refresh_device_warning()
@@ -2456,9 +2682,11 @@ func _toggle_pause() -> void:
 		_pause_btn.text = "> RESUME"
 		_handy_pause()
 	else:
-		FunscriptPlayer.Resume()
 		_pause_btn.text = "|| PAUSE"
-		_handy_resume()
+		# Cutscenes never run FunscriptPlayer — do not Resume leftover actions.
+		if not _cutscene_playing:
+			FunscriptPlayer.Resume()
+			_handy_resume()
 	_update_muffle()
 
 
@@ -2895,8 +3123,8 @@ func _set_counter_color(c: Color, lbl: Label) -> void:
 
 
 func _connect_signals() -> void:
-	_video.finished.connect(_on_round_ended)
-	_end_timer.timeout.connect(_on_round_ended)
+	_video.finished.connect(_on_video_finished)
+	_end_timer.timeout.connect(_on_video_finished)
 	_pause_btn.pressed.connect(_toggle_pause)
 	_menu_btn.pressed.connect(_go_to_menu)
 	_hide_timer.timeout.connect(_on_hide_timer_timeout)
@@ -2913,7 +3141,6 @@ func _connect_signals() -> void:
 	# save_now utility item: writes a save mid-round so the player can resume
 	# from the start of this round if they quit later. Doesn't end the run.
 	InventoryService.connect("SaveRequested", _on_save_item_used)
-	InventoryService.connect("ClearEffectsRequested", _on_clear_effects_requested)
 	InventoryService.connect("SkipRoundRequested", _on_skip_round_requested)
 	InventoryService.connect("ShaveCooldownRequested", _on_shave_cooldown_requested)
 
