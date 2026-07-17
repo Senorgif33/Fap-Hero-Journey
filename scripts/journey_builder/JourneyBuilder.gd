@@ -48,6 +48,12 @@ const CAUSE_DANGLING_EDGE: String = "dangling_edge"
 const CAUSE_CYCLE: String = "cycle"
 const CAUSE_UNREACHABLE: String = "unreachable"
 
+# Minimum FHJ version required to safely open a journey saved by this build. Stamped into
+# journey.json as "MinVersion"; JourneySelect warns when the running app is older. This is a
+# MAINTAINED FLOOR, not the live app version — bump it only when a save introduces a
+# feature/format an older app can't handle (so a plain re-save doesn't inflate the requirement).
+const JOURNEY_MIN_APP_VERSION: String = "0.6.0"
+
 const GraphViewScene = preload("res://scenes/graph_view/GraphView.tscn")
 
 @onready var _bg: ColorRect = $Background
@@ -570,11 +576,24 @@ func _run_audit() -> Dictionary:
 
 	var round_scores: Dictionary = {}
 	var round_lengths: Dictionary = {}
+	var round_score_bounds: Dictionary = {}
+	var round_length_bounds: Dictionary = {}
 	for nid: String in _graph_model.get("nodes", {}):
 		var node: Dictionary = _graph_model["nodes"][nid]
 		if str(node.get("type", "")) != "round":
 			continue
 		var data: Dictionary = node.get("data", {})
+		# A pool ("encounter") round has no funscript of its own — the runtime rolls one of its
+		# entries — so scoring it off the round's (empty) funscript_path would count it as a
+		# zero-score, zero-length round. Derive both from the entries instead.
+		if str(data.get("round_type", "normal")) == "pool":
+			var pstats: Dictionary = _pool_round_stats(data)
+			if not pstats.is_empty():
+				round_scores[nid] = int(pstats["score_avg"])
+				round_lengths[nid] = int(pstats["len_avg"])
+				round_score_bounds[nid] = {"lo": pstats["score_lo"], "hi": pstats["score_hi"]}
+				round_length_bounds[nid] = {"lo": pstats["len_lo"], "hi": pstats["len_hi"]}
+			continue
 		var fs_path: String = str(data.get("funscript_path", ""))
 		if fs_path != "" and FileAccess.file_exists(fs_path):
 			var actions: Array = JourneyData.read_funscript_actions(fs_path)
@@ -587,16 +606,66 @@ func _run_audit() -> Dictionary:
 			if not actions.is_empty():
 				round_lengths[nid] = int((actions[-1] as Vector2).x)
 
-	_audit_result = JourneyAudit.audit(
-		_graph_model,
-		{
-			"items": items,
-			"round_scores": round_scores,
-			"round_lengths": round_lengths,
-			"unlock_pay_per_use": _journey_unlock_pay_per_use,
-		}
+	_audit_result = (
+		JourneyAudit
+		. audit(
+			_graph_model,
+			{
+				"items": items,
+				"round_scores": round_scores,
+				"round_lengths": round_lengths,
+				"round_score_bounds": round_score_bounds,
+				"round_length_bounds": round_length_bounds,
+				"unlock_pay_per_use": _journey_unlock_pay_per_use,
+			}
+		)
 	)
 	return _audit_result
+
+
+# Baseline score + funscript length across a pool round's entries. The runtime rolls ONE entry
+# by weight, so the audit models the weighted MEAN (the expected value the Monte-Carlo pass
+# uses) plus the min/max an actual run can hit (the interval walk's real bounds). An entry with
+# a missing/unreadable funscript contributes 0, exactly as a round with no script would.
+# Entries never carry a trim (the save bakes them untrimmed). Returns {} for an empty pool.
+func _pool_round_stats(data: Dictionary) -> Dictionary:
+	var entries: Array = data.get("pool_entries", [])
+	if entries.is_empty():
+		return {}
+	var score_lo: int = -1
+	var score_hi: int = 0
+	var len_lo: int = -1
+	var len_hi: int = 0
+	var score_wsum: float = 0.0
+	var len_wsum: float = 0.0
+	var wtotal: float = 0.0
+	for e: Dictionary in entries:
+		var s: int = 0
+		var ms: int = 0
+		var p: String = str(e.get("funscript_path", ""))
+		if p != "" and FileAccess.file_exists(p):
+			var actions: Array = JourneyData.read_funscript_actions(p)
+			s = JourneyAudit.baseline_score(actions)
+			if not actions.is_empty():
+				ms = int((actions[-1] as Vector2).x)
+		var w: float = float(maxi(1, int(e.get("weight", 1))))
+		score_wsum += s * w
+		len_wsum += ms * w
+		wtotal += w
+		score_lo = s if score_lo < 0 else mini(score_lo, s)
+		score_hi = maxi(score_hi, s)
+		len_lo = ms if len_lo < 0 else mini(len_lo, ms)
+		len_hi = maxi(len_hi, ms)
+	if wtotal <= 0.0:
+		return {}
+	return {
+		"score_avg": roundi(score_wsum / wtotal),
+		"len_avg": roundi(len_wsum / wtotal),
+		"score_lo": maxi(0, score_lo),
+		"score_hi": score_hi,
+		"len_lo": maxi(0, len_lo),
+		"len_hi": len_hi,
+	}
 
 
 # Arrival-state summary at a node for the side panel: coins/score bounds from
@@ -1936,6 +2005,12 @@ const BULK_IMPORT_COL_GAP: float = 360.0  # gap to the right of existing content
 # the side panel is left to the per-field DropZones; over the canvas it bulk-imports rounds, falling
 # back to accepting a lone image as the journey cover.
 func _on_viewport_files_dropped(files: PackedStringArray) -> void:
+	# A drop onto the selected pool round's encounter drop zone wins outright — it must be
+	# offered BEFORE the folder branch below, which would otherwise bulk-import the folder as
+	# new round nodes onto the canvas. No live zone under the cursor → falls through.
+	if _side_renderer != null and _side_renderer.try_handle_pool_drop(files):
+		return
+
 	var has_folder: bool = false
 	for f: String in files:
 		if DirAccess.dir_exists_absolute(f):
@@ -3049,6 +3124,10 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		"MapFog": _journey_map_fog,
 		"MapFogReveal": _journey_map_fog_reveal,
 		"UnlockPayPerUse": _journey_unlock_pay_per_use,
+		# Version stamps: CreatedWith = the exact app build that wrote this file (informational);
+		# MinVersion = the floor needed to open it safely (JourneySelect gates on this).
+		"CreatedWith": str(ProjectSettings.get_setting("application/config/version", "")),
+		"MinVersion": JOURNEY_MIN_APP_VERSION,
 	}
 	result.merge(node_block)  # adds Format, Start, Nodes
 	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))
@@ -3180,31 +3259,35 @@ func _save_round_node_media(
 			)
 			if not e_vid["ok"]:
 				return {}
-			(
-				entries_out
-				. append(
-					{
-						"name": ename,
-						"video_path": e_vid["rel"],
-						"funscript_path": e_fs["rel"],
-						"action_count": e_fs["count"],
-						"length_ms": e_fs["length_ms"],
-						"axis_scripts":
-						_pool_channels(
-							entry_in.get("axis_scripts", {}),
-							abs_dir,
-							JourneyData.AXIS_SUFFIXES,
-							0,
-							0
-						),
-						"vib_scripts":
-						_pool_channels(
-							entry_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, 0, 0
-						),
-						"weight": maxi(1, int(entry_in.get("weight", 1))),
-					}
+			var entry_out: Dictionary = {
+				"name": ename,
+				"video_path": e_vid["rel"],
+				"funscript_path": e_fs["rel"],
+				"action_count": e_fs["count"],
+				"length_ms": e_fs["length_ms"],
+				"axis_scripts":
+				_pool_channels(
+					entry_in.get("axis_scripts", {}), abs_dir, JourneyData.AXIS_SUFFIXES, 0, 0
+				),
+				"vib_scripts":
+				_pool_channels(
+					entry_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, 0, 0
+				),
+				"weight": maxi(1, int(entry_in.get("weight", 1))),
+				# Per-entry type (a rolled encounter can be a boss). Boss config rides along;
+				# its intro image is pooled like a boss round's.
+				"round_type": str(entry_in.get("round_type", "normal")),
+			}
+			if str(entry_out["round_type"]) == "boss":
+				entry_out["boss_modifiers"] = (
+					(entry_in.get("boss_modifiers", []) as Array).duplicate(true)
 				)
-			)
+				entry_out["boss_tagline"] = str(entry_in.get("boss_tagline", ""))
+				entry_out["boss_image"] = _pool_small_file(
+					str(entry_in.get("boss_image", "")), abs_dir
+				)
+				entry_out["sensory"] = (entry_in.get("sensory", []) as Array).duplicate(true)
+			entries_out.append(entry_out)
 		saved_data["pool_entries"] = entries_out
 
 	return saved_data

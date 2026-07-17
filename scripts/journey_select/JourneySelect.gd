@@ -95,6 +95,10 @@ var _sort_field: String = "name"
 var _sort_asc: bool = true
 var _current_journey: Dictionary = {}
 
+# Set true for one call when the user chose "Open Anyway" past the newer-version warning, so
+# the re-invoked play/resume/edit handler skips the gate instead of looping the dialog.
+var _bypass_version_gate: bool = false
+
 # Search / filter state
 var _search_text: String = ""
 var _diff_filter_idx: int = 0  # 0 = all, 1+ = DIFFICULTIES[idx-1]
@@ -446,9 +450,43 @@ func _on_backdrop_input(event: InputEvent) -> void:
 			_close_modal()
 
 
+# Version gate: true when the running app is new enough for the selected journey (journeys
+# stamp a MinVersion at save; older/unstamped ones always pass). See UpdateService.app_meets.
+func _app_supports_current() -> bool:
+	return UpdateService.app_meets(str(_current_journey.get("min_version", "")))
+
+
+# Pops a "made for a newer version" warning. On "Open Anyway", sets the one-shot bypass and
+# re-runs `retry` (the originating play/resume/edit handler), which then skips the gate.
+func _warn_version_then(retry: Callable) -> void:
+	var need: String = str(_current_journey.get("min_version", ""))
+	var dialog: ConfirmationDialog = ConfirmationDialog.new()
+	dialog.title = "Newer Version Needed"
+	dialog.dialog_text = (
+		"This journey was made for FHJ v%s or newer. You're on v%s, so it may not open or play correctly.\n\nUpdate from the main menu to be safe."
+		% [need, UpdateService.current_version()]
+	)
+	dialog.ok_button_text = "OPEN ANYWAY"
+	dialog.cancel_button_text = "CANCEL"
+	dialog.get_ok_button().add_theme_color_override("font_color", UITheme.DANGER)
+	dialog.confirmed.connect(
+		func() -> void:
+			_bypass_version_gate = true
+			dialog.queue_free()
+			retry.call()
+	)
+	dialog.canceled.connect(func() -> void: dialog.queue_free())
+	add_child(dialog)
+	dialog.popup_centered()
+
+
 func _on_play_pressed() -> void:
 	if _current_journey.is_empty():
 		return
+	if not _bypass_version_gate and not _app_supports_current():
+		_warn_version_then(_on_play_pressed)
+		return
+	_bypass_version_gate = false
 	# When a save exists, "Play" means New Run — confirm overwrite first so
 	# the user doesn't lose progress they may have forgotten about.
 	var folder_name: String = _current_journey.get("folder_name", "")
@@ -474,6 +512,10 @@ func _on_play_pressed() -> void:
 func _on_edit_pressed() -> void:
 	if _current_journey.is_empty():
 		return
+	if not _bypass_version_gate and not _app_supports_current():
+		_warn_version_then(_on_edit_pressed)
+		return
+	_bypass_version_gate = false
 	JourneyBuilder.edit_journey = _current_journey
 	Transition.change_scene("res://scenes/journey_builder/JourneyBuilder.tscn")
 
@@ -1095,6 +1137,10 @@ func _on_cooldown_shave_pressed(
 func _on_resume_pressed() -> void:
 	if _current_journey.is_empty():
 		return
+	if not _bypass_version_gate and not _app_supports_current():
+		_warn_version_then(_on_resume_pressed)
+		return
+	_bypass_version_gate = false
 	var folder_name: String = _current_journey.get("folder_name", "")
 	if JourneySaveService.is_cooldown_active(folder_name):
 		var remain: String = JourneySaveService.format_cooldown_remaining(folder_name)

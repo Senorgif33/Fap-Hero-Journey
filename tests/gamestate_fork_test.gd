@@ -99,6 +99,19 @@ func test_fork_unresolved_total_is_longest_path() -> void:
 	assert_str(GameState.CurrentFork()["title"]).is_equal("F")
 
 
+# Regression: each fork path advertises the rounds reachable down it (longest path), so
+# ForkScreen can show "N ROUNDS". This was always 0 — CurrentFork never populated it after
+# the graph cutover, so ForkScreen read an empty legacy "rounds" array. P0 = [X, Y] → 2;
+# P1 = [Z] → 1.
+func test_fork_paths_carry_round_count() -> void:
+	_start(_fork_journey())
+	GameState.Advance()  # → fork
+	var paths: Array = GameState.CurrentFork()["paths"]
+	assert_int(paths.size()).is_equal(2)
+	assert_int(int(paths[0]["round_count"])).is_equal(2)
+	assert_int(int(paths[1]["round_count"])).is_equal(1)
+
+
 # Resolving a fork enters the chosen path's first node; counts track the path taken.
 func test_resolve_fork_enters_chosen_path() -> void:
 	_start(_fork_journey())

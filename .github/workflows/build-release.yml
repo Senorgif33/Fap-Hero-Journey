@@ -1,0 +1,238 @@
+name: Build Release
+
+# Manual only - you decide when a build happens.
+#
+# The result is a DRAFT release: discord-release.yml fires on `release: published`, so nothing
+# reaches users or Discord until you press Publish on the draft yourself. Tagging happens when
+# the draft is published, not when this runs.
+#
+# Version and release notes both come from the repo (project.godot and CHANGELOG.md), so the
+# binaries, the tag, the zip names and the notes are all built from one commit and cannot drift.
+#
+# The packaging itself is deliberately NOT reimplemented here - this calls tools/package_release.ps1,
+# the same script used locally. That script is where the hard-won details live (bundle bin/ beside
+# the exe, flat zips with forward-slash entries, BOM-free checksums using GitHub's dotted asset
+# names, and a hard refusal to package a Windows build without ffmpeg). Two implementations would
+# drift silently - which is exactly how v0.6.0 shipped without the ffmpeg binaries.
+on:
+  workflow_dispatch:
+    inputs:
+      create_draft_release:
+        description: 'Create a draft GitHub release with the artifacts attached'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # create the draft release + upload its assets
+
+concurrency:
+  group: build-release
+  cancel-in-progress: false # never kill a release build half-way
+
+env:
+  # Must match the editor the project is developed against: export templates are tied to the
+  # exact build, and a mismatch fails the export.
+  GODOT_VERSION: 4.6.2
+  GODOT_RELEASE: stable
+
+jobs:
+  build:
+    name: Export + package (Windows + Linux)
+    # Windows because Godot cross-exports Linux from here and this is the path validated locally.
+    # The repo is public, so Windows runner minutes are free.
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows Error Reporting latches onto a crashed native process and can stall it for many
+      # minutes, holding the step open long after the process is dead (a Godot export crash sat
+      # for ~10 minutes before the runner gave up). Turn it off so a crash dies immediately and
+      # the real error surfaces fast.
+      - name: Disable Windows Error Reporting
+        shell: pwsh
+        run: |
+          $k = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+          New-Item -Path $k -Force | Out-Null
+          Set-ItemProperty -Path $k -Name DontShowUI -Value 1 -Type DWord
+          Set-ItemProperty -Path $k -Name Disabled  -Value 1 -Type DWord
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x' # the project's TargetFramework is net8.0
+
+      - name: Read version from project.godot
+        id: ver
+        shell: pwsh
+        run: |
+          $m = Select-String -Path project.godot -Pattern '^\s*config/version\s*=\s*"([^"]+)"'
+          if (-not $m) { throw "Could not read application/config/version from project.godot" }
+          $v = $m.Matches[0].Groups[1].Value
+          Write-Host "Project version: $v"
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # Sources the GitHub Release body from the changelog, so the notes can't drift from the
+      # build. Fails when the section is missing - bumping project.godot without writing the
+      # patch notes should stop the release, not produce an empty one.
+      - name: Extract release notes from CHANGELOG.md
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = '${{ steps.ver.outputs.version }}'
+          # Explicit encodings: the notes carry emoji + em-dashes, and defaulting the reader
+          # mangles them into the release body and the Discord embed.
+          $lines = Get-Content -LiteralPath CHANGELOG.md -Encoding utf8
+          $start = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^##\s+v$([regex]::Escape($v))\s*$") { $start = $i; break }
+          }
+          if ($start -lt 0) { throw "CHANGELOG.md has no '## v$v' section - write the patch notes first." }
+
+          $body = New-Object System.Collections.Generic.List[string]
+          for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^##\s+v') { break }   # next release section
+            $body.Add($lines[$i])
+          }
+          $text = ($body -join "`n").Trim()
+          if ($text.Length -eq 0) { throw "The '## v$v' section is empty." }
+
+          # discord-release.yml truncates the embed at 3900 chars; warn at build time rather
+          # than discovering it after the post goes out.
+          if ($text.Length -gt 3900) {
+            Write-Host "::warning::Release notes are $($text.Length) chars - the Discord embed truncates at 3900."
+          }
+          Write-Host "Release notes: $($text.Length) chars"
+          # utf8NoBOM (pwsh 7): a BOM would land as a stray glyph at the top of the release body.
+          Set-Content -LiteralPath release-notes.md -Value $text -Encoding utf8NoBOM
+
+      # Resolved up front so the cache step and the install step agree on one set of paths.
+      - name: Resolve tool paths
+        shell: pwsh
+        run: |
+          "GODOT_DIR=$env:RUNNER_TEMP\godot"                  | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "GODOT_TEMPLATES=$env:APPDATA\Godot\export_templates" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The templates are ~1 GB; without this every run re-downloads them.
+      - name: Cache Godot + export templates
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.GODOT_DIR }}
+            ${{ env.GODOT_TEMPLATES }}
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.GODOT_RELEASE }}-mono-win64
+
+      - name: Install Godot + export templates
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver  = "${env:GODOT_VERSION}-${env:GODOT_RELEASE}"
+          $base = "https://github.com/godotengine/godot/releases/download/$ver"
+
+          Write-Host "==> Downloading editor"
+          $editorZip = "$env:RUNNER_TEMP\godot.zip"
+          Invoke-WebRequest -Uri "$base/Godot_v${ver}_mono_win64.zip" -OutFile $editorZip
+          New-Item -ItemType Directory -Force -Path $env:GODOT_DIR | Out-Null
+          Expand-Archive -Path $editorZip -DestinationPath $env:GODOT_DIR -Force
+
+          Write-Host "==> Downloading export templates (~1 GB)"
+          # A .tpz is just a zip; Expand-Archive insists on the extension, hence the copy.
+          $tpz = "$env:RUNNER_TEMP\templates.tpz"
+          Invoke-WebRequest -Uri "$base/Godot_v${ver}_mono_export_templates.tpz" -OutFile $tpz
+          $tplZip = "$env:RUNNER_TEMP\templates.zip"
+          Copy-Item $tpz $tplZip -Force
+          $extracted = "$env:RUNNER_TEMP\tpl"
+          Expand-Archive -Path $tplZip -DestinationPath $extracted -Force
+
+          # Godot looks for %APPDATA%\Godot\export_templates\<version>.<release>.mono\
+          $src = Join-Path $extracted 'templates'
+          if (-not (Test-Path -LiteralPath $src)) { throw "Unexpected .tpz layout: no templates/ folder" }
+          $dst = Join-Path $env:GODOT_TEMPLATES "${env:GODOT_VERSION}.${env:GODOT_RELEASE}.mono"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
+          Write-Host "Templates installed to $dst"
+
+      # Always runs (the install step is skipped on a cache hit). The CONSOLE build is required:
+      # the plain GUI binary detaches on Windows, so you get no output and no usable exit code.
+      - name: Locate Godot
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $console = Get-ChildItem -Path $env:GODOT_DIR -Recurse -Filter '*_console.exe' |
+                     Select-Object -First 1
+          if (-not $console) { throw "Godot console binary not found under $env:GODOT_DIR" }
+          Write-Host "Godot: $($console.FullName)"
+          "GODOT_CONSOLE=$($console.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Godot's project initialization instantiates the C# autoloads (GameState, ScoreService,
+      # FunscriptPlayer, ...). The assembly they live in is built to .godot/mono/temp/bin/Debug,
+      # which is gitignored - so on a fresh checkout it does not exist, every C# autoload fails
+      # with "script '...cs' is not compiling", and the editor carries on in a broken state. That
+      # is what crashed the export on teardown: locally this never shows up because a build from
+      # the editor (Alt+B) has already produced the assembly.
+      #
+      # Debug is the configuration the editor loads; the export runs its own `dotnet publish` for
+      # the shipped binaries. Done with dotnet rather than Godot's --build-solutions because that
+      # would have to initialize the project first - the very thing that needs the assembly.
+      - name: Build C# assemblies
+        shell: pwsh
+        run: dotnet build "Fap Hero Journey.sln" -c Debug
+
+      # Guard: if the assembly is missing here, every C# autoload will fail during project init
+      # and the export will crash after packing. Fail now, where the cause is obvious.
+      - name: Verify C# assembly exists
+        shell: pwsh
+        run: |
+          $dll = ".godot/mono/temp/bin/Debug/Fap Hero Journey.dll"
+          if (-not (Test-Path -LiteralPath $dll)) {
+            throw "C# assembly not found at '$dll' - Godot's autoloads will fail to compile."
+          }
+          Write-Host "C# assembly OK: $((Get-Item -LiteralPath $dll).Length) bytes"
+
+      # A fresh checkout has no .godot/ import cache. Exporting without importing first can
+      # produce a broken pack, so do it explicitly rather than hoping the export covers it.
+      #
+      # Import legitimately reports non-fatal errors on a cold cache (GDExtension probing), so a
+      # non-zero exit is not automatically fatal - but it must never be swallowed silently: an
+      # import that CRASHES (access violation = -1073741819) is the likely root of a crash in the
+      # export that follows. Report the code, and fail only on a crash.
+      - name: Import project
+        shell: pwsh
+        run: |
+          & "$env:GODOT_CONSOLE" --headless --path . --import
+          $code = $LASTEXITCODE
+          Write-Host "godot --import exit code: $code"
+          if ($code -eq -1073741819 -or $code -eq 3221225477) {
+            throw "Godot CRASHED during --import (access violation). The import cache is unreliable."
+          }
+          if ($code -ne 0) {
+            Write-Host "::warning::godot --import exited $code (non-fatal on a cold cache); continuing."
+          }
+
+      - name: Export + package
+        shell: pwsh
+        run: .\tools\package_release.ps1 -Export -GodotExe "$env:GODOT_CONSOLE"
+
+      # Kept regardless of whether a draft release is made, so a build can be inspected on its own.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhj-v${{ steps.ver.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create draft release
+        if: ${{ inputs.create_draft_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }} # clean 'v' + dotted: 'v.0.6.0' mis-parses in UpdateService
+          name: Fap Hero JOURNEY v${{ steps.ver.outputs.version }}
+          draft: true # Publish by hand - that is what fires the Discord post
+          body_path: release-notes.md # this version's CHANGELOG.md section, extracted above
+          files: |
+            dist/*.zip
+            dist/checksums.txt

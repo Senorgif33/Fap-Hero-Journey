@@ -130,6 +130,17 @@ func _normalize_version(s: String) -> String:
 	return s
 
 
+# True when the running app is at least `min_version` (dotted). A blank requirement
+# always passes (pre-stamp journeys). Used to gate opening a journey stamped with the
+# minimum FHJ version it needs. Leading "v" tolerated on either side.
+func app_meets(min_version: String) -> bool:
+	var need: String = _normalize_version(min_version)
+	if need == "":
+		return true
+	# Meets iff current is not older than need ⇔ need is not strictly newer than current.
+	return not _is_newer(need, _normalize_version(current_version()))
+
+
 # Dotted numeric compare — true when `a` is strictly newer than `b`. Missing
 # segments count as 0 (so "0.4" > "0.3.9"). Non-numeric suffixes are ignored.
 func _is_newer(a: String, b: String) -> bool:

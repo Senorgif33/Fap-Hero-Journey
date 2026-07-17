@@ -635,6 +635,7 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			# The full round field set, lowercase. Media paths (funscript/video/boss/axis/vib) +
 			# action_count/length_ms + folder are overwritten afterwards by _save_round_node_media.
 			out["coins"] = int(data.get("coins", 0))
+			out["award_item"] = str(data.get("award_item", ""))  # optional item id granted at round end
 			out["is_checkpoint"] = bool(data.get("is_checkpoint", false))
 			out["cooldown_days"] = int(data.get("cooldown_days", 0))
 			out["items_blocked"] = bool(
@@ -721,14 +722,23 @@ static func _prune_orphan_overrides(out: Dictionary) -> void:
 # the media paths are pooled into content/ by _save_round_node_media; at scan they
 # resolve back to absolute — same as a normal round's media, per entry.
 static func coerce_pool_entry(e: Dictionary) -> Dictionary:
-	return {
+	var out: Dictionary = {
 		"name": str(e.get("name", "")),
 		"video_path": str(e.get("video_path", "")),
 		"funscript_path": str(e.get("funscript_path", "")),
 		"axis_scripts": (e.get("axis_scripts", {}) as Dictionary).duplicate(true),
 		"vib_scripts": (e.get("vib_scripts", {}) as Dictionary).duplicate(true),
 		"weight": maxi(1, int(e.get("weight", 1))),
+		# Per-entry round type: a rolled encounter can play as normal or as a boss (the round
+		# adopts the picked entry's type at runtime). Only boss carries extra config.
+		"round_type": str(e.get("round_type", "normal")),
 	}
+	if str(out["round_type"]) == "boss":
+		out["boss_modifiers"] = (e.get("boss_modifiers", []) as Array).duplicate(true)
+		out["boss_tagline"] = str(e.get("boss_tagline", ""))
+		out["boss_image"] = str(e.get("boss_image", ""))
+		out["sensory"] = (e.get("sensory", []) as Array).duplicate(true)
+	return out
 
 
 # Per-entry spawn weights (≥1) for the runtime pick. Pair with
@@ -832,6 +842,7 @@ static func new_item(type: String) -> Dictionary:
 				"funscript_path": "",
 				"video_path": "",
 				"coins": 0,
+				"award_item": "",
 				"axis_scripts": {},
 				"node_id": new_node_id()
 			}

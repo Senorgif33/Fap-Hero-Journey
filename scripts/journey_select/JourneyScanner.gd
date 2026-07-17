@@ -109,6 +109,9 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		# Shop economy: false (default) = classic buy-charge / free activate;
 		# true = unlock modifiers free in shop, pay price per mid-round activation.
 		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
+		# Version stamps (absent on pre-0.6.0 journeys → blank, which always passes the gate).
+		"min_version": str(data.get("MinVersion", "")),
+		"created_with": str(data.get("CreatedWith", "")),
 		# Redirect overlay (skip/converge/end), composed onto the graph in parse_graph.
 		"redirects": data.get("Redirects", {}),
 		"rounds": [],
@@ -379,6 +382,9 @@ static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dicti
 		"map_fog": bool(data.get("MapFog", false)),
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
 		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
+		# Version stamps (absent on pre-0.6.0 journeys → blank, which always passes the gate).
+		"min_version": str(data.get("MinVersion", "")),
+		"created_with": str(data.get("CreatedWith", "")),
 		"cover_path": find_cover_image(path),
 		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
 		"rounds": [],

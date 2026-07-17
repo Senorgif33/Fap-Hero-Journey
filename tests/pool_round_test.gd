@@ -20,6 +20,33 @@ func test_coerce_pool_entry_clamps_weight() -> void:
 	assert_int(int(JourneyData.coerce_pool_entry({"weight": 4})["weight"])).is_equal(4)
 
 
+# A pool entry defaults to a normal encounter and carries no boss config.
+func test_coerce_pool_entry_defaults_normal() -> void:
+	var e: Dictionary = JourneyData.coerce_pool_entry({"name": "A"})
+	assert_str(str(e["round_type"])).is_equal("normal")
+	assert_bool(e.has("boss_modifiers")).is_false()  # only boss entries carry it
+
+
+# A boss entry keeps its type + forced-modifier / tagline / image config through coercion.
+func test_coerce_pool_entry_boss_carries_config() -> void:
+	var e: Dictionary = (
+		JourneyData
+		. coerce_pool_entry(
+			{
+				"name": "Ogre",
+				"round_type": "boss",
+				"boss_tagline": "IT AWAKENS",
+				"boss_image": "ogre.png",
+				"boss_modifiers": [{"kind": "scale", "value": 2.0}],
+			}
+		)
+	)
+	assert_str(str(e["round_type"])).is_equal("boss")
+	assert_str(str(e["boss_tagline"])).is_equal("IT AWAKENS")
+	assert_str(str(e["boss_image"])).is_equal("ogre.png")
+	assert_int((e["boss_modifiers"] as Array).size()).is_equal(1)
+
+
 func test_coerce_pool_entry_deep_copies_channels() -> void:
 	var axis: Dictionary = {"L1": "a.funscript"}
 	var e: Dictionary = JourneyData.coerce_pool_entry({"axis_scripts": axis})
@@ -71,6 +98,7 @@ func test_pool_entry_paths_resolve_on_scan() -> void:
 		"name": "A",
 		"video_path": "content/m_a.mp4",
 		"funscript_path": "content/m_a.funscript",
+		"boss_image": "content/m_a.png",
 		"axis_scripts": {"L1": "content/m_a.L1.funscript"},
 	}
 	var graph: Dictionary = {
@@ -85,6 +113,7 @@ func test_pool_entry_paths_resolve_on_scan() -> void:
 	var e: Dictionary = graph["nodes"]["n1"]["data"]["pool_entries"][0]
 	assert_str(str(e["video_path"])).is_equal("/base/content/m_a.mp4")
 	assert_str(str(e["funscript_path"])).is_equal("/base/content/m_a.funscript")
+	assert_str(str(e["boss_image"])).is_equal("/base/content/m_a.png")  # boss entry's intro image
 	assert_str(str((e["axis_scripts"] as Dictionary)["L1"])).is_equal(
 		"/base/content/m_a.L1.funscript"
 	)

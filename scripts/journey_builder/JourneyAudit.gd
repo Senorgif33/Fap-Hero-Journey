@@ -50,13 +50,19 @@ const SEV_INFO: String = "info"  # worth knowing; not necessarily a problem
 
 
 # Runs the full audit. ctx:
-#   items:               {item_id: {"price": int, "category": String, ...}}
-#   round_scores:        {node_id: int} — baseline funscript score per round node
-#                        (compute via baseline_score; engine glue does the file I/O)
-#   round_lengths:       {node_id: int} — funscript length in ms per round node
+#   items:         {item_id: {"price": int, "category": String, ...}} — the item registry
+#   round_scores:  {node_id: int} — baseline funscript score per round node
+#                  (compute via baseline_score; engine glue does the file I/O).
+#                  For a POOL round this is the weighted MEAN over its entries (the
+#                  runtime rolls one), i.e. the expected value the MC pass models.
+#   round_lengths: {node_id: int} — funscript length in ms per round node (pool: mean)
+#   round_score_bounds:  {node_id: {lo, hi}} (optional) — per-node score range when a
+#                  round's score isn't a single value (a POOL round varies by which
+#                  entry is rolled). Absent → the flat round_scores value bounds it.
+#   round_length_bounds: {node_id: {lo, hi}} (optional) — same, for funscript length
 #   unlock_pay_per_use:  bool (optional, default false) — journey shop economy
-#   mc_runs:             int (optional, DEFAULT_MC_RUNS)
-#   rng_seed:            int (optional — fixed seed makes the MC pass reproducible)
+#   mc_runs:       int (optional, DEFAULT_MC_RUNS)
+#   rng_seed:      int (optional — fixed seed makes the MC pass reproducible)
 # Returns {findings, coins, last_score, visits, stats}: findings is an Array of
 # {severity, kind, node_id, edge_idx, msg}; coins/last_score map node_id →
 # {lo, hi} ENTRY intervals; visits is simulate()'s output; stats is
@@ -442,6 +448,10 @@ static func _flow_analysis(graph: Dictionary, ctx: Dictionary) -> Dictionary:
 	var unlock_ppu: bool = bool(ctx.get("unlock_pay_per_use", false))
 	var round_scores: Dictionary = ctx.get("round_scores", {})
 	var round_lengths: Dictionary = ctx.get("round_lengths", {})
+	# Optional per-node ranges (pool rounds roll one entry, so their score/length is a range,
+	# not a value). Absent for ordinary rounds → the flat score/length bounds itself.
+	var round_score_bounds: Dictionary = ctx.get("round_score_bounds", {})
+	var round_length_bounds: Dictionary = ctx.get("round_length_bounds", {})
 	var order: Array = topo_order(graph)
 
 	var coins: Dictionary = {}
@@ -497,27 +507,33 @@ static func _flow_analysis(graph: Dictionary, ctx: Dictionary) -> Dictionary:
 				)
 				exit_coins["lo"] = maxi(0, int(exit_coins["lo"]) + int(delta["lo"]))
 				exit_coins["hi"] = maxi(0, int(exit_coins["hi"]) + int(delta["hi"]))
+				# Score / length bound the round. Ordinary rounds are a single value; a pool
+				# round's depends on which entry is rolled, so it supplies a real {lo, hi}.
 				var s: int = int(round_scores.get(id, 0))
-				exit_score = {"lo": s, "hi": s}
-				exit_total["lo"] = int(exit_total["lo"]) + s
-				exit_total["hi"] = int(exit_total["hi"]) + s
+				var sb: Dictionary = round_score_bounds.get(id, {"lo": s, "hi": s})
+				var s_lo: int = int(sb.get("lo", s))
+				var s_hi: int = int(sb.get("hi", s))
+				exit_score = {"lo": s_lo, "hi": s_hi}
+				exit_total["lo"] = int(exit_total["lo"]) + s_lo
+				exit_total["hi"] = int(exit_total["hi"]) + s_hi
 				exit_rounds["lo"] = int(exit_rounds["lo"]) + 1
 				exit_rounds["hi"] = int(exit_rounds["hi"]) + 1
 				var ms: int = int(round_lengths.get(id, 0))
-				exit_dur["lo"] = int(exit_dur["lo"]) + ms
-				exit_dur["hi"] = int(exit_dur["hi"]) + ms
+				var lb: Dictionary = round_length_bounds.get(id, {"lo": ms, "hi": ms})
+				exit_dur["lo"] = int(exit_dur["lo"]) + int(lb.get("lo", ms))
+				exit_dur["hi"] = int(exit_dur["hi"]) + int(lb.get("hi", ms))
 				# Checkpoint spacing: a checkpoint saves at round START, so the
 				# checkpointed round itself is the first of the next stretch.
 				if bool(data.get("is_checkpoint", false)):
 					cp["count"] = int(cp["count"]) + 1
 					_note_completed_stretch(cp, entry["gap_r"], entry["gap_ms"])
 					exit_gap_r = {"lo": 1, "hi": 1}
-					exit_gap_ms = {"lo": ms, "hi": ms}
+					exit_gap_ms = {"lo": int(lb.get("lo", ms)), "hi": int(lb.get("hi", ms))}
 				else:
 					exit_gap_r["lo"] = int(exit_gap_r["lo"]) + 1
 					exit_gap_r["hi"] = int(exit_gap_r["hi"]) + 1
-					exit_gap_ms["lo"] = int(exit_gap_ms["lo"]) + ms
-					exit_gap_ms["hi"] = int(exit_gap_ms["hi"]) + ms
+					exit_gap_ms["lo"] = int(exit_gap_ms["lo"]) + int(lb.get("lo", ms))
+					exit_gap_ms["hi"] = int(exit_gap_ms["hi"]) + int(lb.get("hi", ms))
 				if int(exit_gap_ms["hi"]) > int(cp["max_ms"]):
 					cp["max_ms"] = int(exit_gap_ms["hi"])
 					cp["max_rounds"] = int(exit_gap_r["hi"])

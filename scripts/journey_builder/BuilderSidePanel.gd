@@ -53,6 +53,11 @@ const BOSS_MODIFIER_LABELS: Array = [
 
 var _owner: JourneyBuilder
 
+# The selected pool round's bulk drop target: {zone, arr, idx, list, reselect}. Registered by
+# _make_pool_expander and consumed by try_handle_pool_drop (JourneyBuilder routes OS drops to
+# it). Cleared whenever the panel is rebuilt, so it never points at a freed control.
+var _pool_drop: Dictionary = {}
+
 
 func _init(owner: JourneyBuilder) -> void:
 	_owner = owner
@@ -66,6 +71,7 @@ func show_journey_info_panel() -> void:
 	var side_vbox: VBoxContainer = _owner._side_vbox
 	if side_vbox == null:
 		return
+	_pool_drop = {}  # the panel is being rebuilt — drop the stale pool drop-zone registration
 	for c in side_vbox.get_children():
 		c.queue_free()
 
@@ -367,6 +373,7 @@ func _make_graph_add_buttons() -> Control:
 # refresh (re-selecting a node, or a structural change).
 func show_graph_node_editor(node_id: String) -> void:
 	var side_vbox: VBoxContainer = _owner._side_vbox
+	_pool_drop = {}  # the panel is being rebuilt — drop the stale pool drop-zone registration
 	for c in side_vbox.get_children():
 		c.queue_free()
 	var node: Dictionary = (_owner._graph_model.get("nodes", {}) as Dictionary).get(node_id, {})
@@ -1303,6 +1310,21 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	coins_spin.value_changed.connect(func(v: float) -> void: arr[idx]["coins"] = int(v))
 	col.add_child(coins_spin)
 
+	# Optional item reward — granted (alongside coins) when the round ends. Same picker as the
+	# storyboard reward; "None" clears it.
+	col.add_child(_side_field_label("ITEM REWARD  (OPTIONAL)"))
+	var item_values: Array = [""]
+	var item_dd: OptionButton = OptionButton.new()
+	item_dd.add_item("None")
+	for k: String in InventoryService.GetAllItemIds():
+		item_values.append(k)
+		item_dd.add_item(str(InventoryService.GetItemData(k).get("name", k)))
+	item_dd.selected = max(0, item_values.find(str(round_data.get("award_item", ""))))
+	item_dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_option_button(item_dd)
+	item_dd.item_selected.connect(func(i: int) -> void: arr[idx]["award_item"] = item_values[i])
+	col.add_child(item_dd)
+
 	# Flags this round sets when it plays (read by flag-conditional forks downstream).
 	col.add_child(_side_section_separator())
 	col.add_child(_make_set_flags_field(arr[idx]))
@@ -1319,15 +1341,128 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	col.add_child(_side_section_separator())
 	col.add_child(_make_items_blocked_toggle(arr, idx))
 
-	col.add_child(_side_section_separator())
-	col.add_child(_make_boss_expander(arr, idx, reselect))
+	# Boss / Effect are the round's own twist and are mutually exclusive with each other. A POOL
+	# round carries its type PER ENTRY instead (a rolled encounter can itself be a boss), so the
+	# round-level Boss/Effect toggles are hidden for pool rounds — only the pool list is shown.
+	if str(arr[idx].get("round_type", "normal")) != "pool":
+		col.add_child(_side_section_separator())
+		col.add_child(_make_boss_expander(arr, idx, reselect))
 
-	col.add_child(_side_section_separator())
-	col.add_child(_make_effect_expander(arr, idx, reselect))
+		col.add_child(_side_section_separator())
+		col.add_child(_make_effect_expander(arr, idx, reselect))
 
 	col.add_child(_side_section_separator())
 	col.add_child(_make_pool_expander(arr, idx, reselect))
+
+	# ── Templates (save this round's definition for reuse; apply a saved one) ─────
+	col.add_child(_side_divider_line())
+	col.add_child(_side_field_label("TEMPLATES"))
+	col.add_child(_make_round_templates_section(arr, idx, reselect))
 	return col
+
+
+# Save-as-template + apply/delete for the current round. A template captures the whole round
+# definition (media, type config, pool entries), so authors can reuse it instead of rebuilding
+# — especially multi-entry pool rounds. See RoundTemplates.
+func _make_round_templates_section(arr: Array, idx: int, reselect: Callable) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+
+	var hint: Label = Label.new()
+	hint.text = "Save this round's full definition (media, type, pool entries) to reuse on other rounds. Applying overwrites this round. Media files must still exist on disk when you save the journey."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(hint)
+
+	var save_btn: Button = Button.new()
+	save_btn.text = "★ SAVE ROUND AS TEMPLATE"
+	save_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(save_btn, UITheme.PURPLE_MID)
+	save_btn.pressed.connect(func() -> void: _prompt_save_round_template(arr, idx, reselect))
+	box.add_child(save_btn)
+
+	var tmpl_names: Array = RoundTemplates.names()
+	if tmpl_names.is_empty():
+		return box
+
+	# Selector + explicit Apply / Delete (the dropdown only picks a target — selecting it must
+	# not apply, or you couldn't delete without first overwriting the round).
+	var dd: OptionButton = OptionButton.new()
+	dd.add_item("Select a template…")
+	dd.set_item_disabled(0, true)
+	for n: String in tmpl_names:
+		dd.add_item(str(n))
+	dd.selected = 0
+	dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_option_button(dd)
+	box.add_child(dd)
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 6)
+	var apply_btn: Button = Button.new()
+	apply_btn.text = "⧉ APPLY"
+	apply_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(apply_btn, UITheme.PURPLE_MID)
+	apply_btn.pressed.connect(
+		func() -> void:
+			if dd.selected <= 0:
+				return
+			var tname: String = str(tmpl_names[dd.selected - 1])
+			RoundTemplates.apply_to(arr[idx], RoundTemplates.get_data(tname))
+			_owner._show_status('Applied template "%s".' % tname, false)
+			reselect.call(idx)
+	)
+	btn_row.add_child(apply_btn)
+	var del_btn: Button = Button.new()
+	del_btn.text = "🗑 DELETE"
+	del_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(del_btn, UITheme.MAGENTA)
+	del_btn.pressed.connect(
+		func() -> void:
+			if dd.selected <= 0:
+				return
+			var tname: String = str(tmpl_names[dd.selected - 1])
+			RoundTemplates.remove(tname)
+			_owner._show_status('Deleted template "%s".' % tname, false)
+			reselect.call(idx)
+	)
+	btn_row.add_child(del_btn)
+	box.add_child(btn_row)
+
+	return box
+
+
+# Small name-entry dialog for saving the current round as a template; rebuilds the panel on
+# success so the new template shows in the apply selector.
+func _prompt_save_round_template(arr: Array, idx: int, reselect: Callable) -> void:
+	var dialog: ConfirmationDialog = ConfirmationDialog.new()
+	dialog.title = "Save Round Template"
+	dialog.ok_button_text = "SAVE"
+	var vb: VBoxContainer = VBoxContainer.new()
+	var lbl: Label = Label.new()
+	lbl.text = "Template name:"
+	vb.add_child(lbl)
+	var name_edit: LineEdit = LineEdit.new()
+	name_edit.placeholder_text = "e.g. 3-clip encounter"
+	name_edit.custom_minimum_size = Vector2(320, 0)
+	name_edit.text = str(arr[idx].get("name", ""))
+	vb.add_child(name_edit)
+	dialog.add_child(vb)
+	dialog.register_text_enter(name_edit)
+	dialog.confirmed.connect(
+		func() -> void:
+			var nm: String = name_edit.text.strip_edges()
+			if nm != "":
+				RoundTemplates.add(nm, arr[idx])
+				_owner._show_status('Saved template "%s".' % nm, false)
+				reselect.call(idx)
+			dialog.queue_free()
+	)
+	dialog.canceled.connect(func() -> void: dialog.queue_free())
+	_owner.add_child(dialog)
+	dialog.popup_centered()
+	name_edit.grab_focus()
 
 
 func _make_side_shop_editor(arr: Array, idx: int) -> Control:
@@ -2860,7 +2995,106 @@ func _make_pool_expander(arr: Array, idx: int, reselect: Callable) -> Control:
 	)
 	wrapper.add_child(add_btn)
 
+	# Bulk add: drop videos and/or whole folders here — one encounter per video, funscript /
+	# axis / vib siblings matched by file name (the same importer the canvas uses). Registered
+	# so JourneyBuilder can route the OS drop here first; see try_handle_pool_drop.
+	var drop: PanelContainer = _make_pool_drop_zone()
+	wrapper.add_child(drop)
+	_pool_drop = {"zone": drop, "arr": arr, "idx": idx, "list": list, "reselect": reselect}
+
 	return wrapper
+
+
+# The pool round's bulk drop target: a passive visual + hit-test rect. It deliberately does NOT
+# listen for files_dropped itself — JourneyBuilder owns OS-drop routing (a folder drop would
+# otherwise be claimed by the canvas bulk-importer before any side-panel handler ran).
+func _make_pool_drop_zone() -> PanelContainer:
+	var zone: PanelContainer = PanelContainer.new()
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color = UITheme.PANEL_BG
+	s.border_color = UITheme.PURPLE_MID
+	s.set_border_width_all(2)
+	s.set_corner_radius_all(UITheme.CORNER_RADIUS)
+	s.set_content_margin_all(12)
+	zone.add_theme_stylebox_override("panel", s)
+	zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	zone.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var lbl: Label = Label.new()
+	lbl.text = "⧉  DROP VIDEOS OR FOLDERS HERE\nOne encounter per video · scripts matched by name"
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.add_theme_color_override("font_color", UITheme.PURPLE_MID)
+	lbl.add_theme_font_size_override("font_size", 10)
+	zone.add_child(lbl)
+	return zone
+
+
+# Consumes an OS file drop that landed on the pool round's drop zone, turning it into encounter
+# entries; returns false when there's no live zone under the cursor (so the caller falls through
+# to its normal routing). JourneyBuilder calls this FIRST — otherwise a dropped folder would be
+# bulk-imported as new round nodes onto the canvas instead.
+func try_handle_pool_drop(files: PackedStringArray) -> bool:
+	if _pool_drop.is_empty():
+		return false
+	var zone: Control = _pool_drop.get("zone", null)
+	if not is_instance_valid(zone) or not zone.is_visible_in_tree():
+		return false
+	if not zone.get_global_rect().has_point(zone.get_viewport().get_mouse_position()):
+		return false
+	# Claim the drop now, but add deferred: this runs inside the files_dropped emission, and the
+	# add rebuilds the entry rows — whose per-field DropZones are listening to that same signal.
+	_bulk_add_pool_entries.call_deferred(
+		_pool_drop["arr"], _pool_drop["idx"], _pool_drop["list"], _pool_drop["reselect"], files
+	)
+	return true
+
+
+# Expands the raw selection (recursing into folders), groups it into video+scripts sets via
+# the shared importer, and appends one pool entry per video. Reports how many were added and
+# how many funscripts were skipped for lacking a matching video.
+func _bulk_add_pool_entries(
+	arr: Array, idx: int, list: VBoxContainer, reselect: Callable, files: PackedStringArray
+) -> void:
+	var expanded: PackedStringArray = ImportScanner.expand_dropped_paths(files)
+	var result: Dictionary = ImportScanner.build_rounds(expanded)
+	var rounds: Array = result["rounds"]
+	var skipped: int = int(result["skipped_no_video"])
+
+	if rounds.is_empty():
+		var msg: String = "No encounters added — no videos found in the selection."
+		if skipped > 0:
+			msg = (
+				"No encounters added — found %d funscript%s with no matching video."
+				% [skipped, "s" if skipped != 1 else ""]
+			)
+		_owner._show_status(msg, true)
+		return
+
+	var entries: Array = arr[idx]["pool_entries"]
+	for r: Dictionary in rounds:
+		(
+			entries
+			. append(
+				{
+					"name": str(r.get("name", "")),
+					"video_path": str(r.get("video_path", "")),
+					"funscript_path": str(r.get("funscript_path", "")),
+					"axis_scripts": (r.get("axis_scripts", {}) as Dictionary).duplicate(),
+					"vib_scripts": (r.get("vib_scripts", {}) as Dictionary).duplicate(),
+					"weight": 1,
+				}
+			)
+		)
+	_rebuild_pool_entries(arr, idx, list, reselect)
+
+	var note: String = "Added %d encounter%s." % [rounds.size(), "s" if rounds.size() != 1 else ""]
+	if skipped > 0:
+		note += (
+			" Skipped %d funscript%s with no matching video."
+			% [skipped, "s" if skipped != 1 else ""]
+		)
+	_owner._show_status(note, false)
 
 
 func _default_pool_entry() -> Dictionary:
@@ -2871,6 +3105,7 @@ func _default_pool_entry() -> Dictionary:
 		"axis_scripts": {},
 		"vib_scripts": {},
 		"weight": 1,
+		"round_type": "normal",  # per-entry type: a rolled encounter can be normal or boss
 	}
 
 
@@ -2990,6 +3225,15 @@ func _make_pool_entry_row(
 		fzone.call_deferred("set_file", entry["funscript_path"], false)
 	fzone.file_dropped.connect(func(p: String) -> void: entry["funscript_path"] = p)
 
+	# Secondary device scripts — the round editor's own expanders, bound to THIS entry, so a
+	# pooled encounter carries the same multi-axis / vibrator setup a normal round can. (The data
+	# already round-tripped: dropping a video autofills these from same-named siblings, and
+	# save/scan/runtime have always carried an entry's axis_scripts / vib_scripts — until now
+	# there was just no way to see or edit them.)
+	var entry_arr: Array = [entry]
+	box.add_child(_make_axis_expander(entry_arr, 0))
+	box.add_child(_make_vib_expander(entry_arr, 0))
+
 	# Weight (spawn rarity).
 	var wrow: HBoxContainer = HBoxContainer.new()
 	wrow.add_theme_constant_override("separation", 6)
@@ -3008,6 +3252,14 @@ func _make_pool_entry_row(
 	wspin.value_changed.connect(func(v: float) -> void: entry["weight"] = int(v))
 	wrow.add_child(wspin)
 	box.add_child(wrow)
+
+	# Per-entry type — reuse the round's Boss expander, bound to THIS entry. Toggling it sets the
+	# entry's round_type; when this encounter is the one rolled at runtime, the round plays as a
+	# boss (its own modifiers / tagline / image). Left off, the entry plays as a normal round.
+	box.add_child(HSeparator.new())
+	var rebuild_entries: Callable = func(_i: int) -> void:
+		_rebuild_pool_entries(arr, idx, list, reselect)
+	box.add_child(_make_boss_expander(entry_arr, 0, rebuild_entries))
 
 	return panel
 

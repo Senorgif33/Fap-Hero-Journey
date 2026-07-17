@@ -38,6 +38,8 @@ Desktop.ini
 HANDOFF.md
 export_presets.cfg
 *.md
+!CHANGELOG.md
+!README.md
 # Committed how-to / smoke docs (override *.md)
 !docs/
 !docs/**/*.md
