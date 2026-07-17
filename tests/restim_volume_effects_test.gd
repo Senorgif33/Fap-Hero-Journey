@@ -1,6 +1,7 @@
 extends GdUnitTestSuite
 
-# Restim V0 intensity — FunscriptPlayer.ComputeRestimVolumeFactor / RestimAxesMuted.
+# Restim intensity — V0 from scale / volume_attenuate.
+# Factor clamped to [0, 1]; final send also clamps to [0, 1].
 # Pure effect-dict math; no device connection required.
 # Note: C# default args are not visible to GDScript — always pass include_scale.
 
@@ -53,11 +54,19 @@ func test_clamp_reverse_ignored_for_v0() -> void:
 	assert_bool(FunscriptPlayer.RestimAxesMuted(effects)).is_false()
 
 
-func test_factor_clamped_to_unit_interval() -> void:
+func test_factor_clamps_to_unit_interval() -> void:
+	# Boost factors are capped at 1; negative floors at 0.
 	var high: Array = [_fx("scale", 2.0)]
 	assert_float(_vol(high, true)).is_equal(1.0)
+	var mild: Array = [_fx("scale", 1.1)]
+	assert_float(_vol(mild, true)).is_equal(1.0)
 	var neg: Array = [_fx("volume_attenuate", -1.0)]
 	assert_float(_vol(neg, true)).is_equal(0.0)
+
+
+func test_apply_restim_intensity_norm() -> void:
+	assert_float(FunscriptPlayer.ApplyRestimIntensityNorm(0.75, 0.60)).is_equal_approx(0.45, 0.001)
+	assert_float(FunscriptPlayer.ApplyRestimIntensityNorm(0.90, 1.20)).is_equal(1.0)
 
 
 func test_soft_touch_item_is_volume_attenuate() -> void:

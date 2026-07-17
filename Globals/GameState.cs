@@ -163,13 +163,15 @@ public partial class GameState : Node
     // highlights the node by id. "" when the journey is done.
     public string CurrentNodeId() => _currentId;
 
-    // The current node's type ("round"/"shop"/"storyboard"/"fork"); "" when the journey is
-    // done. Drives GameLoop's dispatch and the map keying.
+    // The current node's type ("round"/"shop"/"storyboard"/"fork"/"cooldown"/"cutscene");
+    // "" when the journey is done. Drives GameLoop's dispatch and the map keying.
     public string CurrentItemType() => TypeOf(_currentId);
 
     public Dictionary CurrentRound() => DataIfType("round");
     public Dictionary CurrentShop() => DataIfType("shop");
     public Dictionary CurrentStoryboard() => DataIfType("storyboard");
+    public Dictionary CurrentCooldown() => DataIfType("cooldown");
+    public Dictionary CurrentCutscene() => DataIfType("cutscene");
 
     private Dictionary DataIfType(string type)
     {

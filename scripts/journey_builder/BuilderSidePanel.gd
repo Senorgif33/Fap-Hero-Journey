@@ -91,6 +91,16 @@ func show_journey_info_panel() -> void:
 	open_folder_btn.pressed.connect(_owner._open_journey_folder)
 	side_vbox.add_child(open_folder_btn)
 
+	var scan_fs_btn: Button = Button.new()
+	scan_fs_btn.text = "SCAN FUNSCRIPTS"
+	scan_fs_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scan_fs_btn.tooltip_text = (
+		"Attach matching funscripts / Restim kits / vibs next to each round's video on disk."
+	)
+	UITheme.style_button(scan_fs_btn, UITheme.CYAN)
+	scan_fs_btn.pressed.connect(_owner._scan_attach_funscripts)
+	side_vbox.add_child(scan_fs_btn)
+
 	# Cover preview + button
 	side_vbox.add_child(_side_field_label("COVER IMAGE"))
 	var cover_border: PanelContainer = PanelContainer.new()
@@ -343,14 +353,15 @@ func _make_tag_toggle(tag_def: Dictionary) -> Button:
 	return btn
 
 
-# Graph-editor: the "ADD NODE" button row (round/shop/storyboard/fork → _create_graph_node). Shown
-# in both the journey-info panel and the node editor so creating a node is always reachable.
+# Graph-editor: the "ADD NODE" button row (round/shop/storyboard/fork/cooldown/cutscene
+# → _create_graph_node). Shown in both the journey-info panel and the node editor so
+# creating a node is always reachable.
 func _make_graph_add_buttons() -> Control:
 	var box: VBoxContainer = VBoxContainer.new()
 	box.add_theme_constant_override("separation", 4)
 	box.add_child(_side_field_label("ADD NODE"))
-	var row: HBoxContainer = HBoxContainer.new()
-	row.add_theme_constant_override("separation", 4)
+	var row1: HBoxContainer = HBoxContainer.new()
+	row1.add_theme_constant_override("separation", 4)
 	for spec: Array in [
 		["▶ ROUND", "round", UITheme.PURPLE_MID],
 		["◆ SHOP", "shop", UITheme.PURPLE_BRIGHT],
@@ -361,8 +372,20 @@ func _make_graph_add_buttons() -> Control:
 		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var t: String = spec[1]
 		btn.pressed.connect(func() -> void: _owner._create_graph_node(t))
-		row.add_child(btn)
-	box.add_child(row)
+		row1.add_child(btn)
+	box.add_child(row1)
+	var row2: HBoxContainer = HBoxContainer.new()
+	row2.add_theme_constant_override("separation", 4)
+	for spec2: Array in [
+		["⏳ COOLDOWN", "cooldown", UITheme.DANGER],
+		["▣ CUTSCENE", "cutscene", UITheme.TOXIC_GREEN]
+	]:
+		var btn2: Button = UITheme.make_icon_btn(spec2[0], false, spec2[2])
+		btn2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var t2: String = spec2[1]
+		btn2.pressed.connect(func() -> void: _owner._create_graph_node(t2))
+		row2.add_child(btn2)
+	box.add_child(row2)
 	return box
 
 
@@ -1064,6 +1087,12 @@ func _build_side_panel_editor(
 		"storyboard":
 			hdr.text = "// STORYBOARD //"
 			accent = UITheme.STORYBOARD
+		"cooldown":
+			hdr.text = "// COOLDOWN //"
+			accent = UITheme.DANGER
+		"cutscene":
+			hdr.text = "// CUTSCENE //"
+			accent = UITheme.TOXIC_GREEN
 		_:
 			hdr.text = "// ITEM //"
 			accent = UITheme.PURPLE_MID
@@ -1083,6 +1112,10 @@ func _build_side_panel_editor(
 			container.add_child(_make_side_shop_editor(arr, idx))
 		"storyboard":
 			container.add_child(_make_side_storyboard_editor(arr, idx, reselect))
+		"cooldown":
+			container.add_child(_make_side_cooldown_editor(arr, idx))
+		"cutscene":
+			container.add_child(_make_side_cutscene_editor(arr, idx))
 
 
 # ── Internal: small helpers ─────────────────────────────────────────────────
@@ -2244,18 +2277,16 @@ func _fork_resolution_hint(resolution: String, metric: String, decider: String) 
 # ── Extra axes expander ──────────────────────────────────────────────────────
 
 
-# Collapsed "▶ EXTRA AXES" expander with one DropZone per axis.
+# Collapsed "▶ EXTRA AXES" expander with Restim slot A / B / Shared kits + SSR.
 # Serial + Restim T-code backends play these; Buttplug linears ignore secondary axes.
 func _make_axis_expander(arr: Array, idx: int) -> Control:
-	# Ensure the dict key exists.
-	if not arr[idx].has("axis_scripts"):
-		arr[idx]["axis_scripts"] = {}
+	JourneyData.ensure_restim_axis_scripts(arr[idx])
 
 	var wrapper: VBoxContainer = VBoxContainer.new()
 	wrapper.add_theme_constant_override("separation", 4)
 
 	var toggle_btn: Button = Button.new()
-	toggle_btn.text = "▶  EXTRA AXES  (SERIAL / RESTIM)"
+	toggle_btn.text = "▶  EXTRA AXES  (SERIAL / DUAL RESTIM)"
 	toggle_btn.toggle_mode = true
 	toggle_btn.button_pressed = false
 	toggle_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -2269,8 +2300,9 @@ func _make_axis_expander(arr: Array, idx: int) -> Control:
 
 	var hint: Label = Label.new()
 	hint.text = (
-		"RESTIM KIT AXES (alpha/beta/e1–e4/volume/…) AUTOFILL FROM SIBLINGS. "
-		+ "DROP ZONES BELOW — ASSIGN MANUALLY OR LET AUTOFILL POPULATE THEM."
+		"SLOT A / B = INDEPENDENT RESTIM KITS. SHARED = FAN-OUT TO BOTH "
+		+ "(PULSE_* TYPICALLY). UNPREFIXED SIBLINGS → SHARED; .A.ALPHA / .B.VOLUME "
+		+ "→ SLOT. SSR AXES STILL GO TO SERIAL."
 	)
 	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	hint.add_theme_font_size_override("font_size", 10)
@@ -2278,10 +2310,18 @@ func _make_axis_expander(arr: Array, idx: int) -> Control:
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	axes_panel.add_child(hint)
 
-	for axis_name: String in RestimAxisKit.auto_loading_names():
-		axes_panel.add_child(_side_field_label(RestimAxisKit.axis_display_label(axis_name)))
-		_add_axis_drop_zone(axes_panel, arr, idx, axis_name)
+	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+		var title: String = "RESTIM SLOT %s" % slot.to_upper()
+		if slot == "shared":
+			title = "RESTIM SHARED (BOTH SLOTS)"
+		axes_panel.add_child(_side_field_label(title))
+		for axis_name: String in RestimAxisKit.auto_loading_names():
+			axes_panel.add_child(
+				_side_field_label("%s  ·  %s" % [slot.to_upper(), RestimAxisKit.axis_display_label(axis_name)])
+			)
+			_add_restim_axis_drop_zone(axes_panel, arr, idx, slot, axis_name)
 
+	axes_panel.add_child(_side_field_label("SSR / SERIAL AXES"))
 	for info: Dictionary in SSR_AXES_INFO:
 		var axis: String = info["axis"]
 		axes_panel.add_child(_side_field_label(info["label"]))
@@ -2290,7 +2330,9 @@ func _make_axis_expander(arr: Array, idx: int) -> Control:
 	toggle_btn.toggled.connect(
 		func(pressed: bool) -> void:
 			toggle_btn.text = (
-				"▼  EXTRA AXES  (SERIAL / RESTIM)" if pressed else "▶  EXTRA AXES  (SERIAL / RESTIM)"
+				"▼  EXTRA AXES  (SERIAL / DUAL RESTIM)"
+				if pressed
+				else "▶  EXTRA AXES  (SERIAL / DUAL RESTIM)"
 			)
 			axes_panel.visible = pressed
 	)
@@ -2298,7 +2340,51 @@ func _make_axis_expander(arr: Array, idx: int) -> Control:
 	return wrapper
 
 
+func _add_restim_axis_drop_zone(
+	parent: VBoxContainer, arr: Array, idx: int, slot: String, axis: String
+) -> void:
+	JourneyData.ensure_restim_axis_scripts(arr[idx])
+	var zone: PanelContainer = DropZoneScript.new()
+	zone.accepted_extensions = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
+	zone.picker_title = "Select Restim %s / %s Funscript" % [slot.to_upper(), axis]
+	zone.picker_filters = ["*.funscript,*.json ; Funscript Files", "*.* ; All Files"]
+	zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var slot_map: Dictionary = (arr[idx]["restim_axis_scripts"] as Dictionary)[slot] as Dictionary
+	var current_path: String = str(slot_map.get(axis, ""))
+	var rm: Button = UITheme.make_icon_btn("✕", current_path == "", UITheme.MAGENTA)
+	rm.tooltip_text = "Remove %s/%s funscript" % [slot, axis]
+	rm.pressed.connect(func() -> void: zone.set_file(""))
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.add_child(zone)
+	row.add_child(rm)
+	parent.add_child(row)
+	if current_path != "":
+		zone.call_deferred("set_file", current_path, false)
+	var captured_slot: String = slot
+	var captured_axis: String = axis
+	zone.file_dropped.connect(
+		func(p: String) -> void:
+			rm.disabled = (p == "")
+			JourneyData.ensure_restim_axis_scripts(arr[idx])
+			var m: Dictionary = (
+				(arr[idx]["restim_axis_scripts"] as Dictionary)[captured_slot] as Dictionary
+			)
+			if p == "":
+				m.erase(captured_axis)
+			else:
+				m[captured_axis] = p
+			if captured_slot == "shared":
+				arr[idx]["axis_scripts"] = (
+					(arr[idx]["restim_axis_scripts"] as Dictionary)["shared"] as Dictionary
+				).duplicate(true)
+	)
+
+
 func _add_axis_drop_zone(parent: VBoxContainer, arr: Array, idx: int, axis: String) -> void:
+	# SSR / serial-only axes live on flat axis_scripts (also mirrored into shared).
+	if not arr[idx].has("axis_scripts"):
+		arr[idx]["axis_scripts"] = {}
 	var zone: PanelContainer = DropZoneScript.new()
 	zone.accepted_extensions = JourneyData.FUNSCRIPT_EXTENSIONS.duplicate()
 	zone.picker_title = "Select %s Funscript" % axis
@@ -2323,6 +2409,15 @@ func _add_axis_drop_zone(parent: VBoxContainer, arr: Array, idx: int, axis: Stri
 				(arr[idx]["axis_scripts"] as Dictionary).erase(captured_axis)
 			else:
 				arr[idx]["axis_scripts"][captured_axis] = p
+			# Mirror SSR into shared so Restim coerce still sees them if desired.
+			JourneyData.ensure_restim_axis_scripts(arr[idx])
+			var shared: Dictionary = (
+				(arr[idx]["restim_axis_scripts"] as Dictionary)["shared"] as Dictionary
+			)
+			if p == "":
+				shared.erase(captured_axis)
+			else:
+				shared[captured_axis] = p
 	)
 
 
@@ -2409,10 +2504,10 @@ func _make_vib_expander(arr: Array, idx: int) -> Control:
 # ── Checkpoint toggle ───────────────────────────────────────────────────────
 
 
-# Author-marked save point. When this round starts during play, the game shows
+# Author-marked save point. When this node starts during play, the game shows
 # a CHECKPOINT REACHED banner offering Save & Quit so the player can resume the
-# run later. Works on any round type, including bosses — the banner is shown
-# before the boss intro card, so the player can save out before committing.
+# run later. Works on rounds and cutscenes — the banner is shown before playback
+# (and before a boss intro card), so the player can save out before committing.
 func _make_checkpoint_toggle(arr: Array, idx: int) -> Control:
 	if not arr[idx].has("is_checkpoint"):
 		arr[idx]["is_checkpoint"] = false
@@ -2425,7 +2520,7 @@ func _make_checkpoint_toggle(arr: Array, idx: int) -> Control:
 	wrapper.add_child(row)
 
 	var label: Label = Label.new()
-	label.text = "CHECKPOINT ROUND"
+	label.text = "CHECKPOINT"
 	label.add_theme_color_override("font_color", UITheme.AMBER)
 	label.add_theme_font_size_override("font_size", 12)
 	label.uppercase = true
@@ -2446,7 +2541,7 @@ func _make_checkpoint_toggle(arr: Array, idx: int) -> Control:
 	row.add_child(toggle)
 
 	var hint: Label = Label.new()
-	hint.text = "PLAYERS REACHING THIS ROUND SEE A CHECKPOINT BANNER WITH A SAVE & QUIT OPTION. USE FOR NATURAL STOPPING POINTS — END OF ACT, BEFORE A BIG BOSS, BETWEEN STORY ARCS."
+	hint.text = "PLAYERS REACHING THIS NODE SEE A CHECKPOINT BANNER WITH A SAVE & QUIT OPTION. USE FOR NATURAL STOPPING POINTS — END OF ACT, BEFORE A BIG BOSS, BETWEEN STORY ARCS."
 	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	hint.add_theme_font_size_override("font_size", 10)
 	hint.uppercase = true
@@ -2488,7 +2583,7 @@ func _make_cooldown_days_spin(arr: Array, idx: int) -> Control:
 	row.add_child(spin)
 
 	var hint: Label = Label.new()
-	hint.text = "0 = OFF. WHEN > 0, PLAYERS HIT A FORCE SAVE & QUIT BANNER (NO CONTINUE) AND RESUME STAYS LOCKED FOR THAT MANY CALENDAR DAYS."
+	hint.text = "0 = OFF. LEGACY — PREFER A DEDICATED COOLDOWN NODE FOR NEW CONTENT. WHEN > 0, PLAYERS HIT A FORCE SAVE & QUIT BANNER (NO CONTINUE) AND RESUME STAYS LOCKED FOR THAT MANY CALENDAR DAYS."
 	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	hint.add_theme_font_size_override("font_size", 10)
 	hint.uppercase = true
@@ -2498,7 +2593,152 @@ func _make_cooldown_days_spin(arr: Array, idx: int) -> Control:
 	return wrapper
 
 
-# Blocks Time Control + Divine Summoning on this round (punishment / special paths).
+# Dedicated cooldown node editor: name + days (+ optional banner message).
+func _make_side_cooldown_editor(arr: Array, idx: int) -> Control:
+	var data: Dictionary = arr[idx]
+	if not data.has("days"):
+		data["days"] = 1
+	if not data.has("message"):
+		data["message"] = ""
+
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+
+	col.add_child(_side_field_label("NAME"))
+	var name_edit: LineEdit = LineEdit.new()
+	name_edit.placeholder_text = "Cooldown label..."
+	name_edit.text = str(data.get("name", ""))
+	UITheme.style_line_edit(name_edit)
+	name_edit.text_changed.connect(func(val: String) -> void: arr[idx]["name"] = val)
+	col.add_child(name_edit)
+
+	col.add_child(_side_section_separator())
+	col.add_child(_side_field_label("LOCKOUT DAYS"))
+	var spin: SpinBox = SpinBox.new()
+	spin.min_value = 1
+	spin.max_value = 365
+	spin.step = 1
+	spin.value = maxi(1, int(data.get("days", 1)))
+	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(spin)
+	spin.value_changed.connect(func(v: float) -> void: arr[idx]["days"] = maxi(1, int(v)))
+	col.add_child(spin)
+
+	col.add_child(_side_section_separator())
+	col.add_child(_side_field_label("BANNER MESSAGE (OPTIONAL)"))
+	var msg: TextEdit = TextEdit.new()
+	msg.custom_minimum_size = Vector2(0, 64)
+	msg.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	msg.text = str(data.get("message", ""))
+	msg.text_changed.connect(func() -> void: arr[idx]["message"] = msg.text)
+	col.add_child(msg)
+
+	var hint: Label = Label.new()
+	hint.text = "ON ENTER: STAMPS A CALENDAR LOCKOUT AND SHOWS FORCE SAVE & QUIT. SAVE OR DEV CONTINUE ADVANCES PAST THIS NODE. NO VIDEO OR FUNSCRIPT."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	col.add_child(hint)
+	return col
+
+
+# Cutscene node editor: name + video + preview + coins + checkpoint + items_blocked + optional award_item.
+func _make_side_cutscene_editor(arr: Array, idx: int) -> Control:
+	var data: Dictionary = arr[idx]
+	if not data.has("items_blocked"):
+		data["items_blocked"] = true
+	if not data.has("coins"):
+		data["coins"] = 0
+	if not data.has("is_checkpoint"):
+		data["is_checkpoint"] = false
+
+	var col: VBoxContainer = VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+
+	col.add_child(_side_field_label("NAME"))
+	var name_edit: LineEdit = LineEdit.new()
+	name_edit.placeholder_text = "Cutscene name..."
+	name_edit.text = str(data.get("name", ""))
+	UITheme.style_line_edit(name_edit)
+	name_edit.text_changed.connect(func(val: String) -> void: arr[idx]["name"] = val)
+	col.add_child(name_edit)
+
+	col.add_child(_side_divider_line())
+	col.add_child(_side_field_label("VIDEO FILE"))
+	var video_zone: PanelContainer = DropZoneScript.new()
+	video_zone.accepted_extensions = JourneyData.VIDEO_EXTENSIONS.duplicate()
+	video_zone.picker_title = "Select Video"
+	video_zone.picker_filters = [
+		"*.mp4,*.m4v,*.mkv,*.avi,*.mov,*.wmv,*.webm ; Video Files", "*.* ; All Files"
+	]
+	video_zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(video_zone)
+	if str(data.get("video_path", "")) != "":
+		video_zone.call_deferred("set_file", data["video_path"], false)
+	var preview_btn: Button = UITheme.make_icon_btn(
+		"▶ PREVIEW VIDEO", str(data.get("video_path", "")) == "", UITheme.CYAN
+	)
+	preview_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	preview_btn.pressed.connect(
+		func() -> void:
+			FunscriptPreview.new().open_video_only(
+				_owner, str(arr[idx].get("video_path", "")), str(arr[idx].get("name", ""))
+			)
+	)
+	video_zone.file_dropped.connect(
+		func(p: String) -> void:
+			arr[idx]["video_path"] = p
+			preview_btn.disabled = p == ""
+			if str(arr[idx].get("name", "")).strip_edges() == "":
+				arr[idx]["name"] = p.get_file().get_basename()
+	)
+	col.add_child(preview_btn)
+
+	col.add_child(_side_section_separator())
+	col.add_child(_side_field_label("COINS AWARDED"))
+	var coins_spin: SpinBox = SpinBox.new()
+	coins_spin.min_value = 0
+	coins_spin.max_value = 99999
+	coins_spin.step = 1
+	coins_spin.value = int(data.get("coins", 0))
+	coins_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(coins_spin)
+	coins_spin.value_changed.connect(func(v: float) -> void: arr[idx]["coins"] = int(v))
+	col.add_child(coins_spin)
+
+	# Optional item reward — granted when the cutscene ends (parity with rounds).
+	col.add_child(_side_section_separator())
+	col.add_child(_side_field_label("ITEM REWARD  (OPTIONAL)"))
+	var item_values: Array = [""]
+	var item_dd: OptionButton = OptionButton.new()
+	item_dd.add_item("None")
+	for k: String in InventoryService.GetAllItemIds():
+		item_values.append(k)
+		item_dd.add_item(str(InventoryService.GetItemData(k).get("name", k)))
+	item_dd.selected = max(0, item_values.find(str(data.get("award_item", ""))))
+	item_dd.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_option_button(item_dd)
+	item_dd.item_selected.connect(func(i: int) -> void: arr[idx]["award_item"] = item_values[i])
+	col.add_child(item_dd)
+
+	col.add_child(_side_section_separator())
+	col.add_child(_make_checkpoint_toggle(arr, idx))
+
+	col.add_child(_side_section_separator())
+	col.add_child(_make_items_blocked_toggle(arr, idx))
+
+	var hint: Label = Label.new()
+	hint.text = "PLAYS VIDEO THEN ADVANCES. NO FUNSCRIPT OR SCORE. MISSING VIDEO IS A SOFT WARNING — WIP LAYOUTS STILL SAVE."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.uppercase = true
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	col.add_child(hint)
+	return col
+
+
+# Blocks Time Control on this round (punishment / special paths).
 func _make_items_blocked_toggle(arr: Array, idx: int) -> Control:
 	if not arr[idx].has("items_blocked"):
 		arr[idx]["items_blocked"] = false
@@ -2532,7 +2772,7 @@ func _make_items_blocked_toggle(arr: Array, idx: int) -> Control:
 	row.add_child(toggle)
 
 	var hint: Label = Label.new()
-	hint.text = "WHEN ON, TIME CONTROL AND DIVINE SUMMONING CANNOT BE USED ON THIS ROUND. USE FOR PUNISHMENT PATHS, FAILURE BRANCHES, OR STORY-ONLY SPECIALS."
+	hint.text = "WHEN ON, TIME CONTROL CANNOT BE USED ON THIS ROUND. USE FOR PUNISHMENT PATHS, FAILURE BRANCHES, OR STORY-ONLY SPECIALS."
 	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	hint.add_theme_font_size_override("font_size", 10)
 	hint.uppercase = true
@@ -3073,9 +3313,8 @@ func _bulk_add_pool_entries(
 
 	var entries: Array = arr[idx]["pool_entries"]
 	for r: Dictionary in rounds:
-		(
-			entries
-			. append(
+		entries.append(
+			JourneyData.coerce_pool_entry(
 				{
 					"name": str(r.get("name", "")),
 					"video_path": str(r.get("video_path", "")),
@@ -3098,15 +3337,7 @@ func _bulk_add_pool_entries(
 
 
 func _default_pool_entry() -> Dictionary:
-	return {
-		"name": "",
-		"video_path": "",
-		"funscript_path": "",
-		"axis_scripts": {},
-		"vib_scripts": {},
-		"weight": 1,
-		"round_type": "normal",  # per-entry type: a rolled encounter can be normal or boss
-	}
+	return JourneyData.coerce_pool_entry({})
 
 
 # Reorders (swaps) a pool entry by `delta` (±1); no-op at the ends.

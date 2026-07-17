@@ -1,7 +1,7 @@
 {
   "version": 1,
   "unlock_pay_per_use": true,
-  "comment": "Authoritative Inferno skill unlock schedule (from v1 skills.js). Scaffold wires video+shop nodes from this file; do not invent unlocks in Python.",
+  "comment": "Authoritative Inferno skill unlock schedule (from v1 skills.js). Scaffold wires unlock-video cutscenes with award_item from this file; do not invent unlocks in Python. video_node_id gets award_item=item_id; insert_after only rewires edges into that cutscene.",
   "skills": [
     {
       "item_id": "erosphere_amulet",
@@ -9,21 +9,8 @@
       "unlocked_by": "inferno_C01_EP5",
       "unlock_video": "Inferno_C01_I01_The_Amulet_of_Sustenance.mp4",
       "video_node_id": "unlock_vid_amulet",
-      "shop_node_id": "unlock_shop_amulet",
-      "insert_after": "c01_ep5_s5",
-      "continue_to": "inferno_C01_006",
-      "enabled": true
-    },
-    {
-      "item_id": "erosphere_divine_summoning",
-      "name": "Divine Summoning",
-      "unlocked_by": "inferno_C01_008",
-      "unlock_video": "Inferno_C01_A01_Divine_Summoning.mp4",
-      "video_node_id": "inferno_C01_A01",
-      "shop_node_id": "unlock_shop_divine",
-      "insert_after": null,
-      "continue_to": "inferno_C01_009",
-      "note": "Anjelica path already lands on inferno_C01_A01 video node; scaffold only attaches the shop after it.",
+      "insert_after": "inferno_C01_EP5_fate",
+      "continue_to": "c01_ep5_cd1",
       "enabled": true
     },
     {
@@ -32,9 +19,8 @@
       "unlocked_by": "inferno_C01_EP6",
       "unlock_video": "Inferno_C01_S01_Psychic_Divorce.mp4",
       "video_node_id": "unlock_vid_psychic",
-      "shop_node_id": "unlock_shop_psychic",
-      "insert_after": "c01_ep6_s5b",
-      "continue_to": "inferno_C01_006_5",
+      "insert_after": "inferno_C01_EP6_fate",
+      "continue_to": "c01_ep6_cd1",
       "enabled": true
     },
     {
@@ -43,7 +29,6 @@
       "unlocked_by": "inferno_C02_002",
       "unlock_video": "Inferno_C02_S01_Feign_Death.mp4",
       "video_node_id": "unlock_vid_feign",
-      "shop_node_id": "unlock_shop_feign",
       "insert_after": "inferno_C02_002",
       "continue_to": null,
       "enabled": false,
@@ -55,7 +40,6 @@
       "unlocked_by": "inferno_C02_004",
       "unlock_video": "Inferno_C02_S02_Blinding_Light.mp4",
       "video_node_id": "unlock_vid_blinding",
-      "shop_node_id": "unlock_shop_blinding",
       "insert_after": "inferno_C02_004",
       "continue_to": null,
       "enabled": false,
@@ -67,7 +51,6 @@
       "unlocked_by": "inferno_C02_EP5",
       "unlock_video": "Inferno_C02_S03_Time_Control.mp4",
       "video_node_id": "unlock_vid_time",
-      "shop_node_id": "unlock_shop_time",
       "insert_after": null,
       "continue_to": null,
       "enabled": false,

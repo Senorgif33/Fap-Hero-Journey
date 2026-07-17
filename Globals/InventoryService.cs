@@ -13,7 +13,6 @@ public partial class InventoryService : Node
     // from ActiveEffectsChanged because save_now never enters _active.
     [Signal] public delegate void SaveRequestedEventHandler();
     // Instant utilities that need GameLoop / JourneySelect to finish the action.
-    [Signal] public delegate void ClearEffectsRequestedEventHandler();
     [Signal] public delegate void SkipRoundRequestedEventHandler();
     [Signal] public delegate void ShaveCooldownRequestedEventHandler(int hours);
 
@@ -255,16 +254,6 @@ public partial class InventoryService : Node
             ["kind"] = "shave_cooldown",
             ["shave_hours"] = 24,
         };
-        _registry["erosphere_divine_summoning"] = new Dictionary
-        {
-            ["id"] = "erosphere_divine_summoning",
-            ["name"] = "Divine Summoning",
-            ["description"] = "Clears active effects on a resolvable effect round. Only usable when effects can be cleared.",
-            ["category"] = "modifier",
-            ["price"] = 40,
-            ["duration_ms"] = 0,
-            ["kind"] = "clear_effects",
-        };
         _registry["erosphere_psychic_divorce"] = new Dictionary
         {
             ["id"] = "erosphere_psychic_divorce",
@@ -475,8 +464,8 @@ public partial class InventoryService : Node
     // Pays registry price and starts the modifier effect. Does not consume an
     // inventory slot. Returns false if PPU is off, not unlocked, not a modifier, or broke.
     // durationOverrideMs >= 0 replaces item duration (round-scoped volume attenuate).
-    // Instant kinds (clear_effects / skip_round / shave_cooldown) fire the same
-    // signals as ActivateItem after the coin spend.
+    // Instant kinds (skip_round / shave_cooldown) fire the same signals as
+    // ActivateItem after the coin spend.
     public bool ActivateUnlocked(string id, int durationOverrideMs = -1)
     {
         if (!UnlockPayPerUse || !IsUnlocked(id) || !IsModifier(id))
@@ -494,11 +483,6 @@ public partial class InventoryService : Node
             return false;
 
         string itemKind = item.ContainsKey("kind") ? item["kind"].AsString() : "";
-        if (itemKind == "clear_effects")
-        {
-            EmitSignal(SignalName.ClearEffectsRequested);
-            return true;
-        }
         if (itemKind == "skip_round")
         {
             EmitSignal(SignalName.SkipRoundRequested);
@@ -650,12 +634,6 @@ public partial class InventoryService : Node
             EmitSignal(SignalName.InventoryChanged);
             return true;
         }
-        if (itemKind == "clear_effects")
-        {
-            EmitSignal(SignalName.ClearEffectsRequested);
-            EmitSignal(SignalName.InventoryChanged);
-            return true;
-        }
         if (itemKind == "skip_round")
         {
             EmitSignal(SignalName.SkipRoundRequested);
@@ -761,7 +739,7 @@ public partial class InventoryService : Node
             if (kind == "" || kind == "wildcard" || kind == "coin_jackpot")
                 continue;
             if (kind == "save_now" || kind == "key" || kind == "cleanse"
-                || kind == "shave_cooldown" || kind == "clear_effects" || kind == "skip_round")
+                || kind == "shave_cooldown" || kind == "skip_round")
                 continue;
             pool.Add(d);
         }

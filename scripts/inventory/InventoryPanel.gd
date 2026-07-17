@@ -252,7 +252,7 @@ func _class_info(kind: String) -> Dictionary:
 			return {"label": "BUFF", "color": UITheme.TOXIC_GREEN, "glyph": "▲"}
 		"block", "blackout", "blackout_soft":
 			return {"label": "DEBUFF", "color": UITheme.ERROR_SOFT, "glyph": "▼"}
-		"key", "cleanse", "save_now", "shave_cooldown", "clear_effects", "skip_round":
+		"key", "cleanse", "save_now", "shave_cooldown", "skip_round":
 			return {"label": "UTILITY", "color": UITheme.PURPLE_BRIGHT, "glyph": "●"}
 		_:
 			return {"label": "MODIFIER", "color": UITheme.AMBER, "glyph": "◆"}

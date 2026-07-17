@@ -256,6 +256,11 @@ func _compute_node_warnings() -> Dictionary:
 			"fork":
 				_save_check_fork_graph(n, "Fork", issues)
 				_check_dead_flag_paths(n, known_flags, issues)
+			"cooldown":
+				_save_check_cooldown(n.get("data", {}), "Cooldown", issues)
+			"cutscene":
+				# Soft-only: missing video warns on the badge but does not block save.
+				_soft_check_cutscene(n.get("data", {}), issues)
 		if not issues.is_empty():
 			var details: Array = []
 			for it: Dictionary in issues:
@@ -314,11 +319,11 @@ func _check_dead_flag_paths(node: Dictionary, known_flags: Dictionary, issues: A
 func _structural_warning_text(kind: String) -> String:
 	match kind:
 		"unreachable":
-			return "Unreachable — nothing leads here, so this node would never play."
+			return "Unreachable via normal wires — if this is an EP/fail path, it needs release_jump from a main round (or a connect into the flow)."
 		"dangling":
 			return "A connection points to a node that no longer exists."
 		"cycle":
-			return "Part of a loop — a journey must flow forward (no cycles)."
+			return "Part of a disallowed loop — hub Back / return-to-fork is OK; round↔round cycles are not."
 	return ""
 
 
@@ -1066,7 +1071,8 @@ func _show_canvas_context_menu(world_pos: Vector2) -> void:
 
 	# Add-node actions — each drops a fresh node centred on the click.
 	for spec: Array in [
-		["＋ ROUND", "round"], ["＋ SHOP", "shop"], ["＋ STORYBOARD", "storyboard"], ["＋ FORK", "fork"]
+		["＋ ROUND", "round"], ["＋ SHOP", "shop"], ["＋ STORYBOARD", "storyboard"],
+		["＋ FORK", "fork"], ["＋ COOLDOWN", "cooldown"], ["＋ CUTSCENE", "cutscene"]
 	]:
 		var t: String = spec[1]
 		var node_b: Button = _ctx_menu_button(
@@ -1752,6 +1758,8 @@ func _show_shortcuts_overlay() -> void:
 				["Ctrl + 2", "Add a shop"],
 				["Ctrl + 3", "Add a storyboard"],
 				["Ctrl + 4", "Add a fork"],
+				["Ctrl + 5", "Add a cooldown"],
+				["Ctrl + 6", "Add a cutscene"],
 			]
 		],
 		[
@@ -1777,7 +1785,7 @@ func _show_shortcuts_overlay() -> void:
 			[
 				[
 					"Drag a node's bottom handle → a node",
-					"Connect them (line turns red if it would loop)"
+					"Connect them (line turns red if it would softlock)"
 				],
 				["Select  →  🔗 Connect  →  click", "Same, button-driven (the accessible fallback)"],
 			]
@@ -1879,13 +1887,20 @@ func _input(event: InputEvent) -> void:
 				if not _save_btn.disabled:
 					_on_save_pressed()
 				get_viewport().set_input_as_handled()
-			KEY_1, KEY_2, KEY_3, KEY_4:
+			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6:
 				# Quick-create a node by type, placed near the current selection. Stand down inside a
 				# text field (the author may be typing, and Ctrl+digit can be a native shortcut).
 				if _focus_is_text_field():
 					return
 				_create_graph_node(
-					{KEY_1: "round", KEY_2: "shop", KEY_3: "storyboard", KEY_4: "fork"}[k.keycode]
+					{
+						KEY_1: "round",
+						KEY_2: "shop",
+						KEY_3: "storyboard",
+						KEY_4: "fork",
+						KEY_5: "cooldown",
+						KEY_6: "cutscene",
+					}[k.keycode]
 				)
 				get_viewport().set_input_as_handled()
 			KEY_Z:
@@ -1995,6 +2010,48 @@ func _open_journey_folder() -> void:
 	OS.shell_open(media_abs if DirAccess.dir_exists_absolute(media_abs) else abs)
 
 
+# Backfills empty funscript / Restim kit / vib slots on every round (and pool
+# entry) from siblings next to each video path. Options slot labels drive tagged
+# routing. One undo step when anything changes.
+func _scan_attach_funscripts() -> void:
+	var labels: PackedStringArray = ImportScanner.current_restim_labels()
+	_push_undo()
+	var filled: int = 0
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	for nid: String in nodes:
+		var node: Dictionary = nodes[nid]
+		if str(node.get("type", "")) != "round":
+			continue
+		var data: Dictionary = node.get("data", {})
+		var video: String = str(data.get("video_path", ""))
+		if video != "":
+			if ImportScanner.autofill_round_siblings(data, video, labels[0], labels[1]):
+				filled += 1
+		var entries: Array = data.get("pool_entries", []) as Array
+		for entry_v: Variant in entries:
+			if not (entry_v is Dictionary):
+				continue
+			var entry: Dictionary = entry_v
+			var ev: String = str(entry.get("video_path", ""))
+			if ev == "":
+				continue
+			if ImportScanner.autofill_round_siblings(entry, ev, labels[0], labels[1]):
+				filled += 1
+	if filled <= 0:
+		if not _undo_stack.is_empty():
+			_undo_stack.pop_back()
+		_show_status("No new scripts found.", false)
+		return
+	_refresh_graph()
+	if _selected_graph_node_id != "":
+		_side_renderer.show_graph_node_editor(_selected_graph_node_id)
+	else:
+		_side_renderer.show_journey_info_panel()
+	_show_status(
+		"Attached scripts on %d round%s." % [filled, "" if filled == 1 else "s"], false
+	)
+
+
 # ── Bulk import (drop videos / a folder on the canvas → chained round nodes) ──
 
 const BULK_IMPORT_ROW: float = 140.0  # vertical spacing between imported round nodes
@@ -2053,8 +2110,7 @@ func _handle_side_panel_drop(files: PackedStringArray) -> void:
 				fs_files.append(f)
 		if fs_files.size() > 1:
 			var data: Dictionary = node.get("data", {})
-			if not data.has("axis_scripts"):
-				data["axis_scripts"] = {}
+			JourneyData.ensure_restim_axis_scripts(data)
 			if not data.has("vib_scripts"):
 				data["vib_scripts"] = {}
 			for f: String in fs_files:
@@ -2062,13 +2118,21 @@ func _handle_side_panel_drop(files: PackedStringArray) -> void:
 				if vib_ch != "":
 					data["vib_scripts"][vib_ch] = f
 				else:
-					var axis: String = ImportScanner.detect_funscript_axis(f)
-					if axis == "L0":
-						data["funscript_path"] = f
-						if str(data.get("name", "")).strip_edges() == "":
-							data["name"] = f.get_file().get_basename()
+					var slotted: Dictionary = ImportScanner.detect_funscript_slotted_axis(f)
+					if slotted.is_empty():
+						var stem_low: String = f.get_file().get_basename().to_lower()
+						if RestimAxisKit.has_kit_axis_tag(stem_low):
+							pass
+						else:
+							data["funscript_path"] = f
+							if str(data.get("name", "")).strip_edges() == "":
+								data["name"] = f.get_file().get_basename()
 					else:
-						data["axis_scripts"][axis] = f
+						var slot: String = str(slotted["slot"])
+						var axis: String = str(slotted["axis"])
+						(data["restim_axis_scripts"][slot] as Dictionary)[axis] = f
+						if slot == "shared":
+							data["axis_scripts"][axis] = f
 			# Rebuild the canvas + side panel (deferred, so it lands after the per-field DropZones have
 			# also processed this same drop) to show the routed paths.
 			_graph.call_deferred("select_graph_node", _selected_graph_node_id)
@@ -2533,7 +2597,9 @@ func _begin_connect_fork_edge(fork_id: String, edge_idx: int) -> void:
 
 # Completes a click-to-connect: wires the armed source to `target_id` — either a fork choice's
 # out-edge (when _connecting_edge_idx >= 0) or a regular node's single out-edge. Rejects a
-# self-link or anything that would form a cycle (the runtime is a DAG). Re-selects the source.
+# self-link or a *disallowed* out-edge cycle (round↔round softlocks). Fork-hub loops
+# (Back between forks, clear back to a hub) are allowed. release_jump_to loops are separate.
+# Re-selects the source.
 func _finish_connect(target_id: String) -> void:
 	var source: String = _connecting_from
 	var edge_idx: int = _connecting_edge_idx
@@ -2547,7 +2613,7 @@ func _finish_connect(target_id: String) -> void:
 		_show_status("Connect cancelled (can't link a node to itself).", true)
 		_graph.select_graph_node(source)
 		return
-	if JourneyGraph.reachable_ids(_graph_model, target_id).has(source):
+	if JourneyGraph.would_create_disallowed_cycle(_graph_model, source, target_id):
 		_show_status("Can't connect — that would create a loop.", true)
 		_graph.select_graph_node(source)
 		return
@@ -3087,11 +3153,17 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 				saved_data = _save_storyboard_node_media(
 					saved_data, data_in, abs_media_dir, id, copied_images
 				)
+			"cutscene":
+				saved_data = await _save_cutscene_node_media(
+					saved_data, data_in, abs_dir, modal
+				)
+				if saved_data.is_empty():
+					return {}
 			"fork":
 				saved_out = _save_fork_node_edges(
 					node.get("out", []), abs_media_dir, id, copied_images
 				)
-			"shop":
+			"shop", "cooldown":
 				pass  # no media
 
 		# A non-video copy (funscript / axis / vib / boss / image) failed somewhere above.
@@ -3185,7 +3257,7 @@ func _save_round_node_media(
 ) -> Dictionary:
 	var round_name: String = str(saved_data.get("name", "")).strip_edges()
 	# FolderName slug — a stable logical round id + the legacy folder-scan fallback key.
-	# No per-round folder is created; all playback assets pool into content/ by hash.
+	# In-journey assets keep their relative paths; external imports still pool under content/.
 	saved_data["folder"] = _next_round_folder_slug()
 
 	# Pending trim (consumed by this save): the video is cut and every script
@@ -3202,10 +3274,15 @@ func _save_round_node_media(
 	saved_data["length_ms"] = fs["length_ms"]
 
 	# Secondary-axis + vib scripts — pooled, keyed by channel (suffix preserved),
-	# trim-rebased identically.
-	saved_data["axis_scripts"] = _pool_channels(
-		data_in.get("axis_scripts", {}), abs_dir, JourneyData.AXIS_SUFFIXES, trim_in, trim_out
-	)
+	# trim-rebased identically. Dual Restim kits under restim_axis_scripts.
+	var ras_in: Dictionary = JourneyData.coerce_restim_axis_scripts(data_in)
+	var ras_out: Dictionary = JourneyData.empty_restim_axis_scripts()
+	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+		ras_out[slot] = _pool_channels(
+			ras_in[slot] as Dictionary, abs_dir, JourneyData.AXIS_SUFFIXES, trim_in, trim_out
+		)
+	saved_data["restim_axis_scripts"] = ras_out
+	saved_data["axis_scripts"] = (ras_out["shared"] as Dictionary).duplicate(true)
 	saved_data["vib_scripts"] = _pool_channels(
 		data_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, trim_in, trim_out
 	)
@@ -3259,16 +3336,20 @@ func _save_round_node_media(
 			)
 			if not e_vid["ok"]:
 				return {}
+			var e_ras_in: Dictionary = JourneyData.coerce_restim_axis_scripts(entry_in)
+			var e_ras_out: Dictionary = JourneyData.empty_restim_axis_scripts()
+			for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+				e_ras_out[slot] = _pool_channels(
+					e_ras_in[slot] as Dictionary, abs_dir, JourneyData.AXIS_SUFFIXES, 0, 0
+				)
 			var entry_out: Dictionary = {
 				"name": ename,
 				"video_path": e_vid["rel"],
 				"funscript_path": e_fs["rel"],
 				"action_count": e_fs["count"],
 				"length_ms": e_fs["length_ms"],
-				"axis_scripts":
-				_pool_channels(
-					entry_in.get("axis_scripts", {}), abs_dir, JourneyData.AXIS_SUFFIXES, 0, 0
-				),
+				"restim_axis_scripts": e_ras_out,
+				"axis_scripts": (e_ras_out["shared"] as Dictionary).duplicate(true),
 				"vib_scripts":
 				_pool_channels(
 					entry_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, 0, 0
@@ -3299,19 +3380,27 @@ func _save_round_node_media(
 func _pool_funscript(fs_src: String, abs_dir: String, trim_in: int, trim_out: int) -> Dictionary:
 	if fs_src == "":
 		return {"rel": "", "count": 0, "length_ms": 0}
+	var abs_src: String = _resolve_media_abs(fs_src)
 	var pool: Dictionary = _assign_pooled_media(fs_src, fs_src.get_extension(), trim_in, trim_out)
 	var rel: String = pool["rel"]
 	var stats: Dictionary = {"count": 0, "length_ms": 0}
 	if pool["copy"]:
 		var dst: String = abs_dir + "/" + rel
+		_ensure_parent_dir(dst)
 		if trim_in > 0 or trim_out > 0:
-			_write_trimmed_funscript(fs_src, dst, trim_in, trim_out)
+			_write_trimmed_funscript(abs_src if abs_src != "" else fs_src, dst, trim_in, trim_out)
 		else:
-			_copy_file(fs_src, dst)
+			_copy_file(abs_src if abs_src != "" else fs_src, dst)
 		stats = JourneyData.read_funscript_stats(dst)
 		_pooled_fs_stats[pool["fingerprint"]] = stats
 	else:
 		stats = _pooled_fs_stats.get(pool["fingerprint"], stats)
+		# Keep-as-is reuse: stats may not be cached yet this save — read from source.
+		if int(stats.get("count", 0)) == 0 and int(stats.get("length_ms", 0)) == 0:
+			var read_from: String = abs_src if abs_src != "" else (abs_dir + "/" + rel)
+			if FileAccess.file_exists(read_from):
+				stats = JourneyData.read_funscript_stats(read_from)
+				_pooled_fs_stats[pool["fingerprint"]] = stats
 	return {"rel": rel, "count": stats["count"], "length_ms": stats["length_ms"]}
 
 
@@ -3349,6 +3438,7 @@ func _pool_video_into(
 ) -> Dictionary:
 	if vid_src == "":
 		return {"rel": "", "ok": true}
+	var abs_src: String = _resolve_media_abs(vid_src)
 	var plan_key: String = _transcode_plan_key(vid_src, trim_in, trim_out)
 	var is_transcode: bool = _transcode_plan.has(plan_key)
 	var vid_ext: String = "mp4" if is_transcode else vid_src.get_extension()
@@ -3357,12 +3447,13 @@ func _pool_video_into(
 	if not pool["copy"]:
 		return {"rel": rel, "ok": true}
 	var vid_dst: String = abs_dir + "/" + rel
+	_ensure_parent_dir(vid_dst)
 	if is_transcode:
 		var info: Dictionary = _transcode_plan[plan_key]
 		_update_modal_round(modal, rorder, total, display, info["codec"])
 		_transcode_cancel = false
 		var ok: bool = await MediaPoolService.transcode_video(
-			vid_src,
+			abs_src if abs_src != "" else vid_src,
 			vid_dst,
 			info["duration"],
 			trim_in,
@@ -3393,9 +3484,14 @@ func _pool_video_into(
 				)
 			return {"rel": rel, "ok": false}
 	else:
-		_update_modal_label(modal, "Round %d / %d — %s  (copying video)" % [rorder, total, display])
+		var copy_label: String = (
+			"Round %d / %d — %s  (copying video)" % [rorder, total, display]
+			if total > 0
+			else "%s  (copying video)" % display
+		)
+		_update_modal_label(modal, copy_label)
 		var copy_result: Dictionary = await _copy_file_chunked(
-			vid_src,
+			abs_src if abs_src != "" else vid_src,
 			vid_dst,
 			func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot)
 		)
@@ -3648,7 +3744,12 @@ func _update_modal_round(
 		lbl = modal.find_child("RoundLabel", true, false) as Label
 	if lbl:
 		lbl.text = (
-			"Round %d / %d — %s  (%s → h264)" % [round_num, total, round_name, codec.to_upper()]
+			(
+				"Round %d / %d — %s  (%s → h264)"
+				% [round_num, total, round_name, codec.to_upper()]
+			)
+			if total > 0
+			else "%s  (%s → h264)" % [round_name, codec.to_upper()]
 		)
 
 
@@ -3721,23 +3822,52 @@ func _copy_image_deduped(
 	return candidate_fname
 
 
-# Assigns a source file to the shared content pool for this save. Returns
-# {rel, copy, fingerprint}: `rel` is the journey-root-relative pooled path
-# (content/m_<fp>.<ext>), `copy` is true only the FIRST time this source is seen —
-# the caller does the actual transcode/copy then and skips it on repeats. `ext`
-# is the destination extension (mp4 for transcoded video, else the source ext).
-# A pending trim joins the fingerprint, so the same source trimmed differently
-# by two rounds pools to two files while identical trims still share one.
-# Mirrors JourneyData.plan_media_pool's first-sighting logic with a live map.
+# Assigns a source file for this save. Returns {rel, copy, fingerprint}:
+#   • Already under the journey folder (and untrimmed) → keep that relative path;
+#     `copy` is true only the first time that rel is seen this save (staging still
+#     needs the bytes). No content/m_* rename.
+#   • External import, or any pending trim → fingerprint pool under content/m_<fp>.<ext>
+#     (trim joins the fingerprint so different windows don't collide).
+# `ext` is the destination extension for the hashed pool path (mp4 when
+# transcoding; otherwise the source / channel suffix). Ignored for keep-as-is.
 func _assign_pooled_media(
 	src: String, ext: String, trim_in: int = 0, trim_out: int = 0
 ) -> Dictionary:
-	var fp: String = JourneyData.media_fingerprint(src, trim_in, trim_out)
+	# Named folders / existing journey-relative media: preserve layout on re-save.
+	if trim_in == 0 and trim_out == 0 and _original_journey_folder != "":
+		var keep_rel: String = JourneyData.rel_under_journey(src, _original_journey_folder)
+		if keep_rel != "":
+			var is_keep_new: bool = not _pooled_media.has(keep_rel)
+			if is_keep_new:
+				_pooled_media[keep_rel] = keep_rel
+			return {"rel": keep_rel, "copy": is_keep_new, "fingerprint": keep_rel}
+
+	var abs_src: String = _resolve_media_abs(src)
+	var fp: String = JourneyData.media_fingerprint(abs_src if abs_src != "" else src, trim_in, trim_out)
 	var rel: String = JourneyData.pooled_media_rel(fp, ext)
 	var is_new: bool = not _pooled_media.has(fp)
 	if is_new:
 		_pooled_media[fp] = rel
 	return {"rel": _pooled_media[fp], "copy": is_new, "fingerprint": fp}
+
+
+# Absolute readable path for a media source: globalize, else join under the
+# journey being edited (journey.json stores journey-relative paths).
+func _resolve_media_abs(src: String) -> String:
+	if src == "":
+		return ""
+	var abs: String = ProjectSettings.globalize_path(src)
+	if FileAccess.file_exists(abs):
+		return abs
+	if _original_journey_folder != "":
+		var joined: String = (
+			ProjectSettings.globalize_path(_original_journey_folder).rstrip("/\\")
+			+ "/"
+			+ src.replace("\\", "/").lstrip("/")
+		)
+		if FileAccess.file_exists(joined):
+			return joined
+	return abs
 
 
 # Pools a small file (funscript / axis / vib / boss image) into content/ via the
@@ -3754,14 +3884,24 @@ func _pool_small_file(
 ) -> String:
 	if src == "":
 		return ""
+	var abs_src: String = _resolve_media_abs(src)
 	var ext: String = ext_override if ext_override != "" else src.get_extension()
 	var pool: Dictionary = _assign_pooled_media(src, ext, trim_in, trim_out)
 	if pool["copy"]:
+		var dst: String = abs_dir + "/" + pool["rel"]
+		_ensure_parent_dir(dst)
 		if trim_in > 0 or trim_out > 0:
-			_write_trimmed_funscript(src, abs_dir + "/" + pool["rel"], trim_in, trim_out)
+			_write_trimmed_funscript(abs_src if abs_src != "" else src, dst, trim_in, trim_out)
 		else:
-			_copy_file(src, abs_dir + "/" + pool["rel"])
+			_copy_file(abs_src if abs_src != "" else src, dst)
 	return pool["rel"]
+
+
+# Ensures parent folders exist for a destination path under the staging journey.
+func _ensure_parent_dir(dst: String) -> void:
+	var parent: String = dst.get_base_dir()
+	if parent != "" and not DirAccess.dir_exists_absolute(parent):
+		DirAccess.make_dir_recursive_absolute(parent)
 
 
 # Writes `src` to `dst` with its actions trimmed to [trim_in, trim_out] and
@@ -4140,9 +4280,13 @@ func _collect_presave_issues_graph() -> Array:
 			"fork":
 				fork_num += 1
 				_save_check_fork_graph(n, "Fork %d" % fork_num, issues)
+			"cooldown":
+				_save_check_cooldown(data, "Cooldown", issues)
+			"cutscene":
+				pass  # never requires funscript; missing video is soft-only (live badge)
 
 	# Structural graph validation (L4): block on graphs the runtime can't cleanly play — a missing
-	# start, an edge to a deleted node, a cycle (the DAG walk would loop forever), or an unreachable
+	# start, an edge to a deleted node, a disallowed cycle, or an unreachable
 	# node. Unreachable nodes block so a saved journey never carries media that's never played (a
 	# storage concern): the author must wire the orphan into the flow or delete it before saving.
 	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model):
@@ -4181,8 +4325,8 @@ func _collect_presave_issues_graph() -> Array:
 							"cause": CAUSE_CYCLE,
 							"item": _graph_issue_label(str(gi.get("id", ""))),
 							"detail":
-							"This node is part of a loop — a journey must flow forward (no cycles).",
-							"hint": "Remove the connection that loops back to an earlier node.",
+							"This node is part of a disallowed loop (round↔round softlock). Loops that return to a fork hub are allowed.",
+							"hint": "Remove the back-edge between non-fork nodes, or return to a fork instead.",
 						}
 					)
 				)
@@ -4196,7 +4340,7 @@ func _collect_presave_issues_graph() -> Array:
 							"detail":
 							"This node can't be reached from the start, so it would never play — and its media would bloat the saved journey.",
 							"hint":
-							"Connect it into the flow (wire an earlier node to it), or delete it.",
+							"Wire it into the flow, or enter it via a round's Release Jump target (EP/fail paths). Or delete it.",
 						}
 					)
 				)
@@ -4222,6 +4366,12 @@ func _graph_issue_label(node_id: String) -> String:
 		"fork":
 			var fn: String = str(d.get("title", "")).strip_edges()
 			return 'Fork "%s"' % fn if fn != "" else "A fork"
+		"cooldown":
+			var cn: String = str(d.get("name", "")).strip_edges()
+			return 'Cooldown "%s"' % cn if cn != "" else "A cooldown"
+		"cutscene":
+			var csn: String = str(d.get("name", "")).strip_edges()
+			return 'Cutscene "%s"' % csn if csn != "" else "A cutscene"
 	return "A node"
 
 
@@ -4353,22 +4503,10 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 		_save_check_pool_entries(round_data, label, issues)
 		return
 
-	# Required: funscript.
+	# Funscript is optional (WIP layout / cooldown-only / story rounds). If a path
+	# is set it must still resolve on disk.
 	var fs: String = round_data.get("funscript_path", "")
-	if fs == "":
-		(
-			issues
-			. append(
-				{
-					"cause": CAUSE_MISSING_SOURCE,
-					"item": label,
-					"detail": "No funscript file selected.",
-					"hint":
-					"Drag a .funscript or .json file into the Funscript field for this round.",
-				}
-			)
-		)
-	elif not _save_source_exists(fs):
+	if fs != "" and not _save_source_exists(fs):
 		(
 			issues
 			. append(
@@ -4398,7 +4536,7 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 			)
 		)
 
-	# Secondary axis scripts.
+	# Secondary axis scripts (flat + dual Restim kits).
 	var axis_scripts: Dictionary = round_data.get("axis_scripts", {})
 	for axis: String in axis_scripts:
 		var p: String = axis_scripts[axis]
@@ -4414,6 +4552,28 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 					}
 				)
 			)
+	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(round_data)
+	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+		var slot_map: Dictionary = ras[slot] as Dictionary
+		for axis: String in slot_map:
+			var p: String = str(slot_map[axis])
+			if p != "" and not _save_source_exists(p):
+				(
+					issues
+					. append(
+						{
+							"cause": CAUSE_MISSING_SOURCE,
+							"item": label,
+							"detail":
+							(
+								"Restim %s/%s funscript no longer exists at: %s"
+								% [slot, axis, p]
+							),
+							"hint":
+							"Re-drag the funscript in Extra Axes (slot %s)." % slot.to_upper(),
+						}
+					)
+				)
 
 	# Vibrator-channel scripts.
 	var vib_scripts: Dictionary = round_data.get("vib_scripts", {})
@@ -4513,6 +4673,53 @@ func _save_check_pool_source(path: String, kind: String, elabel: String, issues:
 				}
 			)
 		)
+
+
+# Cooldown node: days must be ≥ 1. No media required.
+func _save_check_cooldown(cd_data: Dictionary, ctx: String, issues: Array) -> void:
+	var days: int = int(cd_data.get("days", 0))
+	if days < 1:
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_BAD_NAME,
+					"item": ctx,
+					"detail": "Cooldown days must be at least 1.",
+					"hint": "Set Lockout Days in the cooldown editor.",
+				}
+			)
+		)
+
+
+# Soft cutscene warning for the live node badge only (does not block save).
+func _soft_check_cutscene(cut_data: Dictionary, issues: Array) -> void:
+	var vid: String = str(cut_data.get("video_path", "")).strip_edges()
+	if vid == "":
+		issues.append({"detail": "No video selected (WIP — still savable)."})
+	elif not _save_source_exists(vid):
+		issues.append({"detail": "Video no longer exists at: %s" % vid})
+
+
+# Pools a cutscene node's video into content/ (same pipeline as rounds, no funscript).
+func _save_cutscene_node_media(
+	saved_data: Dictionary, data_in: Dictionary, abs_dir: String, modal: Control
+) -> Dictionary:
+	var vid_src: String = str(data_in.get("video_path", ""))
+	if vid_src == "":
+		saved_data["video_path"] = ""
+		return saved_data
+	var display: String = str(saved_data.get("name", "")).strip_edges()
+	if display == "":
+		display = "Cutscene"
+	var subject: String = 'Cutscene "%s"' % display
+	var vres: Dictionary = await _pool_video_into(
+		vid_src, abs_dir, modal, display, subject, 0, 0, 0, 0
+	)
+	if not bool(vres.get("ok", false)):
+		return {}
+	saved_data["video_path"] = str(vres.get("rel", ""))
+	return saved_data
 
 
 func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> void:

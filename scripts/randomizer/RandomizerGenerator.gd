@@ -8,7 +8,8 @@ extends RefCounted
 ## of ForkResolver / DeviceRouting / JourneyAudit.
 ##
 ## Consumes library entries of the shape:
-##   { id, name, video_rel, funscript_rel, axis_rel:{}, vib_rel:{}, boss_image_rel,
+##   { id, name, video_rel, funscript_rel, restim_axis_rel:{a,b,shared},
+##     axis_rel:{} (shared mirror), vib_rel:{}, boss_image_rel,
 ##     action_count:int, length_ms:int, duration_ms:int,
 ##     tags:[String], weight:float, intensity:int(1-5), last_used:int(unix) }
 ## where *_rel are pooled paths RELATIVE to the run folder ("content/m_<fp>.<ext>").
@@ -313,7 +314,9 @@ static func _round_data(
 		"name": str(entry.get("name", "Round")),
 		"video_path": str(entry.get("video_rel", "")),
 		"funscript_path": str(entry.get("funscript_rel", "")),
-		"axis_scripts": (entry.get("axis_rel", {}) as Dictionary).duplicate(true),
+		"restim_axis_scripts": JourneyData.duplicate_restim_axis_scripts(
+			{"restim_axis_scripts": entry.get("restim_axis_rel", {}), "axis_scripts": {}}
+		),
 		"vib_scripts": (entry.get("vib_rel", {}) as Dictionary).duplicate(true),
 		"action_count": int(entry.get("action_count", 0)),
 		"length_ms": int(entry.get("length_ms", 0)),
@@ -324,6 +327,13 @@ static func _round_data(
 		"effect_random": true,
 		"boss_modifiers": _boss_modifiers(rng) if round_type == "boss" else [],
 	}
+	data["axis_scripts"] = (data["restim_axis_scripts"]["shared"] as Dictionary).duplicate(true)
+	# Legacy libraries without restim_axis_rel still carry flat axis_rel.
+	if (data["axis_scripts"] as Dictionary).is_empty():
+		data["axis_scripts"] = (entry.get("axis_rel", {}) as Dictionary).duplicate(true)
+		data["restim_axis_scripts"] = JourneyData.coerce_restim_axis_scripts(
+			{"axis_scripts": data["axis_scripts"]}
+		)
 	return JourneyData.coerce_node_save_data("round", data)
 
 
@@ -414,6 +424,10 @@ static func _collect_content_rels(graph: Dictionary) -> Array:
 		]
 		for ax: Variant in (d.get("axis_scripts", {}) as Dictionary).values():
 			candidates.append(str(ax))
+		var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(d)
+		for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+			for ax: Variant in (ras[slot] as Dictionary).values():
+				candidates.append(str(ax))
 		for vb: Variant in (d.get("vib_scripts", {}) as Dictionary).values():
 			candidates.append(str(vb))
 		for rel: String in candidates:

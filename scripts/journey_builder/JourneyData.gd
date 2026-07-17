@@ -11,6 +11,8 @@ extends RefCounted
 #   { type: "shop",       title, mode, count, items, price_multiplier }
 #   { type: "storyboard", coins, image, lines }
 #   { type: "fork",       title, description, paths: [ {name, description, image_path, items: [...]} ] }
+#   { type: "cooldown",   name, days, message }
+#   { type: "cutscene",   name, video_path, items_blocked, length_ms, award_item, coins, is_checkpoint }
 # Nested forks are stored inside a path's `items` array (recursive).
 #
 # Used by JourneyBuilder.gd via class-name calls:
@@ -688,6 +690,18 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			out["cond_decider"] = str(data.get("cond_decider", "game"))
 			out["default_path"] = int(data.get("default_path", 0))
 			out["after_order"] = int(data.get("after_order", 0))
+		"cooldown":
+			out["name"] = str(data.get("name", ""))
+			out["days"] = maxi(1, int(data.get("days", 1)))
+			out["message"] = str(data.get("message", ""))
+		"cutscene":
+			out["name"] = str(data.get("name", ""))
+			out["video_path"] = str(data.get("video_path", ""))
+			out["items_blocked"] = bool(data.get("items_blocked", true))
+			out["length_ms"] = maxi(0, int(data.get("length_ms", 0)))
+			out["award_item"] = str(data.get("award_item", ""))  # optional item id granted when cutscene ends
+			out["coins"] = int(data.get("coins", 0))
+			out["is_checkpoint"] = bool(data.get("is_checkpoint", false))
 	return out
 
 
@@ -715,6 +729,65 @@ static func _prune_orphan_overrides(out: Dictionary) -> void:
 			overrides.erase(nm)
 
 
+# ── Dual Restim axis kits ─────────────────────────────────────────────────────
+# restim_axis_scripts: { "a": {axis: path}, "b": {...}, "shared": {...} }
+# Shared axes (e.g. pulse_*) fan out to both Restim websockets at play time.
+# Legacy flat axis_scripts merges into "shared" for keys not already in a/b/shared.
+
+const RESTIM_AXIS_SLOTS: PackedStringArray = ["a", "b", "shared"]
+
+
+static func empty_restim_axis_scripts() -> Dictionary:
+	return {"a": {}, "b": {}, "shared": {}}
+
+
+static func _axis_in_restim_kits(ras: Dictionary, axis: String) -> bool:
+	for slot: String in RESTIM_AXIS_SLOTS:
+		var m: Dictionary = ras.get(slot, {}) as Dictionary
+		if m.has(axis):
+			return true
+	return false
+
+
+# Normalizes round/pool media dict → restim_axis_scripts {a,b,shared}.
+# Prefers explicit restim_axis_scripts; merges leftover axis_scripts into shared.
+static func coerce_restim_axis_scripts(d: Dictionary) -> Dictionary:
+	var out: Dictionary = empty_restim_axis_scripts()
+	var ras: Variant = d.get("restim_axis_scripts", null)
+	if ras is Dictionary:
+		var rd: Dictionary = ras
+		for slot: String in RESTIM_AXIS_SLOTS:
+			var slot_map: Variant = rd.get(slot, {})
+			if slot_map is Dictionary:
+				out[slot] = (slot_map as Dictionary).duplicate(true)
+	var legacy: Dictionary = (d.get("axis_scripts", {}) as Dictionary).duplicate(true)
+	for axis: String in legacy:
+		if _axis_in_restim_kits(out, axis):
+			continue
+		(out["shared"] as Dictionary)[axis] = legacy[axis]
+	return out
+
+
+# Ensures d has restim_axis_scripts (coerced) and keeps axis_scripts as a flat
+# merge of shared (for serial / legacy readers). Returns the coerced kits.
+static func ensure_restim_axis_scripts(d: Dictionary) -> Dictionary:
+	var ras: Dictionary = coerce_restim_axis_scripts(d)
+	d["restim_axis_scripts"] = ras
+	# Flat axis_scripts = shared only (SSR + unprefixed kit) for serial path /
+	# older tooling; slot a/b kits live only under restim_axis_scripts.
+	d["axis_scripts"] = (ras["shared"] as Dictionary).duplicate(true)
+	return ras
+
+
+# Deep-copies restim_axis_scripts for pool entries / templates.
+static func duplicate_restim_axis_scripts(d: Dictionary) -> Dictionary:
+	var ras: Dictionary = coerce_restim_axis_scripts(d)
+	var out: Dictionary = empty_restim_axis_scripts()
+	for slot: String in RESTIM_AXIS_SLOTS:
+		out[slot] = (ras[slot] as Dictionary).duplicate(true)
+	return out
+
+
 # ── Pool round (random encounter) ─────────────────────────────────────────────
 # A pool round holds several media-set entries; the runtime weighted-picks one as
 # the "encounter" each play. Each entry is just media + a name + a spawn weight
@@ -722,11 +795,13 @@ static func _prune_orphan_overrides(out: Dictionary) -> void:
 # the media paths are pooled into content/ by _save_round_node_media; at scan they
 # resolve back to absolute — same as a normal round's media, per entry.
 static func coerce_pool_entry(e: Dictionary) -> Dictionary:
+	var ras: Dictionary = duplicate_restim_axis_scripts(e)
 	var out: Dictionary = {
 		"name": str(e.get("name", "")),
 		"video_path": str(e.get("video_path", "")),
 		"funscript_path": str(e.get("funscript_path", "")),
-		"axis_scripts": (e.get("axis_scripts", {}) as Dictionary).duplicate(true),
+		"axis_scripts": (ras["shared"] as Dictionary).duplicate(true),
+		"restim_axis_scripts": ras,
 		"vib_scripts": (e.get("vib_scripts", {}) as Dictionary).duplicate(true),
 		"weight": maxi(1, int(e.get("weight", 1))),
 		# Per-entry round type: a rolled encounter can play as normal or as a boss (the round
@@ -844,6 +919,7 @@ static func new_item(type: String) -> Dictionary:
 				"coins": 0,
 				"award_item": "",
 				"axis_scripts": {},
+				"restim_axis_scripts": empty_restim_axis_scripts(),
 				"node_id": new_node_id()
 			}
 		"shop":
@@ -898,6 +974,29 @@ static func new_item(type: String) -> Dictionary:
 					},
 				]
 			}
+		"cooldown":
+			# Calendar lockout node — stamps cooldown_until and Force Save & Quits.
+			# Prefer this over round.cooldown_days for new content.
+			return {
+				"type": "cooldown",
+				"name": "",
+				"days": 1,
+				"message": "",
+				"node_id": new_node_id()
+			}
+		"cutscene":
+			# Watch-then-advance video (EP / Fate / Credits / unlock clips). No funscript.
+			return {
+				"type": "cutscene",
+				"name": "",
+				"video_path": "",
+				"items_blocked": true,
+				"length_ms": 0,
+				"award_item": "",
+				"coins": 0,
+				"is_checkpoint": false,
+				"node_id": new_node_id()
+			}
 	return {"type": type}
 
 
@@ -944,6 +1043,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 			"name": r.get("name", ""),
 			"funscript_path": r.get("funscript_path", ""),
 			"axis_scripts": r.get("axis_scripts", {}),
+			"restim_axis_scripts": duplicate_restim_axis_scripts(r),
 			"vib_scripts": r.get("vib_scripts", {}),
 			"is_checkpoint": bool(r.get("is_checkpoint", false)),
 			"cooldown_days": int(r.get("cooldown_days", 0)),
@@ -1088,6 +1188,7 @@ static func _build_path_items(p: Dictionary) -> Array:
 			"name": pr.get("name", ""),
 			"funscript_path": pr.get("funscript_path", ""),
 			"axis_scripts": pr.get("axis_scripts", {}),
+			"restim_axis_scripts": duplicate_restim_axis_scripts(pr),
 			"vib_scripts": pr.get("vib_scripts", {}),
 			"is_checkpoint": bool(pr.get("is_checkpoint", false)),
 			"cooldown_days": int(pr.get("cooldown_days", 0)),
@@ -1270,11 +1371,33 @@ static func find_video_in_round(folder: String) -> String:
 
 
 # ── Shared content pool ──────────────────────────────────────────────────────
-# Per-round playback assets (video / funscript / axis / vib / boss image) are
-# stored once under content/m_<fingerprint>.<ext> and referenced by explicit
-# paths, so an asset reused across rounds (e.g. a clip used by a Normal round and
-# a Cursed round in a fork) lives on disk and in the shared zip exactly once.
-# (The media/ folder is separate — it holds journey images.)
+# External (outside-journey) imports still pool once under content/m_<fingerprint>.<ext>.
+# Assets that already live inside the journey folder keep their relative paths on
+# save (named folders / original filenames) — no re-hash. The media/ folder is
+# separate and holds journey images.
+
+
+# If `src` resolves to a file under `journey_abs`, return the journey-root-relative
+# path (forward slashes). Otherwise return "". Used so save can keep named-folder
+# layouts instead of re-pooling into content/m_*.
+static func rel_under_journey(src: String, journey_abs: String) -> String:
+	if src == "" or journey_abs == "":
+		return ""
+	var root: String = ProjectSettings.globalize_path(journey_abs).replace("\\", "/").rstrip("/")
+	var abs: String = ProjectSettings.globalize_path(src).replace("\\", "/")
+	if not FileAccess.file_exists(abs):
+		var joined: String = root + "/" + src.replace("\\", "/").lstrip("/")
+		if FileAccess.file_exists(joined):
+			abs = joined
+		else:
+			return ""
+	var root_l: String = root.to_lower()
+	var abs_l: String = abs.to_lower()
+	if abs_l == root_l:
+		return ""
+	if not abs_l.begins_with(root_l + "/"):
+		return ""
+	return abs.substr(root.length() + 1)
 
 
 # Source identity for pool dedup: globalized path + byte size + mtime, hashed to

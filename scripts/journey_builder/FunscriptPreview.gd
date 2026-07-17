@@ -15,6 +15,7 @@ extends Control
 #
 # Open with:
 #   FunscriptPreview.new().open(parent, funscript_path, video_path, modifiers, name, mod_label)
+#   FunscriptPreview.new().open_video_only(parent, video_path, title)  # cutscenes
 # The overlay frees itself on close.
 # ---------------------------------------------------------------------------
 
@@ -50,6 +51,14 @@ var _trim_out: int = 0
 var _on_trim_applied: Callable = Callable()
 var _trim_label: Label = null
 
+# Cutscene / video-only preview: hide the stroke graph and show just the video pane.
+var _video_only: bool = false
+var _graph_scroll: ScrollContainer = null
+var _seek_slider: HSlider = null
+var _seek_time_lbl: Label = null
+var _seek_dragging: bool = false
+var _video_length_s: float = 0.0
+
 
 # Builds and shows the overlay over `parent`. `modifiers` are stroke-affecting
 # effect dicts (each {kind, factor?/min?/max?}); pass [] for none. `mod_label`
@@ -75,6 +84,7 @@ func open(
 	_trim_in = trim_in
 	_trim_out = trim_out
 	_on_trim_applied = on_trim_applied
+	_video_only = false
 	_build_ui(round_name)
 	parent.add_child(self)
 	move_to_front()  # sit above the builder's graph / side panel siblings
@@ -85,6 +95,20 @@ func open(
 	_setup_video(video_path)
 	if _trim_mode:
 		_sync_trim()
+
+
+# Video-only overlay for cutscenes (no funscript). Reuses the same decode path as
+# round preview; the stroke graph and zoom chrome stay hidden.
+func open_video_only(parent: Control, video_path: String, title: String = "") -> void:
+	_modifiers = []
+	_mod_label = ""
+	_on_tune = Callable()
+	_trim_mode = false
+	_video_only = true
+	_build_ui(title)
+	parent.add_child(self)
+	move_to_front()
+	_setup_video(video_path)
 
 
 func _build_ui(round_name: String) -> void:
@@ -121,9 +145,8 @@ func _build_ui(round_name: String) -> void:
 	# Header: title + close.
 	var header: HBoxContainer = HBoxContainer.new()
 	var title: Label = Label.new()
-	title.text = (
-		"▶  FUNSCRIPT PREVIEW" + ("  —  " + round_name.to_upper() if round_name != "" else "")
-	)
+	var title_prefix: String = "▶  VIDEO PREVIEW" if _video_only else "▶  FUNSCRIPT PREVIEW"
+	title.text = title_prefix + ("  —  " + round_name.to_upper() if round_name != "" else "")
 	title.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	title.add_theme_font_size_override("font_size", 18)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -142,7 +165,7 @@ func _build_ui(round_name: String) -> void:
 	vp_style.bg_color = Color(0, 0, 0, 1)
 	video_pane.add_theme_stylebox_override("panel", vp_style)
 	video_pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	video_pane.size_flags_stretch_ratio = 1.4
+	video_pane.size_flags_stretch_ratio = 1.4 if not _video_only else 3.0
 	video_pane.clip_contents = true
 	video_pane.visible = false
 	_video_aspect = AspectRatioContainer.new()
@@ -156,14 +179,49 @@ func _build_ui(round_name: String) -> void:
 	_video_pane = video_pane
 	col.add_child(video_pane)
 
+	# Video-only seek bar (replaces the funscript graph playhead for scrubbing).
+	if _video_only:
+		var seek_row: HBoxContainer = HBoxContainer.new()
+		seek_row.add_theme_constant_override("separation", 10)
+		_seek_slider = HSlider.new()
+		_seek_slider.min_value = 0.0
+		_seek_slider.max_value = 1.0
+		_seek_slider.step = 0.05
+		_seek_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_seek_slider.custom_minimum_size = Vector2(0, 28)
+		_seek_slider.editable = false
+		_seek_slider.drag_started.connect(func() -> void: _seek_dragging = true)
+		_seek_slider.drag_ended.connect(
+			func(_changed: bool) -> void:
+				_seek_dragging = false
+				_seek_to_slider()
+		)
+		_seek_slider.value_changed.connect(
+			func(_v: float) -> void:
+				if _seek_dragging:
+					_seek_to_slider()
+					_update_seek_time_lbl()
+		)
+		seek_row.add_child(_seek_slider)
+		_seek_time_lbl = Label.new()
+		_seek_time_lbl.text = "0:00 / 0:00"
+		_seek_time_lbl.add_theme_font_size_override("font_size", 12)
+		_seek_time_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+		_seek_time_lbl.custom_minimum_size = Vector2(110, 0)
+		_seek_time_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		seek_row.add_child(_seek_time_lbl)
+		col.add_child(seek_row)
+
 	# The graph fills the remaining space and scrolls horizontally — the curve is
 	# drawn at a fixed time scale (px/sec) rather than squashed to fit, so strokes
-	# stay legible on long scripts.
+	# stay legible on long scripts. Hidden for cutscene video-only preview.
 	var scroll: ScrollContainer = ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.visible = not _video_only
+	_graph_scroll = scroll
 	_graph = _Graph.new()
 	_graph.size_flags_vertical = Control.SIZE_EXPAND_FILL  # fill the viewport height
 	_graph.time_label_format = func(ms: float) -> String: return _format_time(ms)
@@ -178,7 +236,7 @@ func _build_ui(round_name: String) -> void:
 
 	# Live stroke-magnitude tuning (effect rounds): sliders that rewrite the modifier
 	# curve as you drag and persist back to the round. Only when the caller opted in.
-	if _on_tune.is_valid():
+	if _on_tune.is_valid() and not _video_only:
 		var strip: Control = _build_tuning_strip()
 		if strip != null:
 			col.add_child(strip)
@@ -204,17 +262,18 @@ func _build_ui(round_name: String) -> void:
 	footer.add_child(_audio_btn)
 
 	# Zoom controls — adjust the horizontal time scale of the graph.
-	var zoom_out: Button = UITheme.make_icon_btn("ZOOM −", false, UITheme.PURPLE_BRIGHT)
-	zoom_out.tooltip_text = "Zoom out (show more time)"
-	zoom_out.pressed.connect(func() -> void: _graph.zoom_by(0.8))
-	footer.add_child(zoom_out)
-	var zoom_in: Button = UITheme.make_icon_btn("ZOOM +", false, UITheme.PURPLE_BRIGHT)
-	zoom_in.tooltip_text = "Zoom in (show less time, more detail)"
-	zoom_in.pressed.connect(func() -> void: _graph.zoom_by(1.25))
-	footer.add_child(zoom_in)
+	if not _video_only:
+		var zoom_out: Button = UITheme.make_icon_btn("ZOOM −", false, UITheme.PURPLE_BRIGHT)
+		zoom_out.tooltip_text = "Zoom out (show more time)"
+		zoom_out.pressed.connect(func() -> void: _graph.zoom_by(0.8))
+		footer.add_child(zoom_out)
+		var zoom_in: Button = UITheme.make_icon_btn("ZOOM +", false, UITheme.PURPLE_BRIGHT)
+		zoom_in.tooltip_text = "Zoom in (show less time, more detail)"
+		zoom_in.pressed.connect(func() -> void: _graph.zoom_by(1.25))
+		footer.add_child(zoom_in)
 
 	# Trim mode: place the window with the playhead, then apply back to the round.
-	if _trim_mode:
+	if _trim_mode and not _video_only:
 		var set_in: Button = UITheme.make_icon_btn("⟦ IN", false, UITheme.TOXIC_GREEN)
 		set_in.tooltip_text = "Set the trim start to the playhead"
 		set_in.pressed.connect(
@@ -253,7 +312,7 @@ func _build_ui(round_name: String) -> void:
 		_trim_label.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)
 		footer.add_child(_trim_label)
 
-	if not _modifiers.is_empty():
+	if not _modifiers.is_empty() and not _video_only:
 		var toggle: CheckButton = CheckButton.new()
 		toggle.text = "SHOW %s" % _mod_label.to_upper()
 		toggle.button_pressed = true
@@ -268,12 +327,17 @@ func _build_ui(round_name: String) -> void:
 	_caption.add_theme_font_size_override("font_size", 11)
 	_caption.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_caption.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	if _video_only:
+		_caption.text = "Loading video…"
+		_caption.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	footer.add_child(_caption)
 	col.add_child(footer)
 
 
 # Recomputes (or clears) the modifier-applied curve and updates the caption.
 func _refresh_modified() -> void:
+	if _video_only or _graph == null:
+		return
 	if _modifiers.is_empty():
 		_graph.set_modified([], false)
 		_caption.text = "No %s on this round — showing the raw script." % _mod_label.to_lower()
@@ -552,6 +616,16 @@ func _input(event: InputEvent) -> void:
 		KEY_SPACE:
 			_toggle_play()  # no-op when there's no playable video
 			get_viewport().set_input_as_handled()
+		KEY_LEFT, KEY_RIGHT:
+			if _video_only and _video_ok and _seek_slider != null:
+				var step_s: float = 5.0
+				var delta: float = -step_s if event.keycode == KEY_LEFT else step_s
+				_seek_slider.value = clampf(
+					_seek_slider.value + delta, 0.0, _seek_slider.max_value
+				)
+				_seek_to_slider()
+				_update_seek_time_lbl()
+				get_viewport().set_input_as_handled()
 
 
 # ── Video ────────────────────────────────────────────────────────────────────
@@ -564,6 +638,9 @@ func _input(event: InputEvent) -> void:
 # visible for the player to actually start, so we show it, then poll is_playing().
 func _setup_video(path: String) -> void:
 	if path == "":
+		if _video_only and _caption != null:
+			_caption.text = "No video path set."
+			_caption.add_theme_color_override("font_color", UITheme.AMBER)
 		return
 	var ext: String = path.get_extension().to_lower()
 	if ext == "ogv":
@@ -571,12 +648,18 @@ func _setup_video(path: String) -> void:
 		if stream is VideoStream:
 			_video.stream = stream as VideoStream
 		else:
+			if _video_only and _caption != null:
+				_caption.text = "Video could not be loaded."
+				_caption.add_theme_color_override("font_color", UITheme.AMBER)
 			return
 	elif ClassDB.class_exists("FFmpegVideoStream"):
 		var stream: Resource = ClassDB.instantiate("FFmpegVideoStream")
 		stream.set("file", ProjectSettings.globalize_path(path))
 		_video.stream = stream as VideoStream
 	else:
+		if _video_only and _caption != null:
+			_caption.text = "No video decoder available."
+			_caption.add_theme_color_override("font_color", UITheme.AMBER)
 		return  # no decoder available
 
 	# Must be visible to actually decode and report is_playing() — a hidden
@@ -599,10 +682,55 @@ func _setup_video(path: String) -> void:
 		_apply_audio()
 		_update_play_btn()
 		_apply_aspect()
+		_init_seek_bar()
 		set_process(true)
+		if _video_only and _caption != null:
+			_caption.text = "Drag scrubber to seek · ←/→ ±5s · Space play/pause · Esc close"
+			_caption.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	else:
 		_video_pane.visible = false  # decode failed — stay graph-only
 		_video.stream = null
+		if _video_only and _caption != null:
+			_caption.text = "Video could not be decoded (H.264 / OGV required)."
+			_caption.add_theme_color_override("font_color", UITheme.AMBER)
+
+
+# Wire the video-only scrubber once length is known (may still be 0 until a few frames).
+func _init_seek_bar() -> void:
+	if not _video_only or _seek_slider == null:
+		return
+	_refresh_video_length()
+	_seek_slider.editable = true
+	_update_seek_time_lbl()
+
+
+func _refresh_video_length() -> void:
+	if _video == null:
+		return
+	var len_s: float = _video.get_stream_length()
+	if len_s > 0.05:
+		_video_length_s = len_s
+		_seek_slider.max_value = len_s
+		_seek_slider.step = maxf(0.05, len_s / 500.0)
+
+
+func _seek_to_slider() -> void:
+	if not _video_ok or _seek_slider == null:
+		return
+	# Keep the stream loaded while scrubbing; pause so a drag doesn't race playback.
+	if not _video.is_playing():
+		_video.play()
+		_video.paused = true
+	_video.stream_position = _seek_slider.value
+	_update_play_btn()
+
+
+func _update_seek_time_lbl() -> void:
+	if _seek_time_lbl == null:
+		return
+	var pos_ms: float = (_seek_slider.value if _seek_slider != null else 0.0) * 1000.0
+	var len_ms: float = _video_length_s * 1000.0
+	_seek_time_lbl.text = "%s / %s" % [_format_time(pos_ms), _format_time(len_ms)]
 
 
 # Sets the letterbox aspect from the real video dimensions once a frame exists.
@@ -622,8 +750,14 @@ func _process(_delta: float) -> void:
 		_apply_aspect()  # the video texture can appear a frame or two after playback starts
 	# Drive the playhead from the video clock only while actively advancing
 	# (playing AND not paused), and never while the author is scrubbing.
-	if _is_advancing() and not _graph.is_dragging():
+	if not _video_only and _graph != null and _is_advancing() and not _graph.is_dragging():
 		_graph.set_playhead(_video.stream_position * 1000.0)
+	if _video_only and _seek_slider != null:
+		if _video_length_s <= 0.05:
+			_refresh_video_length()
+		if not _seek_dragging:
+			_seek_slider.value = _video.stream_position
+			_update_seek_time_lbl()
 	_update_play_btn()  # keeps the label correct through pause / resume / natural end
 
 
@@ -637,9 +771,12 @@ func _toggle_play() -> void:
 	if not _video_ok:
 		return
 	if not _video.is_playing():
-		# Finished (or stopped) — restart playback from the current playhead.
+		# Finished (or stopped) — restart playback from the current playhead / scrubber.
 		_video.play()
-		_video.stream_position = _graph.get_playhead() / 1000.0
+		if _video_only and _seek_slider != null:
+			_video.stream_position = _seek_slider.value
+		elif not _video_only and _graph != null:
+			_video.stream_position = _graph.get_playhead() / 1000.0
 		_video.paused = false
 	else:
 		_video.paused = not _video.paused

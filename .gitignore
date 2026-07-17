@@ -43,3 +43,13 @@ export_presets.cfg
 # Committed how-to / smoke docs (override *.md)
 !docs/
 !docs/**/*.md
+# Local debug / layout scratch (not committed)
+debug-*.log
+restim_tcode*.log
+Erosphere_Inferno_layout.png
+Erosphere_Inferno_layout.png.import
+# GdUnit HTML/XML test reports
+/reports/
+# Python bytecode
+__pycache__/
+*.py[cod]

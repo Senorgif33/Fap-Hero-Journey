@@ -156,15 +156,6 @@
 		"shave_hours":  24
 	},
 	{
-		"id":           "erosphere_divine_summoning",
-		"name":         "Divine Summoning",
-		"description":  "Clears active effects on a resolvable effect round. Only usable when effects can be cleared.",
-		"category":     "modifier",
-		"price":        40,
-		"duration_ms":  0,
-		"kind":         "clear_effects"
-	},
-	{
 		"id":           "erosphere_psychic_divorce",
 		"name":         "Psychic Divorce",
 		"description":  "Shaves 48 hours off an active journey cooldown.",

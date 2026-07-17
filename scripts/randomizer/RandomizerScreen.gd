@@ -155,6 +155,14 @@ func _build_library_column() -> Control:
 	UITheme.style_button(add_btn, UITheme.CYAN)
 	add_btn.pressed.connect(_on_add_pressed)
 	bar.add_child(add_btn)
+	var scan_btn := Button.new()
+	scan_btn.text = "SCAN SCRIPTS"
+	UITheme.style_button(scan_btn, UITheme.PURPLE_MID)
+	scan_btn.tooltip_text = (
+		"Attach matching funscripts / Restim kits / vibs next to each clip's video on disk."
+	)
+	scan_btn.pressed.connect(_on_scan_scripts_pressed)
+	bar.add_child(scan_btn)
 	var clear_btn := Button.new()
 	clear_btn.text = "CLEAR ALL"
 	UITheme.style_button(clear_btn, UITheme.DANGER)
@@ -519,6 +527,16 @@ func _on_files_dropped(files: PackedStringArray) -> void:
 	_import_paths(files)
 
 
+func _on_scan_scripts_pressed() -> void:
+	if _busy or RandomizerLibrary.size() == 0:
+		return
+	var n: int = RandomizerLibrary.scan_attach_sibling_scripts()
+	if n > 0:
+		_status.text = "Attached scripts on %d clip%s." % [n, "" if n == 1 else "s"]
+	else:
+		_status.text = "No new scripts found."
+
+
 func _on_clear_all_pressed() -> void:
 	if _busy or RandomizerLibrary.size() == 0:
 		return
@@ -576,7 +594,8 @@ func _import_paths(paths: PackedStringArray) -> void:
 			[],
 			1.0,
 			3,
-			nm
+			nm,
+			r.get("restim_axis_scripts", {})
 		)
 		if bool(add_res["ok"]):
 			added += 1

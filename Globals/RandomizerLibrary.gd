@@ -61,8 +61,22 @@ func save_registry() -> bool:
 
 
 # Fills any missing fields so downstream code (and the generator) never has to
-# guard. Applied on load and on add.
+# guard. Applied on load and on add. Coerces legacy flat axis_* into restim_axis_* shared.
 static func _coerce_entry(e: Dictionary) -> Dictionary:
+	var restim_src: Dictionary = JourneyData.coerce_restim_axis_scripts(
+		{
+			"restim_axis_scripts": e.get("restim_axis_src", {}),
+			"axis_scripts": e.get("axis_src", {}),
+		}
+	)
+	var restim_rel: Dictionary = JourneyData.coerce_restim_axis_scripts(
+		{
+			"restim_axis_scripts": e.get("restim_axis_rel", {}),
+			"axis_scripts": e.get("axis_rel", {}),
+		}
+	)
+	var shared_src: Dictionary = (restim_src["shared"] as Dictionary).duplicate(true)
+	var shared_rel: Dictionary = (restim_rel["shared"] as Dictionary).duplicate(true)
 	return {
 		"id": str(e.get("id", "")),
 		"name": str(e.get("name", "Clip")),
@@ -70,7 +84,8 @@ static func _coerce_entry(e: Dictionary) -> Dictionary:
 		# deferred to run time, so these must stay valid until Generate is pressed.
 		"video_src": str(e.get("video_src", "")),
 		"funscript_src": str(e.get("funscript_src", "")),
-		"axis_src": (e.get("axis_src", {}) as Dictionary).duplicate(true),
+		"restim_axis_src": restim_src,
+		"axis_src": shared_src,
 		"vib_src": (e.get("vib_src", {}) as Dictionary).duplicate(true),
 		# Whether the video needs an H.264 re-encode (decided at probe time); drives
 		# the predicted pooled extension below and the run-time transcode.
@@ -80,7 +95,8 @@ static func _coerce_entry(e: Dictionary) -> Dictionary:
 		# actually pooled. prepare_entry_media materializes them at run time.
 		"video_rel": str(e.get("video_rel", "")),
 		"funscript_rel": str(e.get("funscript_rel", "")),
-		"axis_rel": (e.get("axis_rel", {}) as Dictionary).duplicate(true),
+		"restim_axis_rel": restim_rel,
+		"axis_rel": shared_rel,
 		"vib_rel": (e.get("vib_rel", {}) as Dictionary).duplicate(true),
 		"boss_image_rel": str(e.get("boss_image_rel", "")),
 		"action_count": int(e.get("action_count", 0)),
@@ -175,7 +191,8 @@ func add_clip(
 	tags: Array = [],
 	weight: float = 1.0,
 	intensity: int = 3,
-	display_name: String = ""
+	display_name: String = "",
+	restim_axis_srcs: Dictionary = {}
 ) -> Dictionary:
 	if video_src == "" or not FileAccess.file_exists(ProjectSettings.globalize_path(video_src)):
 		return {"ok": false, "reason": "video_missing", "entry": {}}
@@ -194,6 +211,11 @@ func add_clip(
 	var vext: String = "mp4" if needs_transcode else video_src.get_extension()
 	var video_rel: String = JourneyData.pooled_media_rel(vfp, vext)
 
+	var restim_src: Dictionary = JourneyData.coerce_restim_axis_scripts(
+		{"restim_axis_scripts": restim_axis_srcs, "axis_scripts": axis_srcs}
+	)
+	var restim_rel: Dictionary = _predict_restim_axis_rels(restim_src)
+
 	var stats: Dictionary = _read_script_stats(funscript_src)
 	# Auto-rate intensity from the funscript's motion; the passed value is the
 	# fallback for a clip imported without a script.
@@ -211,12 +233,14 @@ func add_clip(
 			"name": display_name if display_name != "" else video_src.get_file().get_basename(),
 			"video_src": video_src,
 			"funscript_src": funscript_src,
-			"axis_src": axis_srcs,
+			"restim_axis_src": restim_src,
+			"axis_src": (restim_src["shared"] as Dictionary).duplicate(true),
 			"vib_src": vib_srcs,
 			"needs_transcode": needs_transcode,
 			"video_rel": video_rel,
 			"funscript_rel": _predict_script_rel(funscript_src),
-			"axis_rel": _predict_channel_rels(axis_srcs),
+			"restim_axis_rel": restim_rel,
+			"axis_rel": (restim_rel["shared"] as Dictionary).duplicate(true),
 			"vib_rel": _predict_channel_rels(vib_srcs),
 			"action_count": int(stats["count"]),
 			"length_ms": int(stats["length_ms"]),
@@ -261,6 +285,52 @@ func set_funscript(id: String, funscript_src: String) -> void:
 	_entries[i] = _coerce_entry(merged)
 	save_registry()
 	library_changed.emit()
+
+
+# Backfills empty funscript / restim-axis / vib slots from siblings next to each
+# clip's video_src (Options slot labels drive tagged routing). Returns how many
+# clips were updated. Empty slots only — never overwrites.
+func scan_attach_sibling_scripts() -> int:
+	var labels: PackedStringArray = ImportScanner.current_restim_labels()
+	var updated: int = 0
+	for i: int in _entries.size():
+		var entry: Dictionary = _entries[i]
+		var video_src: String = str(entry.get("video_src", ""))
+		if video_src == "":
+			continue
+		var had_fs: String = str(entry.get("funscript_src", ""))
+		var filled: Dictionary = ImportScanner.autofill_src_siblings(
+			video_src,
+			had_fs,
+			entry.get("restim_axis_src", {}),
+			entry.get("vib_src", {}),
+			labels[0],
+			labels[1]
+		)
+		if not bool(filled["changed"]):
+			continue
+		var merged: Dictionary = entry.duplicate(true)
+		var new_fs: String = str(filled["funscript_src"])
+		merged["funscript_src"] = new_fs
+		merged["funscript_rel"] = _predict_script_rel(new_fs)
+		var ras: Dictionary = filled["restim_axis_src"] as Dictionary
+		merged["restim_axis_src"] = ras
+		merged["axis_src"] = (ras["shared"] as Dictionary).duplicate(true)
+		merged["restim_axis_rel"] = _predict_restim_axis_rels(ras)
+		merged["axis_rel"] = (merged["restim_axis_rel"]["shared"] as Dictionary).duplicate(true)
+		merged["vib_src"] = (filled["vib_src"] as Dictionary).duplicate(true)
+		merged["vib_rel"] = _predict_channel_rels(merged["vib_src"])
+		if had_fs == "" and new_fs != "":
+			var stats: Dictionary = _read_script_stats(new_fs)
+			merged["action_count"] = int(stats["count"])
+			merged["length_ms"] = int(stats["length_ms"])
+			merged["intensity"] = FunscriptIntensity.from_path(new_fs)
+		_entries[i] = _coerce_entry(merged)
+		updated += 1
+	if updated > 0:
+		save_registry()
+		library_changed.emit()
+	return updated
 
 
 # Removes every clip and wipes the shared content pool. Existing temp runs keep
@@ -335,9 +405,16 @@ func _pool_video(
 func _pool_all_scripts(entry: Dictionary) -> bool:
 	if not _ensure_pooled(str(entry.get("funscript_src", ""))):
 		return false
-	for src: Variant in (entry.get("axis_src", {}) as Dictionary).values():
-		if not _ensure_pooled(str(src)):
-			return false
+	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(
+		{
+			"restim_axis_scripts": entry.get("restim_axis_src", {}),
+			"axis_scripts": entry.get("axis_src", {}),
+		}
+	)
+	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+		for src: Variant in (ras[slot] as Dictionary).values():
+			if not _ensure_pooled(str(src)):
+				return false
 	for src: Variant in (entry.get("vib_src", {}) as Dictionary).values():
 		if not _ensure_pooled(str(src)):
 			return false
@@ -384,6 +461,17 @@ func _predict_channel_rels(srcs: Dictionary) -> Dictionary:
 	return out
 
 
+# restim_axis_src {a,b,shared} → predicted rels with the same shape.
+func _predict_restim_axis_rels(restim_src: Dictionary) -> Dictionary:
+	var out: Dictionary = JourneyData.empty_restim_axis_scripts()
+	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(
+		{"restim_axis_scripts": restim_src, "axis_scripts": {}}
+	)
+	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+		out[slot] = _predict_channel_rels(ras[slot] as Dictionary)
+	return out
+
+
 # Reads funscript stats {count, length_ms} straight from a source path (no pooling).
 func _read_script_stats(src: String) -> Dictionary:
 	if src == "" or not FileAccess.file_exists(ProjectSettings.globalize_path(src)):
@@ -416,8 +504,15 @@ func _copy_file(src: String, dst: String) -> bool:
 # references the same rel (fingerprint dedup means a rel can be shared).
 func _delete_orphan_pooled(entry: Dictionary) -> void:
 	var rels: Array = [str(entry.get("video_rel", "")), str(entry.get("funscript_rel", ""))]
-	for ax: Variant in (entry.get("axis_rel", {}) as Dictionary).values():
-		rels.append(str(ax))
+	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(
+		{
+			"restim_axis_scripts": entry.get("restim_axis_rel", {}),
+			"axis_scripts": entry.get("axis_rel", {}),
+		}
+	)
+	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+		for ax: Variant in (ras[slot] as Dictionary).values():
+			rels.append(str(ax))
 	for vb: Variant in (entry.get("vib_rel", {}) as Dictionary).values():
 		rels.append(str(vb))
 	for rel: String in rels:
@@ -432,8 +527,15 @@ func _rel_still_referenced(rel: String) -> bool:
 	for e: Dictionary in _entries:
 		if str(e.get("video_rel", "")) == rel or str(e.get("funscript_rel", "")) == rel:
 			return true
-		if rel in (e.get("axis_rel", {}) as Dictionary).values():
-			return true
+		var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(
+			{
+				"restim_axis_scripts": e.get("restim_axis_rel", {}),
+				"axis_scripts": e.get("axis_rel", {}),
+			}
+		)
+		for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
+			if rel in (ras[slot] as Dictionary).values():
+				return true
 		if rel in (e.get("vib_rel", {}) as Dictionary).values():
 			return true
 	return false
