@@ -620,70 +620,10 @@ func test_validate_clean_dag_and_empty() -> void:
 	assert_array(JourneyGraph.validate_graph(_g("", {}))).is_empty()
 
 
-# A back-edge (b → a) between rounds is flagged as a disallowed cycle.
+# A back-edge (b → a) is flagged as a cycle.
 func test_validate_flags_cycle() -> void:
 	var g := _g("a", {"a": _n("round", ["b"]), "b": _n("round", ["a"])})
 	assert_bool(_has_kind(g, "cycle")).is_true()
-
-
-# Fork-hub loops (Back between forks, round clear → hub) are allowed; round↔round is not.
-func test_fork_hub_cycles_allowed() -> void:
-	# hub1 ↔ hub2
-	var hubs := _g(
-		"h1",
-		{
-			"h1": _n("fork", ["h2"]),
-			"h2": _n("fork", ["h1"]),
-		}
-	)
-	assert_array(JourneyGraph.validate_graph(hubs)).is_empty()
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(hubs, "h2", "h1")).is_false()
-
-	# hub → round → hub
-	var hub_round := _g(
-		"h",
-		{
-			"h": _n("fork", ["r"]),
-			"r": _n("round", ["h"]),
-		}
-	)
-	assert_array(JourneyGraph.validate_graph(hub_round)).is_empty()
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(hub_round, "r", "h")).is_false()
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(hub_round, "h", "r")).is_false()
-
-	# round ↔ round still disallowed
-	var rounds := _g("a", {"a": _n("round", ["b"]), "b": _n("round", ["a"])})
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(rounds, "b", "a")).is_true()
-	assert_bool(_has_kind(rounds, "cycle")).is_true()
-
-	# hub → 006 → 006_5 → hub (freeplay Battle Styx addendum): round→round on a hub loop
-	var styx := _g(
-		"h",
-		{
-			"h": _n("fork", ["r6"]),
-			"r6": _n("round", ["r65"]),
-			"r65": _n("round", ["h"]),
-		}
-	)
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(styx, "r6", "r65")).is_false()
-	assert_array(JourneyGraph.validate_graph(styx)).is_empty()
-
-
-# Connect helper: linear back-edge to an earlier round is disallowed; back to a fork is not.
-func test_would_create_disallowed_cycle_connect_cases() -> void:
-	var linear := _g(
-		"a", {"a": _n("round", ["b"]), "b": _n("round", ["c"]), "c": _n("round", [])}
-	)
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(linear, "c", "a")).is_true()
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(linear, "a", "c")).is_false()
-
-	var with_hub := _g(
-		"a",
-		{"a": _n("round", ["h"]), "h": _n("fork", ["b"]), "b": _n("round", [])},
-	)
-	# b → h: h reaches b, but target is a fork → allowed
-	assert_bool(JourneyGraph.would_create_disallowed_cycle(with_hub, "b", "h")).is_false()
-
 
 
 # An out-edge to a non-existent node is flagged dangling, naming the bad target.
@@ -712,52 +652,70 @@ func test_validate_flags_unreachable_not_start() -> void:
 	assert_bool(unreachable_ids.has("a")).is_false()
 
 
-# EP / fail side-paths are entered via release_jump_to (not an out-edge). They must still
-# count as reachable so the builder can save Inferno-style graphs.
-func test_release_jump_makes_ep_island_reachable() -> void:
-	var main := _n("round", [])
-	(main["data"] as Dictionary)["release_jump_to"] = "ep"
-	var ep := _n("cutscene", ["ep_fate"])
-	var fate := _n("cutscene", ["cd"])
-	var cd := {"type": "cooldown", "data": {"name": "Wait", "days": 1}, "out": []}
-	var g := _g("main", {"main": main, "ep": ep, "ep_fate": fate, "cd": cd})
-	assert_array(JourneyGraph.validate_graph(g)).is_empty()
-	var reach: Dictionary = JourneyGraph.reachable_ids(g)
-	assert_bool(reach.has("ep")).is_true()
-	assert_bool(reach.has("ep_fate")).is_true()
-	assert_bool(reach.has("cd")).is_true()
-	# A true orphan (no out-edge and no release jump) is still flagged.
-	g["nodes"]["orphan"] = _n("round", [])
+# The designated finish/aftercare node lives off the main graph (reachable only via the FINISH button),
+# so passing it as finish_id exempts it from the unreachable flag.
+func test_validate_exempts_finish_node_from_unreachable() -> void:
+	var g := _g("a", {"a": _n("round", []), "b": _n("storyboard", [])})  # b is an island
 	var unreachable_ids: Array = []
-	for i: Dictionary in JourneyGraph.validate_graph(g):
+	for i: Dictionary in JourneyGraph.validate_graph(g, "b"):
 		if i["kind"] == "unreachable":
 			unreachable_ids.append(i["id"])
-	assert_bool(unreachable_ids.has("orphan")).is_true()
-	assert_bool(unreachable_ids.has("ep")).is_false()
-	assert_bool(unreachable_ids.has("cd")).is_false()
+	assert_bool(unreachable_ids.has("b")).is_false()  # exempt as the finish node
 
 
-# Connect cycle checks must ignore release_jump_to: Fate→unlock→punish→main with punish
-# jumping back to EP is a valid out-DAG (Inferno EP5/EP6 unlock-after-fate shape).
-func test_out_reachable_ignores_release_jump() -> void:
-	var fate := _n("cutscene", ["unlock"])
-	var unlock := _n("cutscene", ["punish"])
-	var punish := _n("round", ["main"])
-	(punish["data"] as Dictionary)["release_jump_to"] = "ep"
-	var ep := _n("cutscene", ["fate"])
-	var main := _n("round", [])
-	(main["data"] as Dictionary)["release_jump_to"] = "ep"
+# type_ordinals numbers each node within its type in insertion order, so the "N" in a save error's
+# "Storyboard N" is the same "N" GraphView draws on that node.
+func test_type_ordinals_number_per_type_in_order() -> void:
+	var nodes := {
+		"a": _n("round", []),
+		"b": _n("storyboard", []),
+		"c": _n("round", []),
+		"d": _n("storyboard", []),
+		"e": _n("fork", []),
+	}
+	var ord: Dictionary = JourneyGraph.type_ordinals(nodes)
+	assert_int(ord["a"]).is_equal(1)  # first round
+	assert_int(ord["c"]).is_equal(2)  # second round
+	assert_int(ord["b"]).is_equal(1)  # first storyboard
+	assert_int(ord["d"]).is_equal(2)  # second storyboard
+	assert_int(ord["e"]).is_equal(1)  # first fork
+
+
+func test_type_ordinals_empty() -> void:
+	assert_int((JourneyGraph.type_ordinals({}) as Dictionary).size()).is_equal(0)
+
+
+# max_nodes_on_path counts target nodes on a single path; a linear chain sums them all.
+func test_max_nodes_on_path_linear() -> void:
 	var g := _g(
-		"ep",
-		{"ep": ep, "fate": fate, "unlock": unlock, "punish": punish, "main": main}
+		"s",
+		{
+			"s": _n("round", ["a"]),
+			"a": _n("round", ["b"]),
+			"b": _n("round", ["c"]),
+			"c": _n("round", []),
+		}
 	)
-	# Full reachability (used for orphans) still sees the play-time loop.
-	assert_bool(JourneyGraph.reachable_ids(g, "unlock").has("fate")).is_true()
-	assert_bool(JourneyGraph.reachable_ids(g, "main").has("ep")).is_true()
-	# Out-only reachability (used for connect) does not: unlock→punish→main never returns.
-	assert_bool(JourneyGraph.out_reachable_ids(g, "unlock").has("fate")).is_false()
-	assert_bool(JourneyGraph.out_reachable_ids(g, "unlock").has("main")).is_true()
-	assert_bool(JourneyGraph.out_reachable_ids(g, "main").has("ep")).is_false()
-	# Wiring unlock→punish would not be an out-cycle (connect allows it).
-	assert_bool(JourneyGraph.out_reachable_ids(g, "punish").has("unlock")).is_false()
-	assert_array(JourneyGraph.validate_graph(g)).is_empty()
+	assert_int(JourneyGraph.max_nodes_on_path(g, "s", {"a": true, "c": true})).is_equal(2)
+
+
+# A fork counts only its worst (most-targets) branch — one run takes one branch.
+func test_max_nodes_on_path_takes_worst_branch() -> void:
+	var g := _g(
+		"s",
+		{
+			"s": _n("fork", ["x", "y"]),  # branch1: x (1 target); branch2: y → z (2 targets)
+			"x": _n("round", []),
+			"y": _n("round", ["z"]),
+			"z": _n("round", []),
+		}
+	)
+	assert_int(JourneyGraph.max_nodes_on_path(g, "s", {"x": true, "y": true, "z": true})).is_equal(
+		2
+	)
+	assert_int(JourneyGraph.max_nodes_on_path(g, "s", {"x": true})).is_equal(1)
+
+
+func test_max_nodes_on_path_none_targeted() -> void:
+	var g := _g("s", {"s": _n("round", ["a"]), "a": _n("round", [])})
+	assert_int(JourneyGraph.max_nodes_on_path(g, "s", {})).is_equal(0)

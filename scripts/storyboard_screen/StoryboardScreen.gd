@@ -5,6 +5,13 @@ signal map_requested  # player tapped the "◇ MAP" button (GameLoop owns the ma
 
 const VN_BAR_HEIGHT: int = 210
 
+# Cast portraits (the VN "stage") are drawn over the background and under the VN bar. Each is placed by
+# a PLACEMENT box (screen-fraction x/y/w/h) resolved from the line's stage id via JourneyData —
+# the three built-ins (left/center/right) plus any custom placements. A portrait aspect-fits its box.
+# Speaker is full brightness; anyone else on stage is dimmed (the standard VN "who's talking" cue).
+const PORTRAIT_LIT: Color = Color(1, 1, 1, 1)
+const PORTRAIT_DIM: Color = Color(0.5, 0.5, 0.58, 1)
+
 @onready var _bg_image: TextureRect = $BgImage
 @onready var _vn_bar: PanelContainer = $VNBar
 @onready var _speaker: Label = $VNBar/Inner/VBox/Speaker
@@ -18,16 +25,50 @@ var _coins: int = 0
 var _def_image: String = ""
 var _can_advance: bool = false
 
+# Auto-advance countdown (journey opt-in). GameLoop sets auto_advance_secs before _ready; when >0
+# each dialogue line auto-advances after the countdown (reset on every line, and whenever the player
+# clicks through sooner). The clock only ticks once the opening fade lets the player advance. 0 = off.
+var auto_advance_secs: int = 0
+var _time_left: float = 0.0
+var _timer_active: bool = false
+var _countdown_lbl: Label = null
+
+# Optional per-line audio accent. One player, reused as lines advance; a line repeating the same clip
+# (a bed) is left playing rather than restarted. Plays over the BGM on the Master bus, at its own volume.
+var _audio: AudioStreamPlayer = null
+var _current_audio_path: String = ""
+# Optional storyboard BGM — one looping track under EVERY line (started once in setup, stopped at exit).
+var _bgm: AudioStreamPlayer = null
+
 var _skip_btn: Button = null
 var _map_btn: Button = null
+
+# Draws the storyboard image (still or baked animation) in $BgImage's place — see _setup_bg_image.
+var _bg_view: JourneyImage = null
+
+# Persistent-stage cast, from the journey roster. Each line's `stage` is a LIST of {character, portrait,
+# placement}; portrait/placement default to the character's first of each. Each character carries its own
+# portraits + placements. Portrait nodes are created lazily and reused per CHARACTER (so one who stays
+# across lines keeps their node — no flicker, no animated-portrait restart).
+var _cast: Dictionary = {}  # character id → character dict (name/portraits[]/placements[])
+var _portraits: Dictionary = {}  # character id → JourneyImage
+var _portrait_paths: Dictionary = {}  # character id → the path currently shown (skips a needless reload)
 
 var show_map_button: bool = true  # GameLoop clears this when the journey hides the map
 
 
 func _ready() -> void:
 	_apply_layout()
+	_setup_bg_image()  # after _apply_layout: it reads $BgImage's finished expand/stretch
 	_apply_theme()
 	_add_map_button()
+	_add_countdown_label()
+	_audio = AudioStreamPlayer.new()
+	_audio.bus = "Master"
+	add_child(_audio)
+	_bgm = AudioStreamPlayer.new()
+	_bgm.bus = "Master"
+	add_child(_bgm)
 	_fade.color = Color.BLACK
 	_fade.modulate.a = 1.0
 	await get_tree().process_frame
@@ -47,10 +88,43 @@ func setup(data: Dictionary) -> void:
 	_def_image = data.get("image", "")
 	_lines = data.get("lines", [])
 	_line_idx = 0
+	_build_cast()
+	_start_bgm(str(data.get("bgm", "")), float(data.get("bgm_volume", 0.6)))
 	if _lines.is_empty():
 		_load_bg_image(_def_image)
 		return
 	_show_line()
+
+
+# Indexes the journey's cast roster by id for per-line stage lookups. The roster is journey-level
+# (GameState.Journey), not part of the storyboard node's data, and portraits are already resolved to
+# absolute paths by the scanner.
+func _build_cast() -> void:
+	_cast.clear()
+	for c: Variant in GameState.Journey.get("characters", []):
+		if c is Dictionary:
+			var id: String = str((c as Dictionary).get("id", ""))
+			if id != "":
+				_cast[id] = c
+
+
+# Starts the storyboard's overarching BGM (looping, under every line) at its author-set volume. No-op
+# when no BGM is set.
+func _start_bgm(path: String, volume: float) -> void:
+	if path == "" or _bgm == null:
+		return
+	var stream: AudioStream = JourneyAudio.load_from_file(path)
+	if stream == null:
+		return
+	JourneyAudio.set_loop(stream, true)  # BGM always loops
+	_bgm.stream = stream
+	_bgm.volume_db = _volume_db(volume)
+	_bgm.play()
+
+
+# Linear 0–1 author volume → dB for an AudioStreamPlayer; 0 mutes.
+func _volume_db(v: float) -> float:
+	return linear_to_db(v) if v > 0.0 else -80.0
 
 
 func _show_line() -> void:
@@ -65,49 +139,137 @@ func _show_line() -> void:
 	_speaker.text = spk.to_upper()
 	_dialogue.text = line.get("text", "")
 
+	_update_stage(line)
+
 	var is_last: bool = _line_idx >= _lines.size() - 1
 	_hint.text = "▶ CLICK OR SPACE TO COMPLETE" if is_last else "▶ CLICK OR SPACE TO CONTINUE"
 
+	_play_line_audio(line)
 
-func _load_bg_image(path: String) -> void:
+	# Restart the per-line countdown (clicking through sooner resets it via this same call).
+	if auto_advance_secs > 0:
+		_time_left = float(auto_advance_secs)
+		_timer_active = true
+		_update_countdown_label()
+
+
+# Plays this line's optional audio accent. A line repeating the clip already playing (a bed carried
+# across lines) is left alone so it doesn't restart; anything else swaps in the new clip (or silence).
+func _play_line_audio(line: Dictionary) -> void:
+	var path: String = str(line.get("audio", ""))
+	if path != "" and path == _current_audio_path and _audio.playing:
+		return
+	_audio.stop()
+	_current_audio_path = path
 	if path == "":
-		_bg_image.texture = null
 		return
-	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		_bg_image.texture = null
+	var stream: AudioStream = JourneyAudio.load_from_file(path)
+	if stream == null:
 		return
-	var bytes: PackedByteArray = f.get_buffer(f.get_length())
-	f.close()
-	var img: Image = Image.new()
-	var err: Error
-	if (
-		bytes.size() >= 4
-		and bytes[0] == 0x89
-		and bytes[1] == 0x50
-		and bytes[2] == 0x4E
-		and bytes[3] == 0x47
-	):
-		err = img.load_png_from_buffer(bytes)
-	elif bytes.size() >= 3 and bytes[0] == 0xFF and bytes[1] == 0xD8 and bytes[2] == 0xFF:
-		err = img.load_jpg_from_buffer(bytes)
-	elif (
-		bytes.size() >= 12
-		and bytes[0] == 0x52
-		and bytes[1] == 0x49
-		and bytes[2] == 0x46
-		and bytes[3] == 0x46
-		and bytes[8] == 0x57
-		and bytes[9] == 0x45
-		and bytes[10] == 0x42
-		and bytes[11] == 0x50
-	):
-		err = img.load_webp_from_buffer(bytes)
-	else:
-		err = img.load_jpg_from_buffer(bytes)
-		if err != OK:
-			err = img.load_png_from_buffer(bytes)
-	_bg_image.texture = ImageTexture.create_from_image(img) if err == OK else null
+	JourneyAudio.set_loop(stream, bool(line.get("audio_loop", false)))
+	_audio.stream = stream
+	_audio.volume_db = _volume_db(float(line.get("audio_volume", 1.0)))
+	_audio.play()
+
+
+# Shows a storyboard image — still, or an animation the builder baked to looping H.264.
+#
+# This used to re-implement JourneyData.load_image_smart's magic-byte sniffing inline; it now goes
+# through JourneyImage, which owns both cases (and that sniffing) in one place. $BgImage is left in
+# the scene but retired — see _setup_bg_image.
+func _load_bg_image(path: String) -> void:
+	_bg_view.show_path(path, _bg_image.expand_mode, _bg_image.stretch_mode)
+
+
+# Puts a JourneyImage exactly where $BgImage sat (same index, so layering is unchanged) and hides
+# the original. Done in code rather than by editing the scene: $BgImage still owns the layout, and
+# its expand/stretch stay the single source of truth for how the image is framed.
+func _setup_bg_image() -> void:
+	_bg_view = JourneyImage.new()
+	_bg_view.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_bg_view)
+	move_child(_bg_view, _bg_image.get_index())
+	_bg_image.visible = false
+
+
+# Lazily creates (or returns) the reused JourneyImage for a character, drawn just above the background
+# so it sits under the VN bar and its overlays. Aspect-preserved centering fits any art.
+func _ensure_portrait(character_id: String) -> JourneyImage:
+	if _portraits.has(character_id):
+		return _portraits[character_id]
+	var view: JourneyImage = JourneyImage.new()
+	view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	view.visible = false
+	add_child(view)
+	move_child(view, _bg_view.get_index() + 1)
+	_portraits[character_id] = view
+	return view
+
+
+# Renders the line's persistent stage: a list of {character, portrait, placement}. Each shows that
+# character's chosen portrait (default = their first) in their chosen placement box (default = their
+# first), and a character whose NAME matches the line's speaker is lit while the rest dim. Characters
+# no longer on stage are hidden; a line with no stage clears everything.
+func _update_stage(line: Dictionary) -> void:
+	var stage: Array = line.get("stage", []) if line.get("stage", null) is Array else []
+	var speaker: String = str(line.get("speaker", "")).strip_edges().to_lower()
+
+	# Which character ids are on stage this line, and whether the speaker is one of them (only then do
+	# we dim the others — narration / an off-stage speaker leaves everyone at full brightness).
+	var on_stage: Dictionary = {}
+	var lit_present: bool = false
+	for e: Variant in stage:
+		if e is Dictionary:
+			var cid: String = str((e as Dictionary).get("character", ""))
+			on_stage[cid] = true
+			if (
+				speaker != ""
+				and str(_cast.get(cid, {}).get("name", "")).strip_edges().to_lower() == speaker
+			):
+				lit_present = true
+
+	# Hide any portrait whose character dropped off the stage this line.
+	for cid: String in _portraits:
+		if not on_stage.has(cid):
+			(_portraits[cid] as JourneyImage).visible = false
+
+	for e: Variant in stage:
+		if not (e is Dictionary):
+			continue
+		var cid: String = str((e as Dictionary).get("character", ""))
+		var chr: Dictionary = _cast.get(cid, {})
+		var portrait: String = JourneyData.character_portrait_path(
+			chr, str((e as Dictionary).get("portrait", ""))
+		)
+		if portrait == "":
+			if _portraits.has(cid):
+				(_portraits[cid] as JourneyImage).visible = false
+			continue
+		var view: JourneyImage = _ensure_portrait(cid)
+		# Position by the character's chosen placement box. Fractions → anchors, no pixel offsets.
+		var box: Dictionary = JourneyData.resolve_placement(
+			str((e as Dictionary).get("placement", "")), chr.get("placements", [])
+		)
+		view.anchor_left = clampf(float(box["x"]), 0.0, 1.0)
+		view.anchor_top = clampf(float(box["y"]), 0.0, 1.0)
+		view.anchor_right = clampf(float(box["x"]) + float(box["w"]), 0.0, 1.0)
+		view.anchor_bottom = clampf(float(box["y"]) + float(box["h"]), 0.0, 1.0)
+		view.offset_left = 0.0
+		view.offset_top = 0.0
+		view.offset_right = 0.0
+		view.offset_bottom = 0.0
+		# Only (re)load when the portrait path actually changed — a character keeping the same expression
+		# keeps their (possibly animated) portrait running instead of restarting it.
+		if portrait != str(_portrait_paths.get(cid, "")):
+			_portrait_paths[cid] = portrait
+			view.show_path(
+				portrait, TextureRect.EXPAND_IGNORE_SIZE, TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			)
+		view.visible = true
+		var is_speaker: bool = (
+			lit_present and str(chr.get("name", "")).strip_edges().to_lower() == speaker
+		)
+		view.modulate = PORTRAIT_LIT if (is_speaker or not lit_present) else PORTRAIT_DIM
 
 
 func _input(event: InputEvent) -> void:
@@ -146,8 +308,28 @@ func _advance() -> void:
 		_show_line()
 
 
+# Counts the current line's timer down once the player is allowed to advance. Pausing is handled by
+# GameLoop toggling set_process() while the map viewer is open.
+func _process(delta: float) -> void:
+	if not _timer_active or not _can_advance:
+		return
+	_time_left -= delta
+	if _time_left <= 0.0:
+		_timer_active = false
+		_advance()
+		return
+	_update_countdown_label()
+
+
 func _finish() -> void:
 	_can_advance = false
+	_timer_active = false
+	if _audio != null:
+		_audio.stop()
+	if _bgm != null:
+		_bgm.stop()
+	if _countdown_lbl != null:
+		_countdown_lbl.visible = false
 	_skip_btn.visible = false
 	if _map_btn != null:
 		_map_btn.visible = false
@@ -159,6 +341,32 @@ func _finish() -> void:
 			# covers it) — see _transition_swap. Don't self-free, or the play area
 			# behind would flash before the fade completes.
 			emit_signal("completed", _coins)
+	)
+
+
+# A countdown pinned bottom-left (mirroring the "continue" hint on the right) when the journey arms
+# auto-advance. Only built when enabled; text/colour are filled by _update_countdown_label.
+func _add_countdown_label() -> void:
+	if auto_advance_secs <= 0:
+		return
+	_countdown_lbl = Label.new()
+	_countdown_lbl.anchor_top = 1.0
+	_countdown_lbl.anchor_bottom = 1.0
+	_countdown_lbl.offset_left = 48  # match the inner-margin gutter the hint uses on the right
+	_countdown_lbl.offset_top = -44
+	_countdown_lbl.offset_bottom = -22
+	_countdown_lbl.add_theme_font_size_override("font_size", UITheme.story_font_size(11))
+	_countdown_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_countdown_lbl)
+
+
+func _update_countdown_label() -> void:
+	if _countdown_lbl == null:
+		return
+	var secs: int = int(ceil(_time_left))
+	_countdown_lbl.text = "AUTO-ADVANCE IN %d" % secs
+	_countdown_lbl.add_theme_color_override(
+		"font_color", UITheme.ERROR_SOFT if secs <= 5 else UITheme.DARK_TEXT
 	)
 
 
@@ -292,15 +500,16 @@ func _apply_theme() -> void:
 	_vn_bar.add_theme_stylebox_override("panel", bar_style)
 
 	_speaker.add_theme_color_override("font_color", UITheme.CYAN)
-	_speaker.add_theme_font_size_override("font_size", 14)
+	_speaker.add_theme_font_size_override("font_size", UITheme.story_font_size(14))
+	_speaker.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_speaker.uppercase = true
 
 	_dialogue.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
-	_dialogue.add_theme_font_size_override("font_size", 19)
+	_dialogue.add_theme_font_size_override("font_size", UITheme.story_font_size(19))
 	_dialogue.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 
 	_hint.add_theme_color_override("font_color", UITheme.DARK_TEXT)
-	_hint.add_theme_font_size_override("font_size", 11)
+	_hint.add_theme_font_size_override("font_size", UITheme.story_font_size(11))
 	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
 	# Skip button — subtle but readable; uses DARK_TEXT so it doesn't compete

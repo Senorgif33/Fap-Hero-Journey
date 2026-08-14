@@ -7,8 +7,8 @@ public partial class FunscriptPlayer : Node
 {
     private struct Action { public float AtMs; public int Pos; }
 
-    // Per-axis state for secondary T-code channels (L1–L2, R0–R2, E1–E4).
-    // Serial + Restim T-code — Buttplug ignores these entirely.
+    // Per-axis state for secondary T-code channels (L1, L2, R0, R1, R2).
+    // Serial-only — Buttplug ignores these entirely.
     private class AxisState
     {
         public List<Action> Actions = new List<Action>();
@@ -117,9 +117,15 @@ public partial class FunscriptPlayer : Node
     private readonly System.Collections.Generic.Dictionary<int, VibState> _vibScripts =
         new System.Collections.Generic.Dictionary<int, VibState>();
 
-    private static readonly string[] SsrAxes = { "L1", "L2", "R0", "R1", "R2" };
+    // Maps a restim (E-Stim Full) T-code axis name → a funscript that drives it directly.
+    // Populated from a round's estim_scripts (alpha/beta/volume/carrier_frequency/…). restim-only:
+    // a script here supersedes both the motion→restim mapping and the manual slider for that axis.
+    private readonly System.Collections.Generic.Dictionary<string, AxisState> _restimScripts =
+        new System.Collections.Generic.Dictionary<string, AxisState>();
 
-    private enum StrokeBackend { None, Serial, Buttplug, Restim }
+    private static readonly string[] KnownAxes = { "L1", "L2", "R0", "R1", "R2" };
+
+    private enum StrokeBackend { None, Serial, Buttplug }
 
     private List<Action> _actions = new List<Action>();
 
@@ -136,7 +142,24 @@ public partial class FunscriptPlayer : Node
     private int _strokeDeviceIndex = -1;   // Buttplug linear device index when _strokeBackend == Buttplug
     private readonly List<(int Index, int Channel, string Source)> _vibeRoutes = new List<(int Index, int Channel, string Source)>();
     private readonly List<(int Index, int Channel)> _constrictRoutes = new List<(int Index, int Channel)>();
-    private bool _syncedThisFrame = false;
+    // Smooth output clock. The video reports its position a whole frame at a time (~33ms at 30fps)
+    // and micro-jitters; forwarding stroke commands on that raw clock is what jerks the OSR. So our
+    // clock free-runs on real time (advanced in _Process) and SyncTo only NUDGES it toward the
+    // video — snapping only on a large gap (a seek). Output stays smooth while locked to the media.
+    private bool _clockPrimed = false;
+    private const double ClockResyncThresholdMs = 75.0; // gap this large = a seek → snap, don't slew
+    private const double ClockReconcileGain = 0.15;     // fraction of the video-clock error closed per sync
+
+    // Serial stroke interpolation. A bracket cursor into _actions for the current time, plus the last
+    // target sent (for the max-speed slew clamp). The serial stroke position is STREAMED at a steady
+    // high rate by _PhysicsProcess — not forwarded per keyframe — which is what makes an OSR/SR6
+    // glide the way MultiFunPlayer does. Buttplug stays on the per-keyframe path (BLE rate limits).
+    private int _interpIndex = 0;
+    private double _lastSerialTarget = 50.0;
+    // Interval multiple the serial stream sends with (slightly > tick so the OSR keeps gliding toward
+    // a fresh target). Best value varies by device/firmware, so it's a live setting — seeded in
+    // ResolveOutput, overridable via SetSerialInterpFactor (Options).
+    private double _serialInterpFactor = 1.6;
 
     // Constrict auto state machine — driven by smoothed stroke activity (units/sec), updated on a throttle.
     private readonly ConstrictController _constrict = new ConstrictController();
@@ -149,7 +172,7 @@ public partial class FunscriptPlayer : Node
     private int _rangeMin = 0;
     private int _rangeMax = 100;
 
-    // Per-axis range window for the secondary positional axes (L1/L2/R0/R1/R2/E1–E4),
+    // Per-axis range window for the secondary positional axes (L1/L2/R0/R1/R2),
     // independent of the stroke axis [_rangeMin,_rangeMax]. Seeded in ResolveOutput,
     // updated live by SetAxisRangeClamp. A missing axis falls back to full 0–100.
     private readonly System.Collections.Generic.Dictionary<string, (int Min, int Max)> _axisRanges =
@@ -196,8 +219,8 @@ public partial class FunscriptPlayer : Node
     // (some were hit every frame, per axis, inside _Process). FunscriptPlayer is
     // a late autoload, so all of these exist by the time _Ready runs.
     private SerialDeviceService _serial;
-    private Node _restim;
     private ButtplugService _buttplug;
+    private RestimService _restim;
     private InventoryService _inventory;
     private ScoreService _score;
     private Node _settings;
@@ -205,23 +228,88 @@ public partial class FunscriptPlayer : Node
     // The pure route resolver (GDScript static, unit-tested). Loaded once; called with the settings
     // config + the live Buttplug catalog to produce the dispatch plan.
     private GDScript _deviceRoutingScript;
-    private GDScript _restimKit;
 
     public override void _Ready()
     {
         _serial = GetNode<SerialDeviceService>("/root/SerialDeviceService");
-        _restim = GetNode("/root/RestimService");
         _buttplug = GetNode<ButtplugService>("/root/ButtplugService");
+        _restim = GetNode<RestimService>("/root/RestimService");
         _inventory = GetNode<InventoryService>("/root/InventoryService");
         _score = GetNode<ScoreService>("/root/ScoreService");
         _settings = GetNode("/root/SettingsService");
         _deviceRoutingScript = GD.Load<GDScript>("res://scripts/device/DeviceRouting.gd");
-        _restimKit = GD.Load<GDScript>("res://scripts/device/RestimAxisKit.gd");
+        _LoadRestimManual();
+
+        // Stream serial stroke output at a steady high rate (see _PhysicsProcess), decoupled from
+        // render FPS and the video frame clock. Nothing else in the project uses the physics loop,
+        // so raising this only affects our stroke tick.
+        Engine.PhysicsTicksPerSecond = 120;
+    }
+
+    // ── restim (e-stim) manual axis values ──────────────────────────────────────
+    // Manual value (percent 0–100) per "E-Stim Full" axis. Motion axes use this only as a
+    // fallback when the current round has no matching funscript; the rest always use it.
+    private readonly System.Collections.Generic.Dictionary<string, int> _restimManual =
+        new System.Collections.Generic.Dictionary<string, int>();
+
+    private void _LoadRestimManual()
+    {
+        foreach (var axis in RestimService.AllAxes)
+            _restimManual[axis] = _settings.Call("get_restim_axis", axis).AsInt32();
+    }
+
+    // True when the round provides a funscript that drives this restim axis live — either a
+    // dedicated estim script (alpha/beta/carrier_frequency/…) or, for the six motion axes, the
+    // corresponding motion funscript. Used to skip the manual slider for scripted axes.
+    private bool RestimAxisHasScript(string restimAxis)
+    {
+        if (_restimScripts.ContainsKey(restimAxis))
+            return true;
+        switch (restimAxis)
+        {
+            case "L0": return _actions.Count > 0;   // main stroke
+            case "L1": return _axes.ContainsKey("L1");  // surge
+            case "C0": return _axes.ContainsKey("R0");  // twist
+            case "P0": return _axes.ContainsKey("R2");  // pitch
+            case "V1": return _axes.ContainsKey("L2");  // sway
+            case "V2": return _axes.ContainsKey("R1");  // roll
+            default: return false;
+        }
+    }
+
+    /// Live update of one restim manual axis value (Options slider), percent 0–100.
+    /// Pushes immediately so a connected restim session responds without a round restart.
+    public void SetRestimAxisValue(string axis, int percent)
+    {
+        percent = Math.Clamp(percent, 0, 100);
+        _restimManual[axis] = percent;
+        var restim = _restim;
+        if (restim != null && restim.RestimConnected)
+            restim.SendTCode(axis, percent / 100.0);
+    }
+
+    /// Send every manual axis value to restim in one frame: all manual-only axes, plus any
+    /// motion axis the current round doesn't script. Called on connect and on Play/Resume.
+    public void SendRestimManualState()
+    {
+        var restim = _restim;
+        if (restim == null || !restim.RestimConnected)
+            return;
+
+        var cmds = new System.Collections.Generic.List<(string, double, uint)>();
+        foreach (var axis in RestimService.AllAxes)
+        {
+            if (RestimAxisHasScript(axis))
+                continue;
+            int percent = _restimManual.TryGetValue(axis, out int p) ? p : 0;
+            cmds.Add((axis, Math.Clamp(percent, 0, 100) / 100.0, 0u));
+        }
+        restim.SendBatch(cmds);
     }
 
     /// Push updated range-clamp values directly into the player.
     /// Called by the Options screen on every slider change so mid-playback
-    /// adjustments take effect on the very next SendCommand without needing
+    /// adjustments take effect on the very next command without needing
     /// a round restart.
     public void SetRangeClamp(int min, int max)
     {
@@ -237,14 +325,14 @@ public partial class FunscriptPlayer : Node
     private (int Min, int Max) GetAxisRange(string axis) =>
         _axisRanges.TryGetValue(axis, out var r) ? r : (0, 100);
 
-    /// Drop the loaded main L0 script and beats without parking the device.
-    /// Used when entering a cutscene so a later Resume() cannot replay the prior round.
-    public void ClearFunscript()
+    public void LoadFunscript(string path)
     {
         _actions.Clear();
-        _beats.Clear();
         _actionIndex = 0;
         _positionMs = 0.0;
+        _clockPrimed = false;
+        _interpIndex = 0;
+        _lastSerialTarget = _homePosition;
         _playing = false;
         // Fully invalidate the resolve cache — a new round must rebuild the routing plan.
         // _outputResolved = false forces Play()/Resume() to re-run BuildRoutingPlan even if Options
@@ -258,11 +346,8 @@ public partial class FunscriptPlayer : Node
             kv.Value.Index = 0;
         foreach (var kv in _vibScripts)
             kv.Value.Index = 0;
-    }
-
-    public void LoadFunscript(string path)
-    {
-        ClearFunscript();
+        foreach (var kv in _restimScripts)
+            kv.Value.Index = 0;
 
         string absPath = ProjectSettings.GlobalizePath(path);
         using var funscriptFile = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
@@ -377,6 +462,10 @@ public partial class FunscriptPlayer : Node
     /// Live-update the max stroke speed cap from Options (units/sec, 0 = off).
     public void SetMaxStrokeSpeed(int unitsPerSec) => _maxStrokeSpeed = Math.Max(0, unitsPerSec);
 
+    /// Live-update the serial stroke-smoothing interval factor from Options. Clamped to the same
+    /// band as the setting so a slider (or a hand-edited config) can't drive it out of range.
+    public void SetSerialInterpFactor(double factor) => _serialInterpFactor = Math.Clamp(factor, 1.0, 4.0);
+
     // Stretches a linear move's duration when it would exceed the configured
     // max stroke speed, so aggressive scripts are gently slowed instead of
     // snapping. _maxStrokeSpeed of 0 disables the cap.
@@ -395,21 +484,8 @@ public partial class FunscriptPlayer : Node
     }
 
     // Load a secondary-axis funscript. Call before Play().
-    // axis: T-code name, e.g. "L1", "R0" (unprefixed — serial / legacy).
+    // axis: T-code name, e.g. "L1", "R0".
     public void LoadAxisScript(string axis, string path)
-    {
-        LoadAxisScriptState(axis, path);
-    }
-
-    // Dual Restim: slot is "a", "b", or "shared". Stored as "slot:axis".
-    public void LoadRestimAxisScript(string slot, string axis, string path)
-    {
-        if (string.IsNullOrEmpty(slot) || string.IsNullOrEmpty(axis))
-            return;
-        LoadAxisScriptState($"{slot}:{axis}", path);
-    }
-
-    private void LoadAxisScriptState(string key, string path)
     {
         var state = new AxisState();
         string absPath = ProjectSettings.GlobalizePath(path);
@@ -439,7 +515,7 @@ public partial class FunscriptPlayer : Node
                 Pos = action.ContainsKey("pos") ? action["pos"].AsInt32() : 0,
             });
         }
-        _axes[key] = state;
+        _axes[axis] = state;
     }
 
     // Remove all secondary axis scripts (call before loading a new round).
@@ -448,35 +524,46 @@ public partial class FunscriptPlayer : Node
         _axes.Clear();
     }
 
-    private static void SplitAxisKey(string key, out string slot, out string axisName)
+    // Load a restim (E-Stim Full) axis funscript. `axis` is the restim T-code axis name
+    // (e.g. "L0", "V0", "C0", "P1"). Streamed to restim only; supersedes the motion mapping
+    // and the manual slider for that axis. Call ClearRestimScripts() before a new round.
+    public void LoadRestimScript(string axis, string path)
     {
-        int colon = key.IndexOf(':');
-        if (colon > 0)
+        var state = new AxisState();
+        string absPath = ProjectSettings.GlobalizePath(path);
+
+        using var funscriptFile = FileAccess.Open(absPath, FileAccess.ModeFlags.Read);
+        if (funscriptFile == null)
         {
-            slot = key.Substring(0, colon);
-            axisName = key.Substring(colon + 1);
+            GD.PrintErr($"FunscriptPlayer: cannot open restim script {axis}: {path}");
             return;
         }
-        slot = "";
-        axisName = key;
-    }
 
-    private bool HasAlphaAxisLoaded()
-    {
-        foreach (var key in _axes.Keys)
+        var parser = new Json();
+        if (parser.Parse(funscriptFile.GetAsText()) != Error.Ok)
         {
-            SplitAxisKey(key, out _, out string axisName);
-            if (axisName == "alpha")
-                return true;
+            GD.PrintErr($"FunscriptPlayer: JSON parse error in restim script {axis}: {path}");
+            return;
         }
-        return false;
+
+        var funscript = parser.Data.AsGodotDictionary();
+        var rawActions = funscript.ContainsKey("actions") ? funscript["actions"].AsGodotArray() : new Godot.Collections.Array();
+        foreach (var rawAction in rawActions)
+        {
+            var action = rawAction.AsGodotDictionary();
+            state.Actions.Add(new Action
+            {
+                AtMs = action.ContainsKey("at") ? action["at"].AsSingle() : 0f,
+                Pos = action.ContainsKey("pos") ? action["pos"].AsInt32() : 0,
+            });
+        }
+        _restimScripts[axis] = state;
     }
 
-    private bool HasVolumeAxisForSlot(string slot)
+    // Remove all restim axis scripts (call before loading a new round).
+    public void ClearRestimScripts()
     {
-        if (string.IsNullOrEmpty(slot))
-            return _axes.ContainsKey("volume");
-        return _axes.ContainsKey($"{slot}:volume") || _axes.ContainsKey("shared:volume");
+        _restimScripts.Clear();
     }
 
     // Load a per-channel vibrator funscript. channel: 0 = vib1, 1 = vib2.
@@ -523,30 +610,17 @@ public partial class FunscriptPlayer : Node
     // (which have no axis scripts) receive no unnecessary secondary-axis traffic.
     private void _SendNeutralToUnloadedAxes()
     {
-        if (_axes.Count == 0 || !ShouldDispatchAxisScripts())
+        if (_axes.Count == 0)
+            return; // no multi-axis scripts → nothing to park
+
+        var serial = _serial;
+        if (serial == null || !serial.SerialConnected)
             return;
 
-        if (_strokeBackend == StrokeBackend.Restim)
+        foreach (var axis in KnownAxes)
         {
-            foreach (var slot in new[] { "a", "b" })
-            {
-                if (!RestimSlotConnected(slot))
-                    continue;
-                foreach (var axis in GetAutofillAxisKeys())
-                {
-                    bool loaded = _axes.ContainsKey($"{slot}:{axis}")
-                        || _axes.ContainsKey($"shared:{axis}");
-                    if (!loaded && HasTcodeForAxis(axis))
-                        SendTcodeAxisToDest(slot, TcodeForAxisKey(axis), AxisParkMs, 0.5);
-                }
-            }
-            return;
-        }
-
-        foreach (var axis in GetAutofillAxisKeys())
-        {
-            if (!_axes.ContainsKey(axis) && HasTcodeForAxis(axis))
-                SendTcodeAxisToDest("", TcodeForAxisKey(axis), AxisParkMs, 0.5);
+            if (!_axes.ContainsKey(axis))
+                serial.SendAxis(axis, AxisParkMs, 0.5);
         }
     }
 
@@ -554,7 +628,11 @@ public partial class FunscriptPlayer : Node
     {
         _playing = true;
         ResolveOutput();
+        _clockPrimed = false;  // first SyncTo snaps to the real video position
+        _interpIndex = 0;
+        _lastSerialTarget = _homePosition;
         _SendNeutralToUnloadedAxes();
+        SendRestimManualState();
         _StartEaseIn();
     }
 
@@ -574,6 +652,10 @@ public partial class FunscriptPlayer : Node
         // previous device or the wrong capability branch.
         _outputResolved = false;
         ResolveOutput();
+        _clockPrimed = false;  // re-lock the smooth clock to the resumed video position
+        _interpIndex = 0;
+        _lastSerialTarget = _homePosition;
+        SendRestimManualState();
         _StartEaseIn();
     }
 
@@ -586,10 +668,15 @@ public partial class FunscriptPlayer : Node
         EaseToNeutral();
         _positionMs = 0.0;
         _actionIndex = 0;
+        _clockPrimed = false;
+        _interpIndex = 0;
+        _lastSerialTarget = _homePosition;
 
         foreach (var kv in _axes)
             kv.Value.Index = 0;
         foreach (var kv in _vibScripts)
+            kv.Value.Index = 0;
+        foreach (var kv in _restimScripts)
             kv.Value.Index = 0;
 
         // Release constrict actuators before dropping the routes, then reset the state machine.
@@ -637,6 +724,7 @@ public partial class FunscriptPlayer : Node
         _fillerVibTickMs = 0.0;
         _fillerActive = true;
         ResolveOutput();
+        SendRestimManualState();
         _SendFillerCommand(); // fire immediately so there's no leading silence
     }
 
@@ -686,40 +774,62 @@ public partial class FunscriptPlayer : Node
         double homeNorm = _homePosition / 100.0;
 
         // Stroke target homes to the user position.
-        if (_strokeBackend == StrokeBackend.Buttplug)
+        if (_strokeBackend == StrokeBackend.Serial)
+        {
+            var serial = _serial;
+            if (serial != null && serial.SerialConnected)
+                serial.SendLinear(_homeEaseMs, homeNorm);
+        }
+        else if (_strokeBackend == StrokeBackend.Buttplug)
         {
             var bp = _buttplug;
             if (bp != null && bp.BpConnected && _strokeDeviceIndex >= 0)
                 bp.SendLinear(_strokeDeviceIndex, _homeEaseMs, homeNorm);
         }
-        else if (IsTcodeStrokeBackend())
-        {
-            SendTcodeAxisToDest("shared", "L0", _homeEaseMs, homeNorm);
-            foreach (var key in _axes.Keys)
-            {
-                SplitAxisKey(key, out string slot, out string axisName);
-                string tcode = TcodeForAxisKey(axisName);
-                if (!string.IsNullOrEmpty(tcode))
-                    SendTcodeAxisToDest(string.IsNullOrEmpty(slot) ? "shared" : slot, tcode, _homeEaseMs, 0.5);
-            }
-        }
 
-        // Vibe actuators → intensity 0.
+        // Secondary axes (serial) always return to centre.
+        var serialAx = _serial;
+        if (serialAx != null && serialAx.SerialConnected)
+            foreach (var axis in _axes.Keys)
+                serialAx.SendAxis(axis, _homeEaseMs, 0.5);
 
         // Silence every mapped vibe actuator.
         var bpv = _buttplug;
         if (bpv != null && bpv.BpConnected)
             foreach (var route in _vibeRoutes)
                 bpv.SendVibrateChannel(route.Index, route.Channel, 0.0);
+
+        // restim: position axes home (L0 → user home, mapped motion axes → centre).
+        var restim = _restim;
+        if (restim != null && restim.RestimConnected)
+        {
+            restim.SendTCode(RestimService.StrokeAxis, homeNorm, _homeEaseMs);
+            foreach (var kv in RestimService.MotionAxisMap)
+                if (_axes.ContainsKey(kv.Key))
+                    restim.SendTCode(kv.Value, 0.5, _homeEaseMs);
+        }
     }
 
     // Call this each frame from GameLoop to keep funscript in sync with the video clock.
-    // Only updates _positionMs — _Process is responsible for dispatching due actions.
+    // Only reconciles _positionMs — _Process and _PhysicsProcess dispatch/stream the output.
     public void SyncTo(double videoPositionSec)
     {
-        // Raw playback clock — per-backend delay is applied per stream in _Process, not baked in here.
-        _positionMs = videoPositionSec * 1000.0;
-        _syncedThisFrame = true;
+        // Reconcile our smooth clock toward the video instead of hard-snapping every frame: the raw
+        // video position steps a whole frame at a time and jitters, which the stroker would faithfully
+        // reproduce. The first sample after a (re)start, or any large gap (a seek), snaps; otherwise we
+        // close a fraction of the error, staying locked without inheriting the steps. Per-backend
+        // delay is applied per stream downstream, not baked in here.
+        double videoMs = videoPositionSec * 1000.0;
+        double error = videoMs - _positionMs;
+        if (!_clockPrimed || Math.Abs(error) > ClockResyncThresholdMs)
+        {
+            _positionMs = videoMs;
+            _clockPrimed = true;
+        }
+        else
+        {
+            _positionMs += error * ClockReconcileGain;
+        }
     }
 
     public override void _Process(double delta)
@@ -728,13 +838,10 @@ public partial class FunscriptPlayer : Node
         // axis scripts still dispatch even if the main L0 script is empty.
         if (_playing)
         {
-            // When synced to a video clock, SyncTo already set _positionMs this frame.
-            // Only accumulate delta in free-running mode (no video / funscript-only).
-            if (_syncedThisFrame)
-                _syncedThisFrame = false;
-            else
-                _positionMs += delta * 1000.0;
-
+            // The stroke clock is advanced in _PhysicsProcess at the fixed physics rate (regular,
+            // decoupled from render FPS) — here we only dispatch the per-keyframe work against it:
+            // scoring, activity, follow-stroke vibe, and (Buttplug only) the stroke send. The SERIAL
+            // stroke position is streamed in _PhysicsProcess too.
             // A positive delay holds each action back (fires it LATER); negative fires it ahead.
             double strokeDelay = StrokeDelay();
             while (_actionIndex < _actions.Count)
@@ -742,16 +849,98 @@ public partial class FunscriptPlayer : Node
                 if (_actions[_actionIndex].AtMs > _positionMs - strokeDelay)
                     break;
 
-                SendCommand(_actionIndex);
+                ProcessKeyframe(_actionIndex);
                 _actionIndex++;
             }
 
-            // Secondary / Restim-kit axes → Restim (when it's the stroke) or Serial (connected).
-            // Alpha is sent as L0; when present it replaces the sparse main L0 on T-code stroke backends.
-            // Restim intensity: never TransformPos FOC axes; scale/volume_attenuate → V0
-            // (see ComputeRestimVolumeFactor).
-            if (ShouldDispatchAxisScripts())
-                DispatchAxisScripts();
+            // Secondary axes → the serial device and/or restim whenever either is connected. Same
+            // smoothstep ease-in as L0 so all axes blend in from neutral together at round start.
+            // Serial gets the game's own axis name (L1/L2/R0/R1/R2); restim gets the E-Stim Full
+            // mapped name (surge→L1, twist→C0, pitch→P0, sway→V1, roll→V2).
+            {
+                var serial = _serial;
+                var restim = _restim;
+                bool serialOn = serial != null && serial.SerialConnected;
+                bool restimOn = restim != null && restim.RestimConnected;
+                if (serialOn || restimOn)
+                {
+                    // Compute ease blend factor once for this batch of axis commands. _easing is
+                    // cleared in _PhysicsProcess once its window elapses, so L0 and the secondary
+                    // axes stop easing together.
+                    float easeSmooth = 1f;
+                    if (_easing)
+                    {
+                        double elapsed = _positionMs - _easeStartMs;
+                        float t = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
+                        easeSmooth = t * t * (3f - 2f * t); // smoothstep
+                    }
+
+                    foreach (var multiaxis in _axes)
+                    {
+                        string axis = multiaxis.Key;
+                        AxisState state = multiaxis.Value;
+                        while (state.Index < state.Actions.Count)
+                        {
+                            if (state.Actions[state.Index].AtMs > _positionMs - _serialDelayMs)
+                                break;
+
+                            int idx = state.Index;
+                            if (idx + 1 < state.Actions.Count)
+                            {
+                                int nextPos = state.Actions[idx + 1].Pos;
+                                // Each secondary axis has its OWN range window, independent of the
+                                // stroke axis. RESCALE 0–100 → [axisMin,axisMax] so a symmetric
+                                // range compresses the swing around centre. Before the ease, then a
+                                // safety clamp — mirrors ProcessedStrokePos's order.
+                                (int axisMin, int axisMax) = GetAxisRange(axis);
+                                nextPos = RescaleToAxisRange(nextPos, axisMin, axisMax);
+                                // Secondary axes always home to centre (50), so blend from 50.
+                                if (_easing || easeSmooth < 1f)
+                                    nextPos = (int)Math.Round(50f + (nextPos - 50f) * easeSmooth);
+                                // Safety net: never send out-of-window (mirrors ProcessedStrokePos).
+                                nextPos = Math.Clamp(nextPos, axisMin, axisMax);
+
+                                double targetNorm = nextPos / 100.0;
+                                uint durMs = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
+                                if (serialOn)
+                                    serial.SendAxis(axis, durMs, targetNorm);
+                                if (restimOn && RestimService.MotionAxisMap.TryGetValue(axis, out string rax)
+                                    && !_restimScripts.ContainsKey(rax))
+                                    restim.SendTCode(rax, targetNorm, durMs);
+                            }
+                            state.Index++;
+                        }
+                    }
+                }
+            }
+
+            // restim dedicated axis scripts (E-Stim Full: alpha/beta/volume/carrier_frequency/…) → restim,
+            // on the L0 clock. restim-only; each overrides the motion mapping + manual slider for its axis.
+            {
+                var restim = _restim;
+                if (restim != null && restim.RestimConnected && _restimScripts.Count > 0)
+                {
+                    foreach (var kv in _restimScripts)
+                    {
+                        string rax = kv.Key;
+                        AxisState state = kv.Value;
+                        while (state.Index < state.Actions.Count)
+                        {
+                            if (state.Actions[state.Index].AtMs > _positionMs)
+                                break;
+
+                            int idx = state.Index;
+                            if (idx + 1 < state.Actions.Count)
+                            {
+                                double targetNorm = Math.Clamp(state.Actions[idx + 1].Pos, 0, 100) / 100.0;
+                                uint durMs = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
+                                restim.SendTCode(rax, targetNorm, durMs);
+                            }
+                            state.Index++;
+                        }
+                    }
+                }
+            }
 
             // Vibe scripts (vibe1 / vibe2) → their mapped actuators, on the same clock as L0.
             if (_vibScripts.Count > 0)
@@ -823,6 +1012,62 @@ public partial class FunscriptPlayer : Node
         }
     }
 
+    // Streams the SERIAL stroke position at the fixed physics rate. Instead of forwarding raw
+    // keyframes on the coarse, jittery video clock, we sample the script at the current time every
+    // tick and send one interval-move — a steady, high-rate stream the OSR/SR6 glides along. This is
+    // the core of MultiFunPlayer-style smoothness. Serial only: Buttplug/BLE can't take this rate and
+    // stays on the per-keyframe path in ProcessKeyframe.
+    public override void _PhysicsProcess(double delta)
+    {
+        // Advance the smooth stroke clock HERE, at the fixed physics rate: a regular cadence decoupled
+        // from render FPS and the coarse video frame clock, so the interpolated target actually moves
+        // every tick. SyncTo nudges it toward the video; funscript-only (free-run) mode relies on it
+        // entirely. Runs for every backend, before the serial-streaming early-out below.
+        if (_playing)
+        {
+            _positionMs += delta * 1000.0;
+            if (_easing && _positionMs - _easeStartMs >= _easeDurationMs)
+                _easing = false;
+        }
+
+        if (!_playing || _strokeBackend != StrokeBackend.Serial || _actions.Count == 0)
+            return;
+
+        var serial = _serial;
+        if (serial == null || !serial.SerialConnected)
+            return;
+
+        var effects = _inventory?.GetActiveEffects();
+        UpdateMirrorBlend(effects); // clock-driven; advance once per tick, even under block
+
+        if (effects != null && HasBlockEffect(effects))
+            return; // block suppresses output — hold position
+
+        double now = _positionMs - _serialDelayMs;
+
+        // Move the bracket cursor to the segment containing `now` (both directions, so seeks recover).
+        while (_interpIndex + 1 < _actions.Count && _actions[_interpIndex + 1].AtMs <= now)
+            _interpIndex++;
+        while (_interpIndex > 0 && _actions[_interpIndex].AtMs > now)
+            _interpIndex--;
+
+        double target = InterpolatedStrokePos(now, effects);
+
+        // Max stroke speed: cap how far the target can move this tick, so aggressive scripts are
+        // gently slowed rather than snapped (the interp equivalent of _CapDuration).
+        if (_maxStrokeSpeed > 0)
+        {
+            double maxDelta = _maxStrokeSpeed * delta;
+            target = Math.Clamp(target, _lastSerialTarget - maxDelta, _lastSerialTarget + maxDelta);
+        }
+        _lastSerialTarget = target;
+
+        // Interval a touch longer than the tick so the OSR is always still gliding toward a fresh
+        // target instead of finishing early and dwelling (which would re-introduce stepping).
+        uint intervalMs = (uint)Math.Max(1, Math.Round(delta * 1000.0 * _serialInterpFactor));
+        serial.SendLinear(intervalMs, Math.Clamp(target, 0.0, 100.0) / 100.0);
+    }
+
     // Send a single linear command to the device for the current filler direction.
     private void _SendFillerCommand()
     {
@@ -831,15 +1076,17 @@ public partial class FunscriptPlayer : Node
         uint dur = (uint)_fillerHalfCycleMs;
 
         // Linear filler → the stroke target. Vibrators are handled by _SendFillerVibrateTick.
-        if (_strokeBackend == StrokeBackend.Buttplug)
+        if (_strokeBackend == StrokeBackend.Serial)
+        {
+            var serial = _serial;
+            if (serial != null && serial.SerialConnected)
+                serial.SendLinear(dur, target / 100.0);
+        }
+        else if (_strokeBackend == StrokeBackend.Buttplug)
         {
             var bp = _buttplug;
             if (bp != null && bp.BpConnected && _strokeDeviceIndex >= 0)
                 bp.SendLinear(_strokeDeviceIndex, dur, target / 100.0);
-        }
-        else if (IsTcodeStrokeBackend())
-        {
-            SendTcodeAxisToDest("shared", "L0", dur, target / 100.0);
         }
     }
 
@@ -866,12 +1113,13 @@ public partial class FunscriptPlayer : Node
         if (_outputResolved)
             return;
 
-        // Cache device range limits so SendCommand doesn't hit disk per-action.
+        // Cache device range limits so per-keyframe processing doesn't hit disk per-action.
         _rangeMin = _settings.Call("get_range_min").AsInt32();
         _rangeMax = _settings.Call("get_range_max").AsInt32();
 
-        // Seed each secondary axis range from settings (Restim ini autoload keys + SSR).
-        foreach (var axis in GetAutofillAxisKeys())
+        // Seed each secondary positional axis's own range window (SetAxisRangeClamp
+        // overrides live from Options). KnownAxes = the T-code names we dispatch.
+        foreach (var axis in KnownAxes)
             _axisRanges[axis] = (
                 _settings.Call("get_axis_range_min", axis).AsInt32(),
                 _settings.Call("get_axis_range_max", axis).AsInt32());
@@ -889,6 +1137,7 @@ public partial class FunscriptPlayer : Node
         _intifaceDelayMs = _settings.Call("get_intiface_delay_ms").AsInt32();
         _vibeIntensity = Math.Clamp(_settings.Call("get_vibe_intensity").AsInt32(), 0, 100) / 100f;
         _maxStrokeSpeed = Math.Max(0, _settings.Call("get_max_stroke_speed").AsInt32());
+        _serialInterpFactor = _settings.Call("get_serial_interp_factor").AsDouble();
 
         // Seed the constrict state machine's tuning from settings.
         _constrict.MaxLevel = _settings.Call("get_constrict_max_level").AsInt32();
@@ -941,10 +1190,6 @@ public partial class FunscriptPlayer : Node
             {
                 _strokeBackend = StrokeBackend.Serial;
             }
-            else if (backend == "restim")
-            {
-                _strokeBackend = StrokeBackend.Restim;
-            }
             else if (backend == "bp" && _buttplug != null)
             {
                 int idx = _buttplug.GetDeviceIndexById(stroke["device"].AsString());
@@ -984,11 +1229,6 @@ public partial class FunscriptPlayer : Node
             _strokeBackend = StrokeBackend.Serial;
             return;
         }
-        if (mode == "restim")
-        {
-            _strokeBackend = StrokeBackend.Restim;
-            return;
-        }
 
         var bp = _buttplug;
         if (bp == null)
@@ -1020,296 +1260,129 @@ public partial class FunscriptPlayer : Node
         }
     }
 
-    private void SendCommand(int index)
+    // Per-keyframe work shared by every backend: scoring, smoothed activity (for constrict), and
+    // follow-stroke vibe — plus, for Buttplug, the linear stroke send. The SERIAL stroke position is
+    // NOT sent here; it's streamed continuously in _PhysicsProcess. A block effect suppresses
+    // everything (scoring, vibe, send), same as before.
+    private void ProcessKeyframe(int index)
     {
         ResolveOutput();
+        var effects = _inventory?.GetActiveEffects();
 
-        var inv = _inventory;
-        var effects = inv?.GetActiveEffects();
-
-        // Advance the eased mirror factor before any block early-out so it keeps
-        // settling toward its target even while a block effect suppresses output.
-        UpdateMirrorBlend(effects);
+        // Serial advances the eased mirror factor in its physics tick; every other backend advances
+        // it here — before the block early-out, so it keeps settling even while block suppresses output.
+        if (_strokeBackend != StrokeBackend.Serial)
+            UpdateMirrorBlend(effects);
 
         if (effects != null && HasBlockEffect(effects))
             return;
 
-        int currentPos = TransformPos(index, effects);
-        int nextPos = index + 1 < _actions.Count ? TransformPos(index + 1, effects) : currentPos;
-
-        // Score from the post-effects amplitude BEFORE the comfort range-clamp, so narrowing the stroke
-        // range to taste never costs points (range is comfort, not difficulty). Shop/curse effects are
-        // already applied above and still count toward the score.
-        int scoreAmplitude = Math.Abs(nextPos - currentPos);
-
-        // Track smoothed stroke activity (raw script units/sec) for the constrict state machine.
+        // Score + activity from the post-effects amplitude BEFORE the comfort range-clamp, so
+        // narrowing the range to taste never costs points (range is comfort, not difficulty).
         if (index + 1 < _actions.Count)
         {
+            int cur = TransformPos(index, effects);
+            int nxt = TransformPos(index + 1, effects);
+            _score?.AddStroke(Math.Abs(nxt - cur));
+
             double segMs = _actions[index + 1].AtMs - _actions[index].AtMs;
             double speed = segMs > 0.0 ? Math.Abs(_actions[index + 1].Pos - _actions[index].Pos) / (segMs / 1000.0) : 0.0;
             _strokeActivity += (speed - _strokeActivity) * 0.5;
         }
 
-        // Apply the user-configured device range as a RESCALE (lerp 0–100 → [min,max]),
-        // not a hard clamp: strokes keep their shape/rhythm at reduced amplitude rather
-        // than flat-topping and dwelling at the limit. Runs after inventory effects so
-        // shop/curse modifiers compose first, then the whole motion is fit to the window.
-        currentPos = RescaleToRange(currentPos);
-        nextPos = RescaleToRange(nextPos);
-
-        // Ease-in blend: interpolate from neutral (50) toward the script positions
-        // over the computed ease duration. Both current and next are blended so the
-        // device doesn't receive an inconsistent target during the blend window.
-        // Vibrators are exempt — _StartEaseIn() never sets _easing for them, but
-        // guard here too so any stale flag can never affect vibrator output.
-        if (_easing)
-        {
-            double elapsed = _positionMs - _easeStartMs;
-            float t = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
-            // Smoothstep (ease-in-out Hermite) — feels natural for device motion.
-            float smooth = t * t * (3f - 2f * t);
-            // Blend from the home position (where the device actually is) toward
-            // the script position. Secondary axes still use 50 as their anchor
-            // since they always home to centre.
-            currentPos = (int)Math.Round(_homePosition + (currentPos - _homePosition) * smooth);
-            nextPos = (int)Math.Round(_homePosition + (nextPos - _homePosition) * smooth);
-            if (elapsed >= _easeDurationMs)
-                _easing = false;
-        }
-
-        // Safety net: the device must never receive an out-of-range command. The
-        // rescale above keeps script motion in-window; this hard clamp backstops the
-        // ease-from-home blend (home can sit outside a tight range) and any rounding.
-        currentPos = Math.Clamp(currentPos, _rangeMin, _rangeMax);
-        nextPos = Math.Clamp(nextPos, _rangeMin, _rangeMax);
-
-        // Scoring is always driven by the main (L0) funscript's position deltas,
-        // even when vib scripts are loaded and actually driving the device. This
-        // keeps the scoring basis consistent regardless of the connected device.
-        if (index + 1 < _actions.Count)
-            _score?.AddStroke(scoreAmplitude);
-
         // Follow-stroke vibe actuators track the commanded stroke position as intensity.
+        int currentPos = ProcessedStrokePos(index, effects);
         SendToVibeSource("stroke", currentPos / 100.0 * _vibeIntensity);
 
-        // Stroke → the single stroke target. No target = score/vibe only.
-        // When a Restim alpha track is loaded, L0 is driven from that axis script instead.
+        // restim (e-stim) runs in parallel with the stroke backend: the stroke funscript drives
+        // restim's Alpha (L0). Deliberately outside the _strokeBackend branch so it still works
+        // when the serial device is off (serial is turned off once restim connects). Sent per
+        // keyframe with a duration rather than streamed — T-code does the tweening device-side.
+        SendRestimStroke(index, effects);
+
+        // Buttplug linear stroke: one interval-move per keyframe (BLE can't take the serial rate).
+        if (_strokeBackend == StrokeBackend.Buttplug)
+            SendButtplugStroke(index, effects);
+    }
+
+    // Stroke-axis (Alpha/L0) send to restim for one keyframe, mirroring SendButtplugStroke. Skipped
+    // when the round ships a dedicated estim script for the axis — that script wins over the stroke.
+    private void SendRestimStroke(int index, Godot.Collections.Array effects)
+    {
+        var restim = _restim;
+        if (restim == null || !restim.RestimConnected)
+            return;
+        if (_restimScripts.ContainsKey(RestimService.StrokeAxis))
+            return;
         if (index + 1 >= _actions.Count)
             return;
-        if (IsTcodeStrokeBackend() && HasAlphaAxisLoaded())
-            return;
 
-        double targetNormalised = nextPos / 100.0;
+        int currentPos = ProcessedStrokePos(index, effects);
+        int nextPos = ProcessedStrokePos(index + 1, effects);
+        uint durationMs = (uint)Math.Max(1, (int)(_actions[index + 1].AtMs - _actions[index].AtMs));
+        durationMs = _CapDuration(currentPos, nextPos, durationMs);
+        restim.SendTCode(RestimService.StrokeAxis, nextPos / 100.0, durationMs);
+    }
+
+    // Buttplug linear stroke send for one keyframe: move toward the next processed position over the
+    // inter-keyframe interval (capped by max stroke speed).
+    private void SendButtplugStroke(int index, Godot.Collections.Array effects)
+    {
+        if (index + 1 >= _actions.Count)
+            return;
+        int currentPos = ProcessedStrokePos(index, effects);
+        int nextPos = ProcessedStrokePos(index + 1, effects);
         uint durationMs = (uint)Math.Max(1, (int)(_actions[index + 1].AtMs - _actions[index].AtMs));
         durationMs = _CapDuration(currentPos, nextPos, durationMs);
 
-        if (_strokeBackend == StrokeBackend.Buttplug)
-        {
-            var bp = _buttplug;
-            if (bp != null && bp.BpConnected && _strokeDeviceIndex >= 0)
-                bp.SendLinear(_strokeDeviceIndex, durationMs, targetNormalised);
-            return;
-        }
-
-        if (!IsTcodeStrokeBackend())
-            return;
-
-        SendTcodeAxisToDest("shared", "L0", durationMs, targetNormalised);
+        var bp = _buttplug;
+        if (bp != null && bp.BpConnected && _strokeDeviceIndex >= 0)
+            bp.SendLinear(_strokeDeviceIndex, durationMs, nextPos / 100.0);
     }
 
-    private string[] GetAutofillAxisKeys()
+    // The fully-processed device position (0–100) for keyframe `index`: effects → comfort range
+    // (RESCALE, not clamp, so strokes keep their shape at reduced amplitude) → ease-from-home →
+    // safety clamp. Exactly what the device is told to reach at that keyframe; the serial interp tick
+    // lerps between consecutive values of it.
+    private int ProcessedStrokePos(int index, Godot.Collections.Array effects)
     {
-        if (_restimKit != null)
-        {
-            var arr = _restimKit.Call("all_autofill_axis_keys").AsGodotArray();
-            var keys = new string[arr.Count];
-            for (int i = 0; i < arr.Count; i++)
-                keys[i] = arr[i].AsString();
-            if (keys.Length > 0)
-                return keys;
-        }
-        return SsrAxes;
+        int pos = TransformPos(index, effects);
+        pos = RescaleToRange(pos);
+        pos = ApplyEase(pos);
+        return Math.Clamp(pos, _rangeMin, _rangeMax);
     }
 
-    private string TcodeForAxisKey(string axisKey)
+    // Ease-in blend from the home position toward `pos`, over the computed ease window. Time-driven
+    // (reads _positionMs); the flag itself is cleared in _PhysicsProcess once the window elapses, so
+    // this stays a pure map that both the keyframe path and the serial interp tick can call freely.
+    private int ApplyEase(int pos)
     {
-        if (_restimKit == null)
-            return axisKey == "alpha" ? "L0" : axisKey;
-        return _restimKit.Call("tcode_for", axisKey).AsString();
+        if (!_easing)
+            return pos;
+        double elapsed = _positionMs - _easeStartMs;
+        float t = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
+        float smooth = t * t * (3f - 2f * t); // smoothstep (ease-in-out Hermite) — natural for device motion
+        return (int)Math.Round(_homePosition + (pos - _homePosition) * smooth);
     }
 
-    private bool HasTcodeForAxis(string axisKey) => !string.IsNullOrEmpty(TcodeForAxisKey(axisKey));
-
-    private bool IsTcodeStrokeBackend() =>
-        _strokeBackend == StrokeBackend.Serial || _strokeBackend == StrokeBackend.Restim;
-
-    // Axis scripts play on Restim (stroke) or on Serial whenever a COM port is open
-    // (SSR multi-axis alongside a Buttplug stroker).
-    private bool ShouldDispatchAxisScripts() =>
-        _strokeBackend == StrokeBackend.Restim
-        || (_serial != null && _serial.SerialConnected);
-
-    // Dispatches secondary / Restim-kit axes. On Restim stroke backend, intensity is
-    // Restim intensity: block mutes all axes + V0=0.
-    // scale / volume_attenuate → volume (V0) only.
-    // Stock / linear journeys: when stroke backend is not Restim, factors stay 1 and
-    // mute/inject never run — Handy/Buttplug/serial geometry is unchanged.
-    private void DispatchAxisScripts()
+    // Linearly interpolates the processed stroke position at `now` between the bracketing keyframes
+    // (cursor _interpIndex). Interpolating the PROCESSED endpoints traces the same straight line the
+    // OSR firmware already tweens between keyframes — just sampled continuously — so dense/fast
+    // sections stay smooth and command timing no longer follows the video frame clock.
+    private int InterpolatedStrokePos(double now, Godot.Collections.Array effects)
     {
-        var effects = _inventory?.GetActiveEffects();
-        bool restimStroke = _strokeBackend == StrokeBackend.Restim;
-        float volFactor = restimStroke
-            ? ComputeRestimVolumeFactor(effects, includeScale: true)
-            : 1f;
-        bool muteAll = restimStroke && HasBlockEffect(effects);
+        if (now <= _actions[0].AtMs)
+            return ProcessedStrokePos(0, effects);
+        int i = _interpIndex;
+        if (i + 1 >= _actions.Count)
+            return ProcessedStrokePos(_actions.Count - 1, effects);
 
-        float easeSmooth = 1f;
-        if (_easing)
-        {
-            double elapsed = _positionMs - _easeStartMs;
-            float t = (float)Math.Clamp(elapsed / _easeDurationMs, 0.0, 1.0);
-            easeSmooth = t * t * (3f - 2f * t); // smoothstep
-        }
-
-        if (muteAll)
-        {
-            // Consume due axis keyframes without sending FOC motion; hold V0 at silence.
-            foreach (var multiaxis in _axes)
-            {
-                AxisState state = multiaxis.Value;
-                while (state.Index < state.Actions.Count)
-                {
-                    if (state.Actions[state.Index].AtMs > _positionMs - _serialDelayMs)
-                        break;
-                    state.Index++;
-                }
-            }
-            SendTcodeAxisToDest("shared", "V0", 50, 0.0);
-            return;
-        }
-
-        foreach (var multiaxis in _axes)
-        {
-            string key = multiaxis.Key;
-            SplitAxisKey(key, out string slot, out string axisKey);
-            AxisState state = multiaxis.Value;
-            while (state.Index < state.Actions.Count)
-            {
-                if (state.Actions[state.Index].AtMs > _positionMs - _serialDelayMs)
-                    break;
-
-                int idx = state.Index;
-                if (idx + 1 < state.Actions.Count)
-                {
-                    int nextPos = state.Actions[idx + 1].Pos;
-                    (int axisMin, int axisMax) = GetAxisRange(axisKey);
-                    nextPos = RescaleToAxisRange(nextPos, axisMin, axisMax);
-                    if (_easing || easeSmooth < 1f)
-                        nextPos = (int)Math.Round(50f + (nextPos - 50f) * easeSmooth);
-                    nextPos = Math.Clamp(nextPos, axisMin, axisMax);
-
-                    double targetNorm = nextPos / 100.0;
-                    if (restimStroke && axisKey == "volume")
-                        targetNorm = ApplyRestimIntensityNorm(targetNorm, volFactor);
-
-                    uint durMs = (uint)Math.Max(1, (int)(state.Actions[idx + 1].AtMs - state.Actions[idx].AtMs));
-                    string tcode = TcodeForAxisKey(axisKey);
-                    if (!string.IsNullOrEmpty(tcode))
-                    {
-                        string dest = string.IsNullOrEmpty(slot) ? "shared" : slot;
-                        SendTcodeAxisToDest(dest, tcode, durMs, targetNorm);
-                    }
-                }
-                state.Index++;
-            }
-        }
-
-        // No authored .volume script for Restim: inject constant V0 while intensity is attenuated.
-        if (restimStroke && !Mathf.IsEqualApprox(volFactor, 1f))
-        {
-            bool anyVolume = _axes.ContainsKey("volume")
-                || _axes.ContainsKey("shared:volume")
-                || _axes.ContainsKey("a:volume")
-                || _axes.ContainsKey("b:volume");
-            if (!anyVolume)
-            {
-                SendTcodeAxisToDest("shared", "V0", 50, ApplyRestimIntensityNorm(1.0, volFactor));
-            }
-            else
-            {
-                foreach (var slot in new[] { "a", "b" })
-                {
-                    if (HasVolumeAxisForSlot(slot))
-                        continue;
-                    if (RestimSlotConnected(slot))
-                        SendTcodeAxisToDest(slot, "V0", 50, ApplyRestimIntensityNorm(1.0, volFactor));
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Restim V0 factor from active inventory/boss effects.
-    /// Multiplies <c>volume_attenuate</c>; when <paramref name="includeScale"/>, also <c>scale</c>.
-    /// <c>block</c> forces 0. Factor is clamped to [0, 1]; final V0 send also clamps to [0, 1].
-    /// </summary>
-    public float ComputeRestimVolumeFactor(Godot.Collections.Array effects, bool includeScale = true)
-    {
-        if (effects == null || effects.Count == 0)
-            return 1f;
-        if (HasBlockEffect(effects))
-            return 0f;
-
-        float factor = 1f;
-        foreach (var effectVariant in effects)
-        {
-            var effect = effectVariant.AsGodotDictionary();
-            if (!effect.ContainsKey("kind"))
-                continue;
-            string kind = effect["kind"].AsString();
-            if (!effect.ContainsKey("factor"))
-                continue;
-            if (kind == "volume_attenuate")
-                factor *= effect["factor"].AsSingle();
-            else if (includeScale && kind == "scale")
-                factor *= effect["factor"].AsSingle();
-        }
-        return Mathf.Clamp(factor, 0f, 1f);
-    }
-
-    /// <summary>
-    /// Apply a Restim intensity factor to a scripted 0–1 axis position.
-    /// Multiplies then clamps to the T-code channel range.
-    /// </summary>
-    public double ApplyRestimIntensityNorm(double scriptedNorm, float factor) =>
-        Math.Clamp(scriptedNorm * factor, 0.0, 1.0);
-
-    /// <summary>True when Restim axis scripts should be muted (block effect active).</summary>
-    public bool RestimAxesMuted(Godot.Collections.Array effects) =>
-        HasBlockEffect(effects);
-
-    private bool RestimConnected() =>
-        _restim != null && _restim.Get("RestimConnected").AsBool();
-
-    private bool RestimSlotConnected(string slot) =>
-        _restim != null && _restim.Call("IsConnected", slot).AsBool();
-
-    // destination: "a" | "b" | "shared" (fan-out) | "" (serial / legacy shared).
-    private void SendTcodeAxisToDest(string destination, string tcodeAxis, uint durationMs, double position)
-    {
-        if (string.IsNullOrEmpty(tcodeAxis))
-            return;
-
-        if (_strokeBackend == StrokeBackend.Restim && RestimConnected())
-        {
-            string dest = string.IsNullOrEmpty(destination) ? "shared" : destination;
-            _restim.Call("SendAxis", dest, tcodeAxis, (int)durationMs, position);
-            return;
-        }
-
-        var serial = _serial;
-        if (serial != null && serial.SerialConnected)
-            serial.SendAxis(tcodeAxis, durationMs, position);
+        double a = _actions[i].AtMs;
+        double b = _actions[i + 1].AtMs;
+        float frac = b > a ? (float)Math.Clamp((now - a) / (b - a), 0.0, 1.0) : 0f;
+        int pa = ProcessedStrokePos(i, effects);
+        int pb = ProcessedStrokePos(i + 1, effects);
+        return (int)Math.Round(pa + (pb - pa) * frac);
     }
 
     // Fan an intensity (0–1) out to every resolved vibe actuator whose source matches.
@@ -1328,8 +1401,6 @@ public partial class FunscriptPlayer : Node
 
     private static bool HasBlockEffect(Godot.Collections.Array effects)
     {
-        if (effects == null)
-            return false;
         foreach (var effectVariant in effects)
         {
             var effect = effectVariant.AsGodotDictionary();
@@ -1407,21 +1478,13 @@ public partial class FunscriptPlayer : Node
         if (effects == null || effects.Count == 0)
             return (int)Math.Round(Math.Clamp(pos, 0f, 100f));
 
-        // Combined scale factor — all scale / volume_attenuate effects multiply.
-        // On Restim, scale/volume_attenuate fold into V0 (see ComputeRestimVolumeFactor);
-        // skip geometric scale here so FOC players are not double-attenuated on L0.
+        // Combined scale factor — all scale effects multiply.
         float scaleFactor = 1f;
-        if (_strokeBackend != StrokeBackend.Restim)
+        foreach (var effect in effects)
         {
-            foreach (var effect in effects)
-            {
-                var effectProp = effect.AsGodotDictionary();
-                if (!effectProp.ContainsKey("kind") || !effectProp.ContainsKey("factor"))
-                    continue;
-                string kind = effectProp["kind"].AsString();
-                if (kind == "scale" || kind == "volume_attenuate")
-                    scaleFactor *= effectProp["factor"].AsSingle();
-            }
+            var effectProp = effect.AsGodotDictionary();
+            if (effectProp.ContainsKey("kind") && effectProp["kind"].AsString() == "scale" && effectProp.ContainsKey("factor"))
+                scaleFactor *= effectProp["factor"].AsSingle();
         }
         if (!Mathf.IsEqualApprox(scaleFactor, 1f))
         {

@@ -70,9 +70,6 @@ func test_coerce_round_fills_baseline_defaults() -> void:
 	var out := JourneyData.coerce_node_save_data("round", {"name": "A"})
 	assert_str(out["round_type"]).is_equal("normal")
 	assert_str(out["award_item"]).is_equal("")  # no reward by default
-	assert_bool(out["is_checkpoint"]).is_false()
-	assert_int(int(out.get("cooldown_days", -1))).is_equal(0)
-	assert_bool(bool(out.get("items_blocked", true))).is_false()
 	assert_bool(out["effect_random"]).is_true()
 	assert_bool(out["resolvable"]).is_false()
 	assert_int(out["cleanse_cost"]).is_equal(50)
@@ -87,34 +84,101 @@ func test_coerce_round_fills_baseline_defaults() -> void:
 	assert_bool(out.has("boons")).is_false()
 
 
+# ── Animated images ──────────────────────────────────────────────────────────
+# Drives the presave gate: a GIF MUST be baked (Godot has no GIF decoder), so the save is blocked
+# when ffmpeg can't run and any of these exist. Missing one here = a silently blank image in game.
+
+
+func test_graph_animated_image_sources_finds_every_surface() -> void:
+	var graph := {
+		"nodes":
+		{
+			"r1": {"type": "round", "data": {"boss_image": "a.gif"}, "out": []},
+			"r2":
+			{
+				"type": "round",
+				"data": {"pool_entries": [{"boss_image": "b.gif"}, {"boss_image": "still.png"}]},
+				"out": []
+			},
+			"s1":
+			{
+				"type": "storyboard",
+				"data": {"image": "c.gif", "lines": [{"image": "d.gif"}, {"image": "no.jpg"}]},
+				"out": []
+			},
+			"f1":
+			{"type": "fork", "data": {}, "out": [{"image_path": "e.gif"}, {"image_path": ""}]},
+		}
+	}
+	var found: Array = JourneyData.graph_animated_image_sources(graph, ["gif"])
+	found.sort()
+	assert_array(found).is_equal(["a.gif", "b.gif", "c.gif", "d.gif", "e.gif"])
+
+
+func test_graph_animated_image_sources_dedupes_and_ignores_stills() -> void:
+	var graph := {
+		"nodes":
+		{
+			"r1": {"type": "round", "data": {"boss_image": "same.gif"}, "out": []},
+			"s1": {"type": "storyboard", "data": {"image": "same.gif", "lines": []}, "out": []},
+			"s2": {"type": "storyboard", "data": {"image": "plain.png", "lines": []}, "out": []},
+		}
+	}
+	# One source used twice is one entry; stills never appear.
+	assert_array(JourneyData.graph_animated_image_sources(graph, ["gif"])).is_equal(["same.gif"])
+
+
+func test_graph_animated_image_sources_empty_when_no_gifs() -> void:
+	var graph := {"nodes": {"r1": {"type": "round", "data": {"boss_image": "x.png"}, "out": []}}}
+	assert_array(JourneyData.graph_animated_image_sources(graph, ["gif"])).is_empty()
+
+
+# ── Journey identity ─────────────────────────────────────────────────────────
+# The id must be STABLE for the life of a journey: renditions/modules bind to it, and Name /
+# FolderName are both user-renameable, so neither can anchor anything.
+
+
+func test_new_journey_id_shape_and_uniqueness() -> void:
+	var a: String = JourneyData.new_journey_id()
+	assert_str(a).starts_with("j_")
+	assert_int(a.length()).is_equal(34)  # "j_" + 32 hex chars (128 bits)
+	# Ids cross machines, so collisions must be vanishingly unlikely, not merely rare.
+	var seen: Dictionary = {}
+	for _i in 200:
+		seen[JourneyData.new_journey_id()] = true
+	assert_int(seen.size()).is_equal(200)
+
+
+func test_stamp_identity_mints_when_absent() -> void:
+	var meta: Dictionary = {"Name": "J"}
+	JourneyData.stamp_journey_identity(meta)
+	assert_str(str(meta["JourneyId"])).starts_with("j_")
+	assert_str(str(meta["MinVersion"])).is_equal(JourneyData.JOURNEY_MIN_APP_VERSION)
+	assert_bool(meta.has("CreatedWith")).is_true()
+
+
+# The guarantee everything else rests on: re-saving must never re-mint the id.
+func test_stamp_identity_preserves_existing() -> void:
+	var meta: Dictionary = {"Name": "J"}
+	JourneyData.stamp_journey_identity(meta, "j_deadbeefdeadbeefdeadbeefdeadbeef")
+	assert_str(str(meta["JourneyId"])).is_equal("j_deadbeefdeadbeefdeadbeefdeadbeef")
+	# ... and again, simulating a second save.
+	JourneyData.stamp_journey_identity(meta, str(meta["JourneyId"]))
+	assert_str(str(meta["JourneyId"])).is_equal("j_deadbeefdeadbeefdeadbeefdeadbeef")
+
+
+# A blank/whitespace id is treated as absent rather than written through as "".
+func test_stamp_identity_mints_when_blank() -> void:
+	var meta: Dictionary = {}
+	JourneyData.stamp_journey_identity(meta, "   ")
+	assert_str(str(meta["JourneyId"])).starts_with("j_")
+
+
 # A round's optional item reward (award_item) is preserved and stringified on save, so the
 # runtime can grant it at round end (parity with the storyboard reward).
 func test_coerce_round_preserves_award_item() -> void:
 	var out := JourneyData.coerce_node_save_data("round", {"name": "A", "award_item": "cleanse"})
 	assert_str(out["award_item"]).is_equal("cleanse")
-
-
-# Cutscene optional item reward (award_item) is preserved the same way as rounds.
-func test_coerce_cutscene_preserves_award_item() -> void:
-	var out := JourneyData.coerce_node_save_data(
-		"cutscene", {"name": "Unlock", "award_item": "erosphere_amulet"}
-	)
-	assert_str(out["award_item"]).is_equal("erosphere_amulet")
-	var empty := JourneyData.coerce_node_save_data("cutscene", {"name": "X"})
-	assert_str(empty["award_item"]).is_equal("")
-
-
-# Cutscene coins + checkpoint coerce like rounds (int / bool baselines).
-func test_coerce_cutscene_coins_and_checkpoint() -> void:
-	var out := JourneyData.coerce_node_save_data(
-		"cutscene", {"name": "EP", "coins": 15.0, "is_checkpoint": 1}
-	)
-	assert_int(typeof(out["coins"])).is_equal(TYPE_INT)
-	assert_int(out["coins"]).is_equal(15)
-	assert_bool(out["is_checkpoint"]).is_true()
-	var defaults := JourneyData.coerce_node_save_data("cutscene", {"name": "X"})
-	assert_int(defaults["coins"]).is_equal(0)
-	assert_bool(defaults["is_checkpoint"]).is_false()
 
 
 # Node-level keys (type / node_id / paths) never belong inside on-disk node.data.
@@ -251,3 +315,23 @@ func test_graph_video_sources_dedups_rounds_only() -> void:
 	assert_int(srcs.size()).is_equal(2)
 	assert_bool(srcs.has("/x/v.mp4")).is_true()
 	assert_bool(srcs.has("/y/w.mp4")).is_true()
+
+
+# Warmup survives coercion as a real bool (default false). is_checkpoint is RETIRED — coercion
+# must NOT write it back, since the flag is converted to a checkpoint node on load.
+func test_round_flags_coerce_to_bools() -> void:
+	var on: Dictionary = JourneyData.coerce_node_save_data(
+		"round", {"name": "A", "is_checkpoint": true, "is_warmup": true}
+	)
+	assert_int(typeof(on["is_warmup"])).is_equal(TYPE_BOOL)
+	assert_bool(on["is_warmup"]).is_true()
+	assert_bool(on.has("is_checkpoint")).is_false()  # retired — not persisted
+
+	var off: Dictionary = JourneyData.coerce_node_save_data("round", {"name": "B"})
+	assert_bool(off["is_warmup"]).is_false()
+
+
+# A checkpoint node coerces to just its label.
+func test_coerce_checkpoint_node() -> void:
+	var out: Dictionary = JourneyData.coerce_node_save_data("checkpoint", {"name": "Act 1"})
+	assert_str(out["name"]).is_equal("Act 1")

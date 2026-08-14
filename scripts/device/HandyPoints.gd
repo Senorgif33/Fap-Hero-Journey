@@ -19,6 +19,23 @@ static func actions_to_points(actions: Array) -> Array:
 	return out
 
 
+# First index whose point time is ≥ `t` (points are time-sorted), or points.size() when every
+# point is before t. Binary search. Used to seed a play/seek window at the CURRENT position:
+# start_time is video_ms, so the batch must begin at video_ms too — sending from index 0 hands
+# the device the OPENING seconds of the script while it plays from the middle, so it starves and
+# the per-second feed has to grind forward for seconds before anything lands.
+static func index_at_or_after(points: Array, t: int) -> int:
+	var lo: int = 0
+	var hi: int = points.size()
+	while lo < hi:
+		var mid: int = (lo + hi) / 2
+		if int((points[mid] as Dictionary)["t"]) < t:
+			lo = mid + 1
+		else:
+			hi = mid
+	return lo
+
+
 # The next batch to stream: points from `from_idx` whose t ≤ until_t, capped at
 # MAX_POINTS_PER_ADD. Returns {batch, next_idx} — next_idx is the cursor to
 # resume from (and doubles as the HSP tail-point stream index).
@@ -84,6 +101,26 @@ static func apply_effects(points: Array, effects: Array, hold_pos: int = 50) -> 
 
 static func _mirror(v: float, mirrored: bool) -> float:
 	return 100.0 - v if mirrored else v
+
+
+# Shifts every timestamp by `offset_ms` — how the Handy delay is expressed. A point at t now
+# plays `offset` ms later relative to the video, so POSITIVE = more delay.
+#
+# NOT on /hsp/play's start_time, which is what 0.6.0 did: that anchor was `maxi(0, video_ms -
+# delay)` and start_time can't go negative, so at a round start (where video_ms is small) the
+# clamp silently ate the delay. A timestamp shift has no such floor.
+#
+# A negative offset moves points earlier; any landing before 0 are dropped — already past, and
+# t < 0 isn't a legal HSP timestamp. Costs at most |offset| ms (≤2s) off the front.
+static func offset_points(points: Array, offset_ms: int) -> Array:
+	if offset_ms == 0:
+		return points
+	var out: Array = []
+	for p: Dictionary in points:
+		var t: int = int(p["t"]) + offset_ms
+		if t >= 0:
+			out.append({"t": t, "x": int(p["x"])})
+	return out
 
 
 # Estimates the client→server clock offset from a set of /servertime samples

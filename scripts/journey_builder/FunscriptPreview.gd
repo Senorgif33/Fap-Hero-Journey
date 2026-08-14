@@ -2,21 +2,19 @@ class_name FunscriptPreview
 extends Control
 
 # ---------------------------------------------------------------------------
-# FunscriptPreview
-# In-builder preview overlay for a round's funscript. Plots the raw stroke curve
-# and — when the round has stroke modifiers (boss / curse / boon) — an overlaid
-# curve showing what those do to it, so the author can see the effect beforehand.
+# FunscriptPreview — THE in-builder clip editor: preview, cut and tune in one overlay.
 #
-# The funscript graph (zoomable, horizontally scrollable, draggable playhead) and
-# the modifier overlay work on any codec and on unsaved edits, since funscripts
-# are tiny JSON read straight from disk. A synced video pane sits above the graph
-# when the source is decodable (H.264 — EIRTeam's limit); otherwise the preview
-# stays graph-only. Video clock ↔ playhead are kept in lockstep both ways.
+# Plots the raw stroke curve plus (when the round has boss/curse/boon modifiers) the
+# curve they produce, with tunable magnitudes draggable in the TUNE strip. Below that,
+# the segment timeline that authors the round's cut.
 #
-# Open with:
-#   FunscriptPreview.new().open(parent, funscript_path, video_path, modifiers, name, mod_label)
-#   FunscriptPreview.new().open_video_only(parent, video_path, title)  # cutscenes
-# The overlay frees itself on close.
+# ONE VIEW, deliberately. Both BuilderSidePanel entry points route through
+# _open_funscript_editor and pass every argument; a call site that omits half is how
+# authors ended up cutting against a curve that wasn't the one that plays.
+#
+# Graph and modifier overlay work on any codec (funscripts are tiny JSON); the video
+# pane only appears for H.264, EIRTeam's decode limit. Video clock ↔ playhead stay in
+# lockstep both ways. The overlay frees itself on close.
 # ---------------------------------------------------------------------------
 
 var _graph: _Graph = null
@@ -32,39 +30,63 @@ var _on_tune: Callable = Callable()
 # when the source can't be decoded.
 var _video: VideoStreamPlayer = null
 var _video_pane: Control = null
+# Draggable divider between the video pane and the curve graph. The split fraction persists
+# (SettingsService.get/set_preview_video_split), so each author's preferred size sticks.
+var _video_split: VSplitContainer = null
+# Draggable divider between the left column (video + graph + playback controls) and the right
+# column (the segment timeline). Built only when editing; persists its own fraction.
+var _columns_split: HSplitContainer = null
 var _video_aspect: AspectRatioContainer = null
 var _aspect_set: bool = false
 var _video_ok: bool = false
 var _play_btn: Button = null
-# Audio toggle: ON by default in trim mode (cut points often sit on musical
-# beats / scene changes), muted by default in the plain preview (no surprise
-# audio in the builder) — toggleable either way once a video is confirmed.
+# Audio starts muted — every open is a full editor now, and surprise audio is a bad
+# default for this app. One click to enable.
 var _audio_btn: Button = null
 var _audio_on: bool = false
 
-# Trim mode (✂ SET IN PREVIEW): the footer gains IN/OUT/CLEAR/APPLY controls and
-# the graph shades outside the window. `_on_trim_applied` is the round editor's
-# callback (trim_in_ms, trim_out_ms); its validity is what enables the mode.
-var _trim_mode: bool = false
-var _trim_in: int = 0
-var _trim_out: int = 0
-var _on_trim_applied: Callable = Callable()
-var _trim_label: Label = null
+# ── The segment timeline ────────────────────────────────────────────────────
+# `_segments` is the live edit: ordered [{in_ms, out_ms}, …] played back to back. A repeat is
+# a DUPLICATED ROW, not a count — that's what makes duplicate, reorder and loop one operation.
+# A valid `_on_segments_applied` is what enables editing; without one this is a read-only look.
+var _edit_mode: bool = false
+var _segments: Array = []
+var _on_segments_applied: Callable = Callable()
+var _sel_row: int = -1  # selected row, -1 = none
+var _rows_box: VBoxContainer = null
+var _seg_label: Label = null
+var _repeat_spin: SpinBox = null
 
-# Cutscene / video-only preview: hide the stroke graph and show just the video pane.
-var _video_only: bool = false
-var _graph_scroll: ScrollContainer = null
-var _seek_slider: HSlider = null
-var _seek_time_lbl: Label = null
-var _seek_dragging: bool = false
-var _video_length_s: float = 0.0
+# The ⟦IN / OUT⟧ marks, before + ADD commits them as a row. -1 = unset.
+var _mark_in: int = -1
+var _mark_out: int = -1
+
+# Undo/redo, local to this overlay and dead when it closes — segments aren't committed until
+# APPLY, so they don't belong on the builder's graph snapshot stack. Entries are tiny.
+var _undo: Array = []
+var _redo: Array = []
+
+# EDL playback walks the segments in order, seeking at each join. _edl_idx = the segment on
+# screen, -1 when not walking.
+var _edl_btn: Button = null
+var _edl_playing: bool = false
+var _edl_idx: int = -1
+
+# ── Live sensory preview ────────────────────────────────────────────────────
+# The same SensoryFX the runtime uses, scoped to the video pane instead of the screen, so the
+# author sees and hears what a sensory effect does while dragging its intensity. Rolls are the
+# round's ticked SENSORY_CATALOG entries; `_on_sensory_tune(name, intensity)` persists.
+# Applied UNSCALED by the player's comfort setting — see SensoryFX.apply.
+var _sensory: SensoryFX = null
+var _sensory_rolls: Array = []
+var _sensory_intensity: Dictionary = {}  # catalog name → 0–1, the live edit
+var _on_sensory_tune: Callable = Callable()
 
 
-# Builds and shows the overlay over `parent`. `modifiers` are stroke-affecting
-# effect dicts (each {kind, factor?/min?/max?}); pass [] for none. `mod_label`
-# names them ("Boss Modifiers" / "Curse effects" / "Boon effects").
-# video_path may be "" (graph-only) or a non-decodable codec (falls back too).
-# Passing a valid `on_trim_applied` opens in TRIM mode, seeded with trim_in/out.
+# Builds and shows the overlay over `parent`. `modifiers` are stroke-affecting effect dicts
+# (each {kind, factor?/min?/max?}); [] for none. `mod_label` names them ("Boss Modifiers" /
+# "Curse effects"). `video_path` may be "" or a non-decodable codec — both fall back to
+# graph-only. A valid `on_segments_applied` enables timeline editing.
 func open(
 	parent: Control,
 	funscript_path: String,
@@ -72,19 +94,22 @@ func open(
 	modifiers: Array,
 	round_name: String,
 	mod_label: String = "Boss Modifiers",
-	trim_in: int = 0,
-	trim_out: int = 0,
-	on_trim_applied: Callable = Callable(),
-	on_tune: Callable = Callable()
+	segments: Array = [],
+	on_segments_applied: Callable = Callable(),
+	on_tune: Callable = Callable(),
+	sensory_rolls: Array = [],
+	sensory_intensity: Dictionary = {},
+	on_sensory_tune: Callable = Callable()
 ) -> void:
 	_modifiers = modifiers
 	_mod_label = mod_label
 	_on_tune = on_tune
-	_trim_mode = on_trim_applied.is_valid()
-	_trim_in = trim_in
-	_trim_out = trim_out
-	_on_trim_applied = on_trim_applied
-	_video_only = false
+	_sensory_rolls = sensory_rolls
+	_sensory_intensity = sensory_intensity.duplicate()
+	_on_sensory_tune = on_sensory_tune
+	_edit_mode = on_segments_applied.is_valid()
+	_segments = segments.duplicate(true)  # edit a copy; APPLY is what commits
+	_on_segments_applied = on_segments_applied
 	_build_ui(round_name)
 	parent.add_child(self)
 	move_to_front()  # sit above the builder's graph / side panel siblings
@@ -93,22 +118,9 @@ func open(
 	_graph.set_raw(raw)
 	_refresh_modified()
 	_setup_video(video_path)
-	if _trim_mode:
-		_sync_trim()
-
-
-# Video-only overlay for cutscenes (no funscript). Reuses the same decode path as
-# round preview; the stroke graph and zoom chrome stay hidden.
-func open_video_only(parent: Control, video_path: String, title: String = "") -> void:
-	_modifiers = []
-	_mod_label = ""
-	_on_tune = Callable()
-	_trim_mode = false
-	_video_only = true
-	_build_ui(title)
-	parent.add_child(self)
-	move_to_front()
-	_setup_video(video_path)
+	if _edit_mode:
+		_rebuild_rows()
+		_apply_saved_columns_split()  # place the column divider at the author's saved width
 
 
 func _build_ui(round_name: String) -> void:
@@ -125,16 +137,19 @@ func _build_ui(round_name: String) -> void:
 	add_child(backdrop)
 
 	var panel: PanelContainer = PanelContainer.new()
-	panel.anchor_left = 0.08
-	panel.anchor_right = 0.92
-	panel.anchor_top = 0.1
-	panel.anchor_bottom = 0.9
+	# Near full-screen: this overlay carries the video, the graph, the TUNE strip, the sensory
+	# sliders and the segment timeline. Tight top/bottom margins give the video pane more height.
+	panel.anchor_left = 0.03
+	panel.anchor_right = 0.97
+	panel.anchor_top = 0.025
+	panel.anchor_bottom = 0.975
 	var panel_style: StyleBoxFlat = StyleBoxFlat.new()
 	panel_style.bg_color = UITheme.PANEL_BG_DEEP
 	panel_style.border_color = UITheme.PURPLE_MID
 	panel_style.set_border_width_all(1)
 	panel_style.set_corner_radius_all(6)
 	panel_style.set_content_margin_all(18)
+	panel_style.content_margin_bottom = 8  # keep the button bar flush with the bottom edge
 	panel.add_theme_stylebox_override("panel", panel_style)
 	add_child(panel)
 
@@ -145,8 +160,9 @@ func _build_ui(round_name: String) -> void:
 	# Header: title + close.
 	var header: HBoxContainer = HBoxContainer.new()
 	var title: Label = Label.new()
-	var title_prefix: String = "▶  VIDEO PREVIEW" if _video_only else "▶  FUNSCRIPT PREVIEW"
-	title.text = title_prefix + ("  —  " + round_name.to_upper() if round_name != "" else "")
+	title.text = (
+		"▶  FUNSCRIPT PREVIEW" + ("  —  " + round_name.to_upper() if round_name != "" else "")
+	)
 	title.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	title.add_theme_font_size_override("font_size", 18)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -156,16 +172,47 @@ func _build_ui(round_name: String) -> void:
 	header.add_child(close_btn)
 	col.add_child(header)
 
-	# Video pane — hidden until a decodable video confirms it can play (see
-	# _setup_video). When hidden the container skips it and the graph gets the room.
-	# An AspectRatioContainer letterboxes the video inside the black pane so it
-	# isn't stretched; its ratio is set from the real video size once known.
+	# Body: the video, curve graph and playback controls fill the LEFT column; when editing, the
+	# segment timeline gets its own tall column on the RIGHT, split by a draggable, remembered
+	# divider. A view-only open has no timeline, so the left content takes the whole width instead.
+	var left_col: VBoxContainer = _build_left_column()
+	if not _edit_mode:
+		left_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		col.add_child(left_col)
+		return
+
+	var right_col: Control = _build_timeline_column()
+	_columns_split = HSplitContainer.new()
+	_columns_split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_columns_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var left_frac: float = SettingsService.get_preview_columns_split()
+	left_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_col.size_flags_stretch_ratio = left_frac
+	left_col.custom_minimum_size = Vector2(360, 0)  # keep the video/graph usable when dragged narrow
+	right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_col.size_flags_stretch_ratio = 1.0 - left_frac
+	right_col.custom_minimum_size = Vector2(240, 0)  # keep the timeline rows readable
+	_columns_split.add_child(left_col)
+	_columns_split.add_child(right_col)
+	_columns_split.dragged.connect(_on_columns_split_dragged)
+	col.add_child(_columns_split)
+
+
+# The LEFT column: the video pane and the curve graph (a draggable divider between them), the
+# optional TUNE / sensory strips, and the playback / zoom bar that drives them. The segment-editing
+# controls live with the timeline in the right column instead.
+func _build_left_column() -> VBoxContainer:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+
+	# Video pane — hidden until a decodable video confirms it can play (see _setup_video). When
+	# hidden the split skips it and the graph gets the room. An AspectRatioContainer letterboxes the
+	# video inside the black pane so it isn't stretched; its ratio is set from the real size once known.
 	var video_pane: PanelContainer = PanelContainer.new()
 	var vp_style: StyleBoxFlat = StyleBoxFlat.new()
 	vp_style.bg_color = Color(0, 0, 0, 1)
 	video_pane.add_theme_stylebox_override("panel", vp_style)
 	video_pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	video_pane.size_flags_stretch_ratio = 1.4 if not _video_only else 3.0
 	video_pane.clip_contents = true
 	video_pane.visible = false
 	_video_aspect = AspectRatioContainer.new()
@@ -177,142 +224,91 @@ func _build_ui(round_name: String) -> void:
 	_video.volume_db = -80.0  # start silent; _apply_audio sets the real state once confirmed
 	_video_aspect.add_child(_video)
 	_video_pane = video_pane
-	col.add_child(video_pane)
 
-	# Video-only seek bar (replaces the funscript graph playhead for scrubbing).
-	if _video_only:
-		var seek_row: HBoxContainer = HBoxContainer.new()
-		seek_row.add_theme_constant_override("separation", 10)
-		_seek_slider = HSlider.new()
-		_seek_slider.min_value = 0.0
-		_seek_slider.max_value = 1.0
-		_seek_slider.step = 0.05
-		_seek_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		_seek_slider.custom_minimum_size = Vector2(0, 28)
-		_seek_slider.editable = false
-		_seek_slider.drag_started.connect(func() -> void: _seek_dragging = true)
-		_seek_slider.drag_ended.connect(
-			func(_changed: bool) -> void:
-				_seek_dragging = false
-				_seek_to_slider()
-		)
-		_seek_slider.value_changed.connect(
-			func(_v: float) -> void:
-				if _seek_dragging:
-					_seek_to_slider()
-					_update_seek_time_lbl()
-		)
-		seek_row.add_child(_seek_slider)
-		_seek_time_lbl = Label.new()
-		_seek_time_lbl.text = "0:00 / 0:00"
-		_seek_time_lbl.add_theme_font_size_override("font_size", 12)
-		_seek_time_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
-		_seek_time_lbl.custom_minimum_size = Vector2(110, 0)
-		_seek_time_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		seek_row.add_child(_seek_time_lbl)
-		col.add_child(seek_row)
-
-	# The graph fills the remaining space and scrolls horizontally — the curve is
-	# drawn at a fixed time scale (px/sec) rather than squashed to fit, so strokes
-	# stay legible on long scripts. Hidden for cutscene video-only preview.
+	# The graph fills the remaining space and scrolls horizontally — the curve is drawn at a fixed
+	# time scale (px/sec) rather than squashed to fit, so strokes stay legible on long scripts.
 	var scroll: ScrollContainer = ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.visible = not _video_only
-	_graph_scroll = scroll
 	_graph = _Graph.new()
 	_graph.size_flags_vertical = Control.SIZE_EXPAND_FILL  # fill the viewport height
 	_graph.time_label_format = func(ms: float) -> String: return _format_time(ms)
 	scroll.add_child(_graph)
 	# Redraw on scroll so the floating Y-axis labels track the viewport's left edge.
 	scroll.get_h_scroll_bar().value_changed.connect(func(_v: float) -> void: _graph.queue_redraw())
-	col.add_child(scroll)
 
-	# Scrubbing the graph seeks the video; the graph's playhead and the video clock
-	# stay in lockstep (video → playhead in _process, playhead → video here).
+	# The video pane and the curve graph share the column's flexible height through a draggable
+	# divider, so authors can size the video (or the curve) to taste. Seeded from the saved fraction
+	# via the two children's stretch ratios (split_offset stays 0) and re-saved on drag; the graph
+	# keeps its own 240px minimum, so the divider can never hide it entirely.
+	_video_split = VSplitContainer.new()
+	_video_split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_video_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var video_frac: float = SettingsService.get_preview_video_split()
+	video_pane.size_flags_stretch_ratio = video_frac
+	scroll.size_flags_stretch_ratio = 1.0 - video_frac
+	_video_split.add_child(video_pane)
+	_video_split.add_child(scroll)
+	_video_split.dragged.connect(_on_video_split_dragged)
+	box.add_child(_video_split)
+
+	# Scrubbing the graph seeks the video; playhead and video clock stay in lockstep (video →
+	# playhead in _process, playhead → video here).
 	_graph.scrubbed.connect(_on_scrubbed)
 
-	# Live stroke-magnitude tuning (effect rounds): sliders that rewrite the modifier
-	# curve as you drag and persist back to the round. Only when the caller opted in.
-	if _on_tune.is_valid() and not _video_only:
+	# Live stroke-magnitude tuning (effect rounds): sliders that rewrite the modifier curve as you
+	# drag and persist back to the round. Only when the caller opted in.
+	if _on_tune.is_valid():
 		var strip: Control = _build_tuning_strip()
 		if strip != null:
-			col.add_child(strip)
+			box.add_child(strip)
 
-	# Footer: play/pause + zoom + modifier toggle + caption.
-	var footer: HBoxContainer = HBoxContainer.new()
-	footer.add_theme_constant_override("separation", 12)
+	var sensory_strip: Control = _build_sensory_strip()
+	if sensory_strip != null:
+		box.add_child(sensory_strip)
+
+	box.add_child(_build_playback_bar())
+	return box
+
+
+# The playback / view controls under the graph: play/pause, audio, zoom, and (when the round has
+# modifiers) the show-modifiers toggle plus the modifier caption. Segment editing lives with the
+# timeline in the right column.
+func _build_playback_bar() -> Control:
+	var bar: HBoxContainer = HBoxContainer.new()
+	bar.add_theme_constant_override("separation", 12)
 
 	# Play / pause (disabled until a video confirms it can play).
 	_play_btn = UITheme.make_icon_btn("▶ PLAY", true, UITheme.SUCCESS)
 	_play_btn.pressed.connect(_toggle_play)
-	footer.add_child(_play_btn)
+	bar.add_child(_play_btn)
 
-	# Audio toggle (also disabled until a video confirms).
-	_audio_on = _trim_mode
+	# Audio toggle (also disabled until a video confirms). Starts OFF regardless of mode: now that
+	# every open is a full editor, defaulting it on would mean any preview click suddenly plays
+	# audio — a bad surprise for this app's content. Cutting by ear is one click away.
+	_audio_on = false
 	_audio_btn = UITheme.make_icon_btn("🔊", true, UITheme.PURPLE_BRIGHT)
-	_audio_btn.tooltip_text = "Toggle preview audio"
+	_audio_btn.tooltip_text = UITheme.wrap_tip("Toggle preview audio")
 	_audio_btn.pressed.connect(
 		func() -> void:
 			_audio_on = not _audio_on
 			_apply_audio()
 	)
-	footer.add_child(_audio_btn)
+	bar.add_child(_audio_btn)
 
-	# Zoom controls — adjust the horizontal time scale of the graph.
-	if not _video_only:
-		var zoom_out: Button = UITheme.make_icon_btn("ZOOM −", false, UITheme.PURPLE_BRIGHT)
-		zoom_out.tooltip_text = "Zoom out (show more time)"
-		zoom_out.pressed.connect(func() -> void: _graph.zoom_by(0.8))
-		footer.add_child(zoom_out)
-		var zoom_in: Button = UITheme.make_icon_btn("ZOOM +", false, UITheme.PURPLE_BRIGHT)
-		zoom_in.tooltip_text = "Zoom in (show less time, more detail)"
-		zoom_in.pressed.connect(func() -> void: _graph.zoom_by(1.25))
-		footer.add_child(zoom_in)
+	# Zoom — adjust the graph's horizontal time scale.
+	var zoom_out: Button = UITheme.make_icon_btn("ZOOM −", false, UITheme.PURPLE_BRIGHT)
+	zoom_out.tooltip_text = UITheme.wrap_tip("Zoom out (show more time)")
+	zoom_out.pressed.connect(func() -> void: _graph.zoom_by(0.8))
+	bar.add_child(zoom_out)
+	var zoom_in: Button = UITheme.make_icon_btn("ZOOM +", false, UITheme.PURPLE_BRIGHT)
+	zoom_in.tooltip_text = UITheme.wrap_tip("Zoom in (show less time, more detail)")
+	zoom_in.pressed.connect(func() -> void: _graph.zoom_by(1.25))
+	bar.add_child(zoom_in)
 
-	# Trim mode: place the window with the playhead, then apply back to the round.
-	if _trim_mode and not _video_only:
-		var set_in: Button = UITheme.make_icon_btn("⟦ IN", false, UITheme.TOXIC_GREEN)
-		set_in.tooltip_text = "Set the trim start to the playhead"
-		set_in.pressed.connect(
-			func() -> void:
-				_trim_in = int(_graph.get_playhead())
-				_sync_trim()
-		)
-		footer.add_child(set_in)
-		var set_out: Button = UITheme.make_icon_btn("OUT ⟧", false, UITheme.AMBER)
-		set_out.tooltip_text = "Set the trim end to the playhead"
-		set_out.pressed.connect(
-			func() -> void:
-				_trim_out = int(_graph.get_playhead())
-				_sync_trim()
-		)
-		footer.add_child(set_out)
-		var trim_clear: Button = UITheme.make_icon_btn("✕", false, UITheme.MAGENTA)
-		trim_clear.tooltip_text = "Clear the trim window (keep the full video)"
-		trim_clear.pressed.connect(
-			func() -> void:
-				_trim_in = 0
-				_trim_out = 0
-				_sync_trim()
-		)
-		footer.add_child(trim_clear)
-		var trim_apply: Button = UITheme.make_icon_btn("✔ APPLY TRIM", false, UITheme.SUCCESS)
-		trim_apply.tooltip_text = "Write this window to the round (baked at the next save)"
-		trim_apply.pressed.connect(
-			func() -> void:
-				_on_trim_applied.call(_trim_in, _trim_out)
-				_close()
-		)
-		footer.add_child(trim_apply)
-		_trim_label = Label.new()
-		_trim_label.add_theme_font_size_override("font_size", 11)
-		_trim_label.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)
-		footer.add_child(_trim_label)
-
-	if not _modifiers.is_empty() and not _video_only:
+	if not _modifiers.is_empty():
 		var toggle: CheckButton = CheckButton.new()
 		toggle.text = "SHOW %s" % _mod_label.to_upper()
 		toggle.button_pressed = true
@@ -322,22 +318,251 @@ func _build_ui(round_name: String) -> void:
 				_show_modifiers = on
 				_refresh_modified()
 		)
-		footer.add_child(toggle)
+		bar.add_child(toggle)
+
 	_caption = Label.new()
 	_caption.add_theme_font_size_override("font_size", 11)
 	_caption.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_caption.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	if _video_only:
-		_caption.text = "Loading video…"
-		_caption.add_theme_color_override("font_color", UITheme.SEPARATOR)
-	footer.add_child(_caption)
-	col.add_child(footer)
+	bar.add_child(_caption)
+	return bar
+
+
+# The RIGHT column (editing only): the segment timeline. A build toolbar (mark IN/OUT, add, repeat,
+# clear) on top, the full-height scrolling list of segment rows in the middle, and PLAY TIMELINE +
+# APPLY along the bottom. In its own tall column, a long cut list is easy to see and reorder — the
+# whole point of the two-column layout.
+func _build_timeline_column() -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+
+	var head: HBoxContainer = HBoxContainer.new()
+	head.add_theme_constant_override("separation", 8)
+	var title: Label = Label.new()
+	title.text = "TIMELINE"
+	title.add_theme_font_size_override("font_size", 12)
+	title.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	var hint: Label = Label.new()
+	hint.text = "Ctrl+Z / Ctrl+Y"
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	head.add_child(hint)
+	box.add_child(head)
+
+	box.add_child(_build_segment_toolbar())
+
+	# The scrolling list of rows — expands to fill the column so long timelines stay visible.
+	var scroll: ScrollContainer = ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_rows_box = VBoxContainer.new()
+	_rows_box.add_theme_constant_override("separation", 2)
+	_rows_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_rows_box)
+	box.add_child(scroll)
+
+	# Bottom action row: play the assembled cut, and APPLY it to the round.
+	var actions: HBoxContainer = HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 8)
+	# Plays the assembled cut instead of the raw source. The bake concatenates pre-encoded segments
+	# and is seamless, so a hitch seen HERE is a preview artifact the file won't have.
+	_edl_btn = UITheme.make_icon_btn("▶ PLAY TIMELINE", false, UITheme.CYAN)
+	_edl_btn.tooltip_text = UITheme.wrap_tip(
+		"Play the segments in order (the preview seeks at each join)"
+	)
+	_edl_btn.pressed.connect(_toggle_edl_playback)
+	actions.add_child(_edl_btn)
+	_seg_label = Label.new()
+	_seg_label.add_theme_font_size_override("font_size", 11)
+	_seg_label.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)
+	_seg_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	actions.add_child(_seg_label)
+	var apply: Button = UITheme.make_icon_btn("✔ APPLY", false, UITheme.SUCCESS)
+	apply.tooltip_text = UITheme.wrap_tip(
+		"Write this timeline to the round (baked at the next save)"
+	)
+	apply.pressed.connect(
+		func() -> void:
+			_on_segments_applied.call(_segments.duplicate(true))  # hand over a copy, not our live list
+			_close()
+	)
+	actions.add_child(apply)
+	box.add_child(actions)
+	return box
+
+
+# The segment build toolbar: mark a window with the playhead, add it as a row, repeat or clear.
+# These build the timeline, so they live in the timeline column. An HFlowContainer so the buttons
+# wrap to a second line when the column is dragged narrow.
+func _build_segment_toolbar() -> Control:
+	var bar: HFlowContainer = HFlowContainer.new()
+	bar.add_theme_constant_override("h_separation", 6)
+	bar.add_theme_constant_override("v_separation", 4)
+
+	var set_in: Button = UITheme.make_icon_btn("⟦ IN", false, UITheme.TOXIC_GREEN)
+	set_in.tooltip_text = UITheme.wrap_tip("Mark the window start at the playhead")
+	set_in.pressed.connect(func() -> void: _set_mark(true))
+	bar.add_child(set_in)
+	var set_out: Button = UITheme.make_icon_btn("OUT ⟧", false, UITheme.AMBER)
+	set_out.tooltip_text = UITheme.wrap_tip("Mark the window end at the playhead")
+	set_out.pressed.connect(func() -> void: _set_mark(false))
+	bar.add_child(set_out)
+	var add_btn: Button = UITheme.make_icon_btn("+ ADD", false, UITheme.CYAN)
+	add_btn.tooltip_text = UITheme.wrap_tip("Add the marked window to the timeline as a new row")
+	add_btn.pressed.connect(_add_pending_segment)
+	bar.add_child(add_btn)
+	var drop_marks: Button = UITheme.make_icon_btn("✕ MARKS", false, UITheme.AMBER)
+	drop_marks.tooltip_text = UITheme.wrap_tip("Discard the ⟦IN/OUT⟧ marks (keeps the timeline)")
+	drop_marks.pressed.connect(
+		func() -> void:
+			_mark_in = -1
+			_mark_out = -1
+			_rebuild_rows()
+	)
+	bar.add_child(drop_marks)
+
+	# Repeat: inserts N copies of the selected row. Storage is expanded rows, but nobody clicks
+	# duplicate thirty times — so the AFFORDANCE is a count even though the model has none.
+	# Deliberately uncapped; a long bake is the author's call.
+	_repeat_spin = SpinBox.new()
+	_repeat_spin.min_value = 2
+	_repeat_spin.max_value = 999
+	_repeat_spin.value = 4
+	_repeat_spin.tooltip_text = UITheme.wrap_tip("How many total passes the selected row becomes")
+	UITheme.style_spin_box(_repeat_spin)
+	bar.add_child(_repeat_spin)
+	var rep_btn: Button = UITheme.make_icon_btn("⧉ REPEAT", false, UITheme.PURPLE_BRIGHT)
+	rep_btn.tooltip_text = UITheme.wrap_tip("Repeat the selected row this many times (adds rows)")
+	rep_btn.pressed.connect(_repeat_selected)
+	bar.add_child(rep_btn)
+
+	var clear_btn: Button = UITheme.make_icon_btn("✕ CLEAR ALL", false, UITheme.MAGENTA)
+	clear_btn.tooltip_text = UITheme.wrap_tip(
+		"Remove EVERY segment so the whole clip plays untouched (Ctrl+Z undoes it)"
+	)
+	clear_btn.pressed.connect(
+		func() -> void:
+			_push_undo()
+			_segments.clear()
+			_sel_row = -1
+			_rebuild_rows()
+	)
+	bar.add_child(clear_btn)
+	return bar
+
+
+# Places the divider at the saved fraction once the video pane is visible and the split has a real
+# height. The stretch ratios above are only a rough seed — the graph's minimum height skews the
+# ratio→fraction mapping — so we correct with split_offset (a delta from wherever it sits now) to
+# land the exact saved fraction. Clamped by the children's min sizes, same as a manual drag.
+func _apply_saved_split() -> void:
+	if _video_split == null or not _video_pane.visible:
+		return
+	await get_tree().process_frame  # let the split lay out with the video visible
+	if not is_inside_tree() or _video_split.size.y <= 0.0:
+		return
+	var target_h: float = SettingsService.get_preview_video_split() * _video_split.size.y
+	_video_split.split_offset += int(round(target_h - _video_pane.size.y))
+
+
+# The author dragged the video/graph divider — persist the new split as a fraction of the
+# splitter's height. A fraction (not the raw pixel offset the signal hands us) stays correct when
+# the modal is later opened at a different window size.
+func _on_video_split_dragged(_offset: int) -> void:
+	if _video_split == null or _video_split.size.y <= 0.0:
+		return
+	SettingsService.set_preview_video_split(_video_pane.size.y / _video_split.size.y)
+	SettingsService.save()
+
+
+# Same persistence approach as the video/graph split, but horizontal: the saved fraction is the
+# LEFT column's share of the width. Corrected with split_offset after layout so it lands exactly.
+func _apply_saved_columns_split() -> void:
+	if _columns_split == null:
+		return
+	await get_tree().process_frame  # let the columns lay out
+	if not is_inside_tree() or _columns_split.size.x <= 0.0:
+		return
+	var left: Control = _columns_split.get_child(0)
+	var target_w: float = SettingsService.get_preview_columns_split() * _columns_split.size.x
+	_columns_split.split_offset += int(round(target_w - left.size.x))
+
+
+func _on_columns_split_dragged(_offset: int) -> void:
+	if _columns_split == null or _columns_split.size.x <= 0.0:
+		return
+	var left: Control = _columns_split.get_child(0)
+	SettingsService.set_preview_columns_split(left.size.x / _columns_split.size.x)
+	SettingsService.save()
+
+
+# One slider per tunable sensory effect on this round, applied live to the video pane as you
+# drag. Returns null when the round has no sensory effects (or none with an intensity — Blinded
+# and Silence are binary, so they preview but can't be tuned).
+func _build_sensory_strip() -> Control:
+	var tunable: Array = []
+	for roll: Dictionary in _sensory_rolls:
+		if roll.has("imin") and roll.has("imax"):
+			tunable.append(roll)
+	if tunable.is_empty():
+		return null
+
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
+	var lead: Label = Label.new()
+	lead.text = "SENSORY  —  previewed at author strength, before the player's comfort setting"
+	lead.add_theme_font_size_override("font_size", 11)
+	lead.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	box.add_child(lead)
+
+	var rows: HBoxContainer = HBoxContainer.new()
+	rows.add_theme_constant_override("separation", 16)
+	for roll: Dictionary in tunable:
+		rows.add_child(_sensory_slider_row(roll))
+	box.add_child(rows)
+	return box
+
+
+func _sensory_slider_row(roll: Dictionary) -> Control:
+	var nm: String = str(roll.get("name", ""))
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+
+	var lbl: Label = Label.new()
+	lbl.text = nm.to_upper()
+	lbl.add_theme_font_size_override("font_size", 11)
+	lbl.add_theme_color_override("font_color", UITheme.CYAN)
+	row.add_child(lbl)
+
+	var pct: float = float(_sensory_intensity.get(nm, roll.get("idef", 0.5))) * 100.0
+	var value_lbl: Label = Label.new()
+	value_lbl.text = "%d%%" % roundi(pct)
+	value_lbl.add_theme_font_size_override("font_size", 11)
+	value_lbl.custom_minimum_size = Vector2(38, 0)
+
+	var slider: HSlider = HSlider.new()
+	slider.min_value = 0.0
+	slider.max_value = 100.0
+	slider.step = 1.0
+	slider.custom_minimum_size = Vector2(120, 0)
+	slider.set_value_no_signal(pct)
+	slider.value_changed.connect(
+		func(v: float) -> void:
+			value_lbl.text = "%d%%" % roundi(v)
+			_sensory_intensity[nm] = v / 100.0
+			_refresh_sensory()
+			if _on_sensory_tune.is_valid():
+				_on_sensory_tune.call(nm, v / 100.0)
+	)
+	row.add_child(slider)
+	row.add_child(value_lbl)
+	return row
 
 
 # Recomputes (or clears) the modifier-applied curve and updates the caption.
 func _refresh_modified() -> void:
-	if _video_only or _graph == null:
-		return
 	if _modifiers.is_empty():
 		_graph.set_modified([], false)
 		_caption.text = "No %s on this round — showing the raw script." % _mod_label.to_lower()
@@ -526,12 +751,11 @@ func _transform_pos_at(points: Array, i: int, effects: Array) -> float:
 	var mirrored: bool = reverse_count % 2 == 1
 	var pos: float = _mirror_one((points[i] as Vector2).y, mirrored)
 
-	# Scale each stroke around its local centre (neighbour midpoint). All scale /
-	# volume_attenuate effects multiply into one factor (linear devices; Restim uses V0).
+	# Scale each stroke around its local centre (neighbour midpoint). All scale
+	# effects multiply into one factor.
 	var scale_factor: float = 1.0
 	for e: Dictionary in effects:
-		var kind: String = String(e.get("kind", ""))
-		if (kind == "scale" or kind == "volume_attenuate") and e.has("factor"):
+		if String(e.get("kind", "")) == "scale" and e.has("factor"):
 			scale_factor *= float(e["factor"])
 	if not is_equal_approx(scale_factor, 1.0):
 		var prev: float = _mirror_one((points[maxi(0, i - 1)] as Vector2).y, mirrored)
@@ -609,23 +833,25 @@ func _input(event: InputEvent) -> void:
 	# Handled here in _input (before the GUI focus pass) and consumed, so the keys
 	# can't reach the still-focused "Preview" button behind us — Space on that
 	# button would otherwise open another preview.
+	# Undo/redo is scoped to this overlay's timeline — see the _undo declaration. Checked before
+	# the plain-key match so Ctrl+Z doesn't fall through to anything else.
+	if _edit_mode and event.ctrl_pressed:
+		match event.keycode:
+			KEY_Z:
+				_undo_step()
+				get_viewport().set_input_as_handled()
+				return
+			KEY_Y:
+				_redo_step()
+				get_viewport().set_input_as_handled()
+				return
 	match event.keycode:
 		KEY_ESCAPE:
 			_close()
 			get_viewport().set_input_as_handled()
 		KEY_SPACE:
-			_toggle_play()  # no-op when there's no playable video
+			_toggle_play()  # no-op without a playable video; stops an EDL walk first
 			get_viewport().set_input_as_handled()
-		KEY_LEFT, KEY_RIGHT:
-			if _video_only and _video_ok and _seek_slider != null:
-				var step_s: float = 5.0
-				var delta: float = -step_s if event.keycode == KEY_LEFT else step_s
-				_seek_slider.value = clampf(
-					_seek_slider.value + delta, 0.0, _seek_slider.max_value
-				)
-				_seek_to_slider()
-				_update_seek_time_lbl()
-				get_viewport().set_input_as_handled()
 
 
 # ── Video ────────────────────────────────────────────────────────────────────
@@ -638,9 +864,6 @@ func _input(event: InputEvent) -> void:
 # visible for the player to actually start, so we show it, then poll is_playing().
 func _setup_video(path: String) -> void:
 	if path == "":
-		if _video_only and _caption != null:
-			_caption.text = "No video path set."
-			_caption.add_theme_color_override("font_color", UITheme.AMBER)
 		return
 	var ext: String = path.get_extension().to_lower()
 	if ext == "ogv":
@@ -648,18 +871,12 @@ func _setup_video(path: String) -> void:
 		if stream is VideoStream:
 			_video.stream = stream as VideoStream
 		else:
-			if _video_only and _caption != null:
-				_caption.text = "Video could not be loaded."
-				_caption.add_theme_color_override("font_color", UITheme.AMBER)
 			return
 	elif ClassDB.class_exists("FFmpegVideoStream"):
 		var stream: Resource = ClassDB.instantiate("FFmpegVideoStream")
 		stream.set("file", ProjectSettings.globalize_path(path))
 		_video.stream = stream as VideoStream
 	else:
-		if _video_only and _caption != null:
-			_caption.text = "No video decoder available."
-			_caption.add_theme_color_override("font_color", UITheme.AMBER)
 		return  # no decoder available
 
 	# Must be visible to actually decode and report is_playing() — a hidden
@@ -682,55 +899,36 @@ func _setup_video(path: String) -> void:
 		_apply_audio()
 		_update_play_btn()
 		_apply_aspect()
-		_init_seek_bar()
+		_start_sensory()
+		_apply_saved_split()  # size the video pane to the author's saved split, now that it's shown
 		set_process(true)
-		if _video_only and _caption != null:
-			_caption.text = "Drag scrubber to seek · ←/→ ±5s · Space play/pause · Esc close"
-			_caption.add_theme_color_override("font_color", UITheme.SEPARATOR)
 	else:
 		_video_pane.visible = false  # decode failed — stay graph-only
 		_video.stream = null
-		if _video_only and _caption != null:
-			_caption.text = "Video could not be decoded (H.264 / OGV required)."
-			_caption.add_theme_color_override("font_color", UITheme.AMBER)
 
 
-# Wire the video-only scrubber once length is known (may still be 0 until a few frames).
-func _init_seek_bar() -> void:
-	if not _video_only or _seek_slider == null:
+# Stands the sensory engine up over the video pane (not the whole overlay, so murk/tunnel/strobe
+# darken the clip rather than the editor around it). Only once a video is confirmed — every
+# sensory effect acts on the video node or its audio bus, so there's nothing to show without one.
+func _start_sensory() -> void:
+	if _sensory_rolls.is_empty():
 		return
-	_refresh_video_length()
-	_seek_slider.editable = true
-	_update_seek_time_lbl()
+	_sensory = SensoryFX.new()
+	add_child(_sensory)
+	_sensory.setup(_video, _video_pane)
+	_refresh_sensory()
 
 
-func _refresh_video_length() -> void:
-	if _video == null:
+# Re-applies every sensory roll at its current intensity. clear_all() first because apply() is
+# additive — without it, dragging a slider would stack effects instead of replacing them.
+func _refresh_sensory() -> void:
+	if _sensory == null:
 		return
-	var len_s: float = _video.get_stream_length()
-	if len_s > 0.05:
-		_video_length_s = len_s
-		_seek_slider.max_value = len_s
-		_seek_slider.step = maxf(0.05, len_s / 500.0)
-
-
-func _seek_to_slider() -> void:
-	if not _video_ok or _seek_slider == null:
-		return
-	# Keep the stream loaded while scrubbing; pause so a drag doesn't race playback.
-	if not _video.is_playing():
-		_video.play()
-		_video.paused = true
-	_video.stream_position = _seek_slider.value
-	_update_play_btn()
-
-
-func _update_seek_time_lbl() -> void:
-	if _seek_time_lbl == null:
-		return
-	var pos_ms: float = (_seek_slider.value if _seek_slider != null else 0.0) * 1000.0
-	var len_ms: float = _video_length_s * 1000.0
-	_seek_time_lbl.text = "%s / %s" % [_format_time(pos_ms), _format_time(len_ms)]
+	_sensory.clear_all()
+	for roll: Dictionary in _sensory_rolls:
+		var nm: String = str(roll.get("name", ""))
+		var intensity: float = float(_sensory_intensity.get(nm, roll.get("idef", 0.5)))
+		_sensory.apply(roll, intensity, false)
 
 
 # Sets the letterbox aspect from the real video dimensions once a frame exists.
@@ -750,15 +948,64 @@ func _process(_delta: float) -> void:
 		_apply_aspect()  # the video texture can appear a frame or two after playback starts
 	# Drive the playhead from the video clock only while actively advancing
 	# (playing AND not paused), and never while the author is scrubbing.
-	if not _video_only and _graph != null and _is_advancing() and not _graph.is_dragging():
+	if _is_advancing() and not _graph.is_dragging():
 		_graph.set_playhead(_video.stream_position * 1000.0)
-	if _video_only and _seek_slider != null:
-		if _video_length_s <= 0.05:
-			_refresh_video_length()
-		if not _seek_dragging:
-			_seek_slider.value = _video.stream_position
-			_update_seek_time_lbl()
+		if _edl_playing:
+			_advance_edl()
 	_update_play_btn()  # keeps the label correct through pause / resume / natural end
+
+
+# ── EDL playback ────────────────────────────────────────────────────────────
+
+
+func _toggle_edl_playback() -> void:
+	if _edl_playing:
+		_stop_edl_playback()
+		return
+	if not _video_ok or _segments.is_empty():
+		_flash_seg_label("Nothing to play — add a segment first")
+		return
+	_edl_playing = true
+	_enter_edl_segment(0)
+	_sync_edl_btn()
+
+
+func _stop_edl_playback() -> void:
+	_edl_playing = false
+	_edl_idx = -1
+	if _video_ok:
+		_video.paused = true
+	_sync_edl_btn()
+	_update_play_btn()
+
+
+func _sync_edl_btn() -> void:
+	if _edl_btn != null:
+		_edl_btn.text = "⏹ STOP TIMELINE" if _edl_playing else "▶ PLAY TIMELINE"
+
+
+# Seeks to segment `i` and plays it. Seeking at every join is only viable because this
+# decoder's seeks measured cheap; if that regresses, this is the one place to change.
+func _enter_edl_segment(i: int) -> void:
+	if i >= _segments.size():
+		_stop_edl_playback()
+		return
+	_edl_idx = i
+	if not _video.is_playing():
+		_video.play()
+	_video.paused = false
+	_video.stream_position = float(int((_segments[i] as Dictionary).get("in_ms", 0))) / 1000.0
+	_update_play_btn()
+
+
+# Per frame while walking: hop to the next row once this window's out point passes.
+func _advance_edl() -> void:
+	if _edl_idx < 0 or _edl_idx >= _segments.size():
+		return
+	var out_ms: int = int((_segments[_edl_idx] as Dictionary).get("out_ms", 0))
+	var end_ms: int = out_ms if out_ms > 0 else _source_len_ms()
+	if _video.stream_position * 1000.0 >= float(end_ms):
+		_enter_edl_segment(_edl_idx + 1)
 
 
 # True while the video is actually advancing. is_playing() stays true while
@@ -770,13 +1017,13 @@ func _is_advancing() -> bool:
 func _toggle_play() -> void:
 	if not _video_ok:
 		return
+	# Plain playback and the EDL walk both drive stream_position, so only one runs at a time.
+	if _edl_playing:
+		_stop_edl_playback()
 	if not _video.is_playing():
-		# Finished (or stopped) — restart playback from the current playhead / scrubber.
+		# Finished (or stopped) — restart playback from the current playhead.
 		_video.play()
-		if _video_only and _seek_slider != null:
-			_video.stream_position = _seek_slider.value
-		elif not _video_only and _graph != null:
-			_video.stream_position = _graph.get_playhead() / 1000.0
+		_video.stream_position = _graph.get_playhead() / 1000.0
 		_video.paused = false
 	else:
 		_video.paused = not _video.paused
@@ -798,20 +1045,208 @@ func _on_scrubbed(ms: float) -> void:
 		_video.stream_position = ms / 1000.0
 
 
-# Pushes the current trim window to the graph markers + the footer readout.
-func _sync_trim() -> void:
-	_graph.set_trim(float(_trim_in), float(_trim_out) if _trim_out > 0 else -1.0)
-	if _trim_label:
-		if _trim_in <= 0 and _trim_out <= 0:
-			_trim_label.text = "NO TRIM"
-		else:
-			_trim_label.text = (
-				"TRIM %s – %s"
-				% [
-					JourneyData.ms_to_mmss(_trim_in),
-					JourneyData.ms_to_mmss(_trim_out) if _trim_out > 0 else "END",
-				]
-			)
+# ── Timeline editing ────────────────────────────────────────────────────────
+
+
+# Always call before mutating `_segments`.
+func _push_undo() -> void:
+	_undo.append(_segments.duplicate(true))
+	_redo.clear()  # a fresh edit invalidates the redo branch
+
+
+func _undo_step() -> void:
+	if _undo.is_empty():
+		return
+	_redo.append(_segments.duplicate(true))
+	_segments = _undo.pop_back()
+	_sel_row = mini(_sel_row, _segments.size() - 1)
+	_rebuild_rows()
+
+
+func _redo_step() -> void:
+	if _redo.is_empty():
+		return
+	_undo.append(_segments.duplicate(true))
+	_segments = _redo.pop_back()
+	_sel_row = mini(_sel_row, _segments.size() - 1)
+	_rebuild_rows()
+
+
+# Falls back to the funscript's end when the decoder can't report a length.
+func _source_len_ms() -> int:
+	if _video_ok and _video.get_stream_length() > 0.0:
+		return int(_video.get_stream_length() * 1000.0)
+	var raw: Array = _graph.get_raw()
+	return int((raw[-1] as Vector2).x) if not raw.is_empty() else 0
+
+
+# Places a mark at the playhead. Dropping the row selection matters: + ADD leaves the new row
+# selected (so ⧉ REPEAT can act on it immediately), and while a row is selected the graph shades
+# THAT window — so without this, placing marks for a second segment showed no feedback at all
+# and looked like the editor was refusing to let you build another one.
+func _set_mark(is_in: bool) -> void:
+	if is_in:
+		_mark_in = int(_graph.get_playhead())
+	else:
+		_mark_out = int(_graph.get_playhead())
+	_sel_row = -1
+	_rebuild_rows()
+
+
+# Commits the ⟦IN/OUT⟧ marks as a row. Unset IN = from the start; unset OUT = to the end,
+# stored as 0 (the open-ended form the pure layer uses).
+func _add_pending_segment() -> void:
+	var start_ms: int = maxi(0, _mark_in)
+	var end_ms: int = _mark_out
+	if end_ms > 0 and end_ms <= start_ms:
+		_flash_seg_label("OUT must be after IN")
+		return
+	_push_undo()
+	_segments.append({"in_ms": start_ms, "out_ms": maxi(0, end_ms)})
+	_sel_row = _segments.size() - 1
+	_mark_in = -1
+	_mark_out = -1
+	_rebuild_rows()
+
+
+# Grows the selected row to `_repeat_spin` total passes by inserting copies after it.
+func _repeat_selected() -> void:
+	if _sel_row < 0 or _sel_row >= _segments.size():
+		_flash_seg_label("Select a row first")
+		return
+	var passes: int = int(_repeat_spin.value)
+	if passes < 2:
+		return
+	_push_undo()
+	var row: Dictionary = _segments[_sel_row]
+	for _i: int in passes - 1:
+		_segments.insert(_sel_row + 1, row.duplicate())
+	_rebuild_rows()
+
+
+func _move_row(i: int, delta: int) -> void:
+	var j: int = i + delta
+	if j < 0 or j >= _segments.size():
+		return
+	_push_undo()
+	var row: Dictionary = _segments[i]
+	_segments.remove_at(i)
+	_segments.insert(j, row)
+	_sel_row = j
+	_rebuild_rows()
+
+
+func _delete_row(i: int) -> void:
+	if i < 0 or i >= _segments.size():
+		return
+	_push_undo()
+	_segments.remove_at(i)
+	_sel_row = mini(_sel_row, _segments.size() - 1)
+	_rebuild_rows()
+
+
+func _duplicate_row(i: int) -> void:
+	if i < 0 or i >= _segments.size():
+		return
+	_push_undo()
+	_segments.insert(i + 1, (_segments[i] as Dictionary).duplicate())
+	_sel_row = i + 1
+	_rebuild_rows()
+
+
+# Rebuilds every row from `_segments`. The list is short and edits are user-paced, so a full
+# rebuild is simpler (and less bug-prone) than surgical row patching.
+func _rebuild_rows() -> void:
+	if _rows_box == null:
+		return
+	for child: Node in _rows_box.get_children():
+		child.queue_free()
+
+	var src_len: int = _source_len_ms()
+	for i: int in _segments.size():
+		var seg: Dictionary = _segments[i]
+		var start_ms: int = int(seg.get("in_ms", 0))
+		var end_ms: int = int(seg.get("out_ms", 0))
+		var idx: int = i  # captured by this row's button callbacks
+
+		var row: HBoxContainer = HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+
+		var pick: Button = Button.new()
+		pick.toggle_mode = true
+		pick.button_pressed = (i == _sel_row)
+		pick.text = (
+			"%2d.   %s – %s   (%s)"
+			% [
+				i + 1,
+				JourneyData.ms_to_mmss(start_ms),
+				JourneyData.ms_to_mmss(end_ms) if end_ms > 0 else "END",
+				JourneyData.ms_to_mmss(maxi(0, (end_ms if end_ms > 0 else src_len) - start_ms)),
+			]
+		)
+		pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		pick.add_theme_font_size_override("font_size", 11)
+		pick.pressed.connect(
+			func() -> void:
+				_sel_row = idx
+				_rebuild_rows()
+		)
+		row.add_child(pick)
+
+		row.add_child(_row_btn("▲", "Move earlier", func() -> void: _move_row(idx, -1)))
+		row.add_child(_row_btn("▼", "Move later", func() -> void: _move_row(idx, 1)))
+		row.add_child(_row_btn("⧉", "Duplicate this row", func() -> void: _duplicate_row(idx)))
+		row.add_child(_row_btn("✕", "Remove this row", func() -> void: _delete_row(idx)))
+		_rows_box.add_child(row)
+
+	_sync_markers()
+
+
+func _row_btn(text: String, tip: String, cb: Callable) -> Button:
+	var b: Button = Button.new()
+	b.text = text
+	b.tooltip_text = UITheme.wrap_tip(tip)
+	b.add_theme_font_size_override("font_size", 11)
+	b.pressed.connect(cb)
+	return b
+
+
+# Pushes the graph's shaded window (the selected row, or the pending ⟦IN/OUT⟧ marks when
+# nothing is selected) and refreshes the timeline readout.
+func _sync_markers() -> void:
+	var start_ms: float = -1.0
+	var end_ms: float = -1.0
+	# Pending marks win over the row selection — while you're placing a window, that's the one
+	# you need to see.
+	if _mark_in >= 0 or _mark_out > 0:
+		start_ms = float(_mark_in) if _mark_in >= 0 else -1.0
+		end_ms = float(_mark_out) if _mark_out > 0 else -1.0
+	elif _sel_row >= 0 and _sel_row < _segments.size():
+		var seg: Dictionary = _segments[_sel_row]
+		var seg_out: int = int(seg.get("out_ms", 0))
+		start_ms = float(int(seg.get("in_ms", 0)))
+		end_ms = float(seg_out) if seg_out > 0 else -1.0
+	_graph.set_trim(start_ms, end_ms)
+
+	if _seg_label == null:
+		return
+	if _segments.is_empty():
+		_seg_label.text = "NO SEGMENTS — full clip"
+	else:
+		var total: int = JourneyData.segments_total_ms(_segments, _source_len_ms())
+		_seg_label.text = (
+			"%d SEGMENT%s — %s"
+			% [
+				_segments.size(),
+				"" if _segments.size() == 1 else "S",
+				JourneyData.ms_to_mmss(total)
+			]
+		)
+
+
+func _flash_seg_label(msg: String) -> void:
+	if _seg_label != null:
+		_seg_label.text = msg
 
 
 # ===========================================================================

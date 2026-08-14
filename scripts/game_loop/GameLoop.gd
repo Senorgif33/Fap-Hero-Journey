@@ -5,7 +5,6 @@ const ForkScene = preload("res://scenes/fork_screen/ForkScreen.tscn")
 const ShopScene = preload("res://scenes/shop_screen/ShopScreen.tscn")
 const StoryboardScene = preload("res://scenes/storyboard_screen/StoryboardScreen.tscn")
 const InventoryPanelScene = preload("res://scenes/inventory/InventoryPanel.tscn")
-const BeatBarScript = preload("res://scripts/game_loop/BeatBar.gd")
 const GraphViewScene = preload("res://scenes/graph_view/GraphView.tscn")
 
 # ---------------------------------------------------------------------------
@@ -54,6 +53,9 @@ const BOSS_EFFECT_NAMES: Dictionary = {
 @onready var _coin_lbl: Label = $HUD/HUDBar/HUDLayout/CoinLabel
 @onready var _progress: ProgressBar = $HUD/ProgressBar
 @onready var _score_lbl: Label = $HUD/HUDBar/HUDLayout/ScoreLabel
+# Round timer (opt-in, Options → Display). Built in code and added to the HUD bar, so it hides
+# with the rest of the HUD when a Fog effect conceals it.
+var _timer_lbl: Label = null
 @onready var _pause_btn: Button = $HUD/HUDBar/HUDLayout/PauseBtn
 @onready var _inv_btn: Button = $HUD/HUDBar/HUDLayout/InventoryBtn
 @onready var _menu_btn: Button = $HUD/HUDBar/HUDLayout/MenuBtn
@@ -105,6 +107,28 @@ var _current_overlay: Control = null
 # journey (_map_enabled): an author can disable it to enforce surprise, in which
 # case the map is never built and the buttons never appear.
 var _map_enabled: bool = true  # journey-level: author allows the player map
+var _show_fork_counts: bool = true  # journey-level: show the "N ROUNDS" tag on fork choices
+var _show_loops_on_map: bool = false  # journey-level: show Loop markers on the player map (off = hide)
+# Finish ("I came") — journey-level opt-in. When on, an always-available hold-to-confirm button ends the
+# run early; if a finish node (any type — a gentle round or a storyboard) is designated it plays as
+# aftercare before the end screen.
+var _allow_finish: bool = false
+var _finish_node_id: String = ""
+# Auto-advance (journey-level opt-in): a countdown on storyboards (per line) and interactive forks
+# so a player can't linger to "rest". Separate durations — a dialogue line needs far less time than a
+# fork decision. Passed to those overlays; 0 secs = off (either the feature or that surface).
+var _auto_advance_enabled: bool = false
+var _auto_advance_storyboard_secs: int = 20
+var _auto_advance_fork_secs: int = 45
+# Counter names the author surfaced to the player (journey-level "ShownCounters"). A change to one
+# of these shows the transient top-right pop; the inventory panel lists them. Others stay hidden.
+var _shown_counters: Array = []
+# Occupied vertical slots for counter pops (index -> true) so simultaneous pops stack rather than
+# overlap. See _alloc_counter_pop_slot.
+var _counter_pop_slots: Dictionary = {}
+const COUNTER_POP_BASE_Y: float = 90.0  # first pop sits below the HUD bar
+const COUNTER_POP_STEP: float = 46.0  # one single-row pop's height + gap
+const COUNTER_POP_HOLD_SECS: float = 3.5  # how long a coin/item/counter chip stays fully on screen
 var _map_fog: bool = false  # journey-level: fog of war — reveal the map as it's discovered
 var _map_fog_reveal: int = 1  # ghost levels revealed ahead of the trail (< 0 = whole structure)
 var _map_view: GraphView = null
@@ -157,7 +181,14 @@ var _effect_frame: Panel = null  # optional coloured edge border (author-toggled
 # audio bus, tremor, mute. Built in _build_effect_overlay; every hex routes
 # through it first (see _apply_hex). Gameplay hexes below stay here.
 var _sensory: SensoryFX = null
-var _curse_hud_hidden: bool = false  # a "Fog" effect hid the HUD for this round
+# This round's own sensory layer as [{roll, intensity}] — collected in _apply_hex, combined with any
+# active ITEM sensory effects, and pushed to SensoryFX.reconcile by _reconcile_sensory. Cleared at
+# round entry (rebuilt) and at round teardown (so the round's sensory fades out; item sensory stays).
+var _round_sensory: Array = []
+# Guards _apply_oneshot_item_effects against the re-entrant ActiveEffectsChanged that ConsumeEffects
+# emits (so a one-shot toll/interest/flag/counter fires exactly once, not once per consume).
+var _applying_oneshots: bool = false
+var _curse_hud_hidden: bool = false  # a "Fog" effect hid the HUD (round OR timed item), reconciled
 var _curse_no_pause: bool = false  # a "Restless" effect disabled pausing this round
 const TOLL_AMOUNT: int = 40  # coins a "Toll" effect takes immediately
 
@@ -166,6 +197,7 @@ const INTEREST_PCT: float = 0.25  # "Interest" boon pays this fraction of the co
 # Effects to show on the pre-round reveal card. Each: {name, desc, benefit:bool}.
 # Empty = no card (normal/boss rounds).
 var _reveal_effects: Array = []
+var _resumed_from_save: bool = false  # true until the first item loads after a resume
 const REVEAL_HOLD_SECS: float = 2.6
 # Pool-round "ENCOUNTER!" card hold — punchier than the effect reveal (a mystery
 # beat, not a modifier to read).
@@ -175,14 +207,24 @@ const ENCOUNTER_HOLD_SECS: float = 1.2
 # own floating button (not in the HUD, so a Fog effect can't lock the player out).
 var _effect_resolved: bool = false
 var _effect_cleanse_btn: Button = null
+var _warmup_skip_btn: Button = null  # free ⏭ skip on an author-marked warmup round
+var _finish_btn: Button = null  # hold-to-confirm FINISH ("I came") button, shown during rounds when enabled
+var _finish_hold_tween: Tween = null  # fills while FINISH is held; fires _finish_journey at completion
+var _finishing: bool = false  # set once FINISH is confirmed, so a late button_up can't re-trigger
+# Exit-to-menu is hold-to-confirm (Esc key held, or the MENU button held) so a stray press can't dump a
+# run. A centered overlay fills while held; release cancels, completion leaves to the menu.
+const EXIT_HOLD_SECS: float = 1.0
+var _exit_hold_tween: Tween = null
+var _exit_hold_layer: CanvasLayer = null
+var _exit_hold_fill: Label = null
+var _pop_layer: CanvasLayer = null  # high layer for reward pops so they clear full-screen overlays (shop)
+var _exiting: bool = false  # guards _confirm_exit so a late key/button-up can't re-trigger
+# _on_round_ended is bound to BOTH round-end signals (_video.finished / _end_timer.timeout) and is
+# also called manually (FINISH / warmup skip). This guards its once-per-round side effects — counter
+# bestowal, payout, advance — against a double-fire. Reset at the top of each _begin_round.
+var _round_ended_guard: bool = false
+const FINISH_HOLD_SECS: float = 1.2  # hold time to confirm FINISH
 var _effect_cleanse_cost: int = CLEANSE_COST_DEFAULT  # per-round, set on enter
-
-# Mid-round Release control (see ReleaseLogic + round release_* fields).
-var _release_btn: Button = null
-var _release_cfg: Dictionary = {}
-var _release_pressed: bool = false
-var _release_deadline_resolved: bool = false
-var _release_jumping: bool = false  # suppresses normal end path during fail_jump
 
 # Optional beat-bar visualiser — created only when the setting is enabled.
 var _beat_bar: Control = null
@@ -199,21 +241,12 @@ var _test_return_journey: Dictionary = {}
 var _test_seed_score: int = 0
 var _test_seed_coins: int = 0
 var _test_seed_flags: Array = []
+var _test_seed_items: Array = []  # item ids to grant before the first node loads
+var _test_seed_counters: Dictionary = {}  # counter name -> value to pre-set
 # Set once this run's outcome has been logged to the scoreboard (on completion)
 # or when leaving via Save & Quit (a resume, not an abandon) — so the menu exit
 # doesn't also record an abandoned run.
 var _run_accounted: bool = false
-# Calendar lockout stamped when entering a round with cooldown_days > 0.
-# Written into the Force Save & Quit payload; 0 = no pending cooldown.
-var _pending_cooldown_until: int = 0
-# True while the cooldown Force-Quit modal is on screen (dev Continue / ↑).
-var _cooldown_banner_open: bool = false
-var _cooldown_modal: Control = null
-# True while a cutscene node is playing (no funscript/score; Skip advances).
-var _cutscene_playing: bool = false
-var _cutscene_skip_btn: Button = null
-# Dev → complete: treat round end as clean even for must-release / fail_on_clean_finish.
-var _dev_bypass_release_fail: bool = false
 
 
 func _ready() -> void:
@@ -225,12 +258,17 @@ func _ready() -> void:
 	_build_beat_bar()
 	# Journey-level: the author can disable the player map to enforce surprise.
 	_map_enabled = bool(GameState.Journey.get("map_enabled", true))
+	_show_fork_counts = bool(GameState.Journey.get("show_fork_counts", true))
+	_show_loops_on_map = bool(GameState.Journey.get("show_loops_on_map", false))
 	_map_fog = bool(GameState.Journey.get("map_fog", false))
+	# Journey-level: auto-advance countdown on storyboards / interactive forks.
+	_allow_finish = bool(GameState.Journey.get("allow_finish", false))
+	_finish_node_id = str(GameState.Journey.get("finish_node", ""))
+	_auto_advance_enabled = bool(GameState.Journey.get("auto_advance_enabled", false))
+	_auto_advance_storyboard_secs = int(GameState.Journey.get("auto_advance_storyboard_secs", 20))
+	_auto_advance_fork_secs = int(GameState.Journey.get("auto_advance_fork_secs", 45))
 	_map_fog_reveal = int(GameState.Journey.get("map_fog_reveal", 1))
-	# Shop economy mode — must be set before any shop/inventory use (and before
-	# resume inventory load has already run in JourneySelect; re-apply here so
-	# a fresh start after Reset() still gets the journey's authored value).
-	InventoryService.SetUnlockPayPerUse(bool(GameState.Journey.get("unlock_pay_per_use", false)))
+	_shown_counters = (GameState.Journey.get("shown_counters", []) as Array)
 	_build_map()
 	_connect_signals()
 	# Resume vs fresh start: when the player picked Resume from the catalogue,
@@ -249,13 +287,25 @@ func _ready() -> void:
 		_test_seed_score = int(GameState.get_meta("_test_seed_score", 0))
 		_test_seed_coins = int(GameState.get_meta("_test_seed_coins", 0))
 		_test_seed_flags = GameState.get_meta("_test_seed_flags", [])
+		_test_seed_items = GameState.get_meta("_test_seed_items", [])
+		_test_seed_counters = GameState.get_meta("_test_seed_counters", {})
 		GameState.remove_meta("_test_mode")
 		GameState.remove_meta("_test_return_journey")
 		GameState.remove_meta("_test_seed_score")
 		GameState.remove_meta("_test_seed_coins")
 		GameState.remove_meta("_test_seed_flags")
+		GameState.remove_meta("_test_seed_items")
+		GameState.remove_meta("_test_seed_counters")
+
+	# Author-defined journey items — load into the inventory registry every run (fresh OR resumed),
+	# since they're journey definitions, not run-state. Before Reset so a fresh run's registry is
+	# populated when the first grant happens.
+	InventoryService.LoadJourneyItems(GameState.Journey.get("items", []))
 
 	var is_resuming: bool = bool(GameState.get_meta("_resuming", false))
+	# A run resumed from a checkpoint save should skip that checkpoint's banner and go straight
+	# on — the player already chose to stop there once. Consumed by the first _load_current_item.
+	_resumed_from_save = is_resuming
 	if is_resuming:
 		GameState.remove_meta("_resuming")
 	else:
@@ -278,7 +328,16 @@ func _ready() -> void:
 			ScoreService.SeedLastRoundScore(_test_seed_score)
 		if not _test_seed_flags.is_empty():
 			GameState.SeedFlags(_test_seed_flags)
+		for seed_item_id: Variant in _test_seed_items:
+			InventoryService.AddItem(str(seed_item_id))
+		if not _test_seed_counters.is_empty():
+			GameState.SeedCounters(_test_seed_counters)
+	_build_round_timer()
 	_refresh_coin_label(true)
+	# Handy WiFi only: sync the device ONCE before the first round (behind a brief overlay) so round 1 isn't
+	# the one that eats the ~9-call handshake, and so you can see + feel it's ready before play. No-op for
+	# every other stroker, in test mode, or when already connected.
+	await _handy_journey_sync_gate()
 	_load_current_item()
 	_show_hud()
 	if _test_mode:
@@ -291,14 +350,42 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_fit_video_cover)
 
 
+# Adds the round-timer label to the HUD bar, ahead of the buttons. Skipped entirely when the
+# setting is off, so a disabled timer costs nothing per frame.
+func _build_round_timer() -> void:
+	if not SettingsService.get_round_timer_enabled():
+		return
+	_timer_lbl = Label.new()
+	_timer_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
+	_timer_lbl.add_theme_font_size_override("font_size", 16)
+	_hud_layout.add_child(_timer_lbl)
+	_hud_layout.move_child(_timer_lbl, _score_lbl.get_index() + 1)
+	_update_round_timer()
+
+
+# Time LEFT in the round, which is what a player actually wants mid-round. Falls back to elapsed
+# when the length is unknown (a funscript-only round with no stats, say) — counting up beats
+# showing a wrong countdown.
+func _update_round_timer(at_start: bool = false) -> void:
+	if _timer_lbl == null:
+		return
+	# At a round start the video still holds the PREVIOUS clip's position (_load_video runs
+	# later), so trust the length alone rather than flashing a wrong countdown for a frame.
+	var elapsed_ms: int = 0 if at_start else int(_video.stream_position * 1000.0)
+	var total_ms: int = _active_round_length_ms
+	if total_ms > 0:
+		_timer_lbl.text = "⏱ %s" % JourneyData.ms_to_mmss(maxi(0, total_ms - elapsed_ms))
+	else:
+		_timer_lbl.text = "⏱ %s" % JourneyData.ms_to_mmss(maxi(0, elapsed_ms))
+
+
 func _process(delta: float) -> void:
 	if _video.is_playing():
 		var len: float = _video.get_stream_length()
 		if len > 0.0:
 			_progress.value = _video.stream_position / len
-		# Keep funscript in sync with video clock (skip during cutscenes — no script).
-		if not _cutscene_playing:
-			FunscriptPlayer.SyncTo(_video.stream_position)
+		# Keep funscript in sync with video clock
+		FunscriptPlayer.SyncTo(_video.stream_position)
 		# Re-fit every frame: cheap, and keeps the video covering the screen even
 		# if the viewport or UI scale changes mid-playback.
 		_fit_video_cover()
@@ -311,7 +398,7 @@ func _process(delta: float) -> void:
 		_update_effect_frame()
 	if _beat_bar != null:
 		_beat_bar.set_time(FunscriptPlayer.PositionMs)
-	_tick_release_deadline()
+	_update_round_timer()
 
 
 # Drains score while the player has actively paused (pause button or Options) —
@@ -335,6 +422,10 @@ func _apply_pause_penalty(delta: float) -> void:
 
 func _load_current_item() -> void:
 	_record_trail_node()
+	# Cleared on the FIRST item after a resume (whatever its type), so it only ever affects the
+	# node the save landed on — a checkpoint there is skipped; later checkpoints show normally.
+	var just_resumed: bool = _resumed_from_save
+	_resumed_from_save = false
 	match GameState.CurrentItemType():
 		"fork":
 			_show_fork_screen(GameState.CurrentFork())
@@ -342,172 +433,21 @@ func _load_current_item() -> void:
 			_show_shop_screen(GameState.CurrentShop())
 		"storyboard":
 			_show_storyboard_screen(GameState.CurrentStoryboard())
-		"cooldown":
-			_load_current_cooldown()
-		"cutscene":
-			_load_current_cutscene()
-		_:
-			_load_current_round()
-
-
-# Calendar lockout node — stamp cooldown_until and show Force Save & Quit.
-# No video / funscript / score. Save&Quit and Dev Continue both Advance past this node.
-func _load_current_cooldown() -> void:
-	var cd: Dictionary = GameState.CurrentCooldown().duplicate(true)
-	if cd.is_empty():
-		push_error("GameLoop: GameState has no current cooldown — returning to menu")
-		_go_to_menu()
-		return
-	_cutscene_playing = false
-	_hide_cutscene_skip()
-	var days: int = maxi(1, int(cd.get("days", 1)))
-	_round_lbl.text = "⏳  COOLDOWN  —  %s" % (cd.get("name", "") as String).to_upper()
-	_progress.value = 0.0
-	_pending_cooldown_until = JourneySaveService.stamp_cooldown_days(
-		GameState.Journey.get("folder_name", ""), days
-	)
-	_show_cooldown_banner(cd, days)
-
-
-# Watch-then-advance video (EP / Fate / Credits / unlock). No FunscriptPlayer or ScoreService.
-func _load_current_cutscene() -> void:
-	var cut: Dictionary = GameState.CurrentCutscene().duplicate(true)
-	if cut.is_empty():
-		push_error("GameLoop: GameState has no current cutscene — returning to menu")
-		_go_to_menu()
-		return
-	_paused = false
-	_pause_btn.text = "|| PAUSE"
-	_progress.value = 0.0
-	_update_muffle()
-	# Stop any leftover stroke playback from a prior round, then clear the loaded
-	# script so Options Pause→Resume cannot revive it mid-cutscene.
-	FunscriptPlayer.Stop()
-	FunscriptPlayer.ClearFunscript()
-	FunscriptPlayer.ClearAxisScripts()
-	FunscriptPlayer.ClearVibScripts()
-	if _beat_bar != null:
-		_beat_bar.set_beats([])
-	_handy_stop()
-	var cname: String = (cut.get("name", "") as String).to_upper()
-	_round_lbl.text = "◈  CUTSCENE  —  %s" % cname if cname != "" else "◈  CUTSCENE"
-
-	# Author checkpoint: Save & Quit or Continue before playback (parity with rounds).
-	if cut.get("is_checkpoint", false):
-		_show_checkpoint_banner(cut, func() -> void: _play_cutscene_video(cut))
-	else:
-		await _play_cutscene_video(cut)
-
-
-# Starts cutscene video after any checkpoint gate is cleared.
-func _play_cutscene_video(cut: Dictionary) -> void:
-	_cutscene_playing = true
-	_video.paused = false
-
-	var video_path: String = str(cut.get("video_path", ""))
-	if video_path == "":
-		push_warning("GameLoop: cutscene has no video — advancing")
-		_cutscene_playing = false
-		await _advance_after_cutscene()
-		return
-
-	_active_round_length_ms = int(cut.get("length_ms", 0))
-	_show_cutscene_skip()
-	await _load_video(video_path, false)
-
-
-func _show_cutscene_skip() -> void:
-	_hide_cutscene_skip()
-	var btn: Button = Button.new()
-	btn.text = "SKIP  ▶▶"
-	btn.anchor_left = 1.0
-	btn.anchor_right = 1.0
-	btn.anchor_top = 0.0
-	btn.anchor_bottom = 0.0
-	btn.offset_left = -110
-	btn.offset_right = -16
-	btn.offset_top = 16
-	btn.offset_bottom = 46
-	btn.focus_mode = Control.FOCUS_NONE
-	btn.pressed.connect(_on_cutscene_skip_pressed)
-	btn.add_theme_color_override("font_color", UITheme.DARK_TEXT)
-	btn.add_theme_color_override("font_hover_color", UITheme.WHITE_SOFT)
-	btn.add_theme_color_override("font_pressed_color", UITheme.BG)
-	btn.add_theme_font_size_override("font_size", 11)
-	var sk_n: StyleBoxFlat = StyleBoxFlat.new()
-	sk_n.bg_color = Color(UITheme.DARK_TEXT.r, UITheme.DARK_TEXT.g, UITheme.DARK_TEXT.b, 0.08)
-	sk_n.border_color = UITheme.DARK_TEXT
-	sk_n.border_width_left = 1
-	sk_n.border_width_right = 1
-	sk_n.border_width_top = 1
-	sk_n.border_width_bottom = 1
-	sk_n.set_corner_radius_all(UITheme.CORNER_RADIUS)
-	sk_n.content_margin_left = 10
-	sk_n.content_margin_right = 10
-	sk_n.content_margin_top = 4
-	sk_n.content_margin_bottom = 4
-	btn.add_theme_stylebox_override("normal", sk_n)
-	var sk_h: StyleBoxFlat = sk_n.duplicate()
-	sk_h.bg_color = Color(UITheme.WHITE_SOFT.r, UITheme.WHITE_SOFT.g, UITheme.WHITE_SOFT.b, 0.15)
-	sk_h.border_color = UITheme.WHITE_SOFT
-	btn.add_theme_stylebox_override("hover", sk_h)
-	var sk_p: StyleBoxFlat = sk_n.duplicate()
-	sk_p.bg_color = UITheme.DARK_TEXT
-	btn.add_theme_stylebox_override("pressed", sk_p)
-	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	add_child(btn)
-	_cutscene_skip_btn = btn
-
-
-func _hide_cutscene_skip() -> void:
-	if is_instance_valid(_cutscene_skip_btn):
-		_cutscene_skip_btn.queue_free()
-	_cutscene_skip_btn = null
-
-
-func _on_cutscene_skip_pressed() -> void:
-	if not _cutscene_playing and GameState.CurrentItemType() != "cutscene":
-		return
-	_cutscene_playing = true
-	_end_timer.stop()
-	_video.stop()
-	_video.stream = null
-	await _on_cutscene_ended()
-
-
-func _on_cutscene_ended() -> void:
-	if not _cutscene_playing and GameState.CurrentItemType() != "cutscene":
-		return
-	_cutscene_playing = false
-	_hide_cutscene_skip()
-	_end_timer.stop()
-	_video.stop()
-	_video.stream = null
-	await _advance_after_cutscene()
-
-
-func _advance_after_cutscene() -> void:
-	# Optional coin + item rewards — granted when the cutscene ends (natural end or
-	# Skip), parity with storyboard / round award_item. Read before Advance().
-	var cut: Dictionary = GameState.CurrentCutscene()
-	var coins: int = int(cut.get("coins", 0))
-	if coins > 0:
-		CoinService.AddCoins(coins)
-	var award_item: String = str(cut.get("award_item", ""))
-	if award_item != "":
-		var award_data: Dictionary = InventoryService.GetItemData(award_item)
-		if not award_data.is_empty():
-			InventoryService.AddItem(award_item)
-			_show_save_toast("✦  RECEIVED: %s" % str(award_data.get("name", award_item)).to_upper())
-
-	if GameState.IsLastRound():
-		_transition_to_end_screen()
-		return
-	await _transition_swap(
-		func() -> void:
+		"checkpoint":
+			if just_resumed:
+				_advance_from_checkpoint()  # resumed onto it → don't re-show its banner
+			else:
+				_show_checkpoint_gate()
+		"loop_start":
+			# The top marker of a Loop pair — a no-media passthrough. Advance into the body it precedes.
 			GameState.Advance()
 			_load_current_item()
-	)
+		"loop_end":
+			# The bottom marker: bump/evaluate the loop, then replay from the paired Start or take the exit.
+			GameState.ResolveLoop()
+			_load_current_item()
+		_:
+			_load_current_round()
 
 
 # Appends the current node to the run's route trail (end-screen route recap).
@@ -533,6 +473,7 @@ func _show_storyboard_screen(sb_data: Dictionary) -> void:
 	_start_storyboard_filler()
 	var storyboard: Control = StoryboardScene.instantiate()
 	storyboard.show_map_button = _map_enabled
+	storyboard.auto_advance_secs = _auto_advance_storyboard_secs if _auto_advance_enabled else 0
 	storyboard.completed.connect(_on_storyboard_completed)
 	storyboard.map_requested.connect(_open_map_viewer)
 	add_child(storyboard)
@@ -555,12 +496,12 @@ func _on_storyboard_completed(coins: int) -> void:
 	FunscriptPlayer.StopFiller()
 	_is_overlay_open = false
 	_overlay_map_allowed = false
-	if coins > 0:
-		CoinService.AddCoins(coins)
+	# Bestow the storyboard's counters at completion — the pop now fires as the overlay closes, so it
+	# isn't buried under it the way an on-arrival pop was.
+	GameState.ApplyCurrentNodeCounters()
+	_grant_coins(coins)
 	# Optional item reward — read before Advance() moves off the storyboard.
-	var item_id: String = str(GameState.CurrentStoryboard().get("item", ""))
-	if item_id != "":
-		InventoryService.AddItem(item_id)
+	_grant_item(str(GameState.CurrentStoryboard().get("item", "")))
 	GameState.Advance()
 	if GameState.IsSequenceDone():
 		_transition_to_end_screen()
@@ -582,6 +523,8 @@ func _show_shop_screen(shop_data: Dictionary) -> void:
 	_set_cursor_hidden(false)
 	var shop: Control = ShopScene.instantiate()
 	shop.show_map_button = _map_enabled
+	# Auto-advance also applies to shops (reuses the fork-decision duration — both are linger surfaces).
+	shop.auto_advance_secs = _auto_advance_fork_secs if _auto_advance_enabled else 0
 	shop.closed.connect(_on_shop_closed)
 	shop.map_requested.connect(_open_map_viewer)
 	add_child(shop)
@@ -593,6 +536,7 @@ func _show_shop_screen(shop_data: Dictionary) -> void:
 func _on_shop_closed() -> void:
 	_is_overlay_open = false
 	_overlay_map_allowed = false
+	GameState.ApplyCurrentNodeCounters()  # the shop's own set_counters, bestowed on close
 	GameState.Advance()
 	if GameState.IsSequenceDone():
 		_transition_to_end_screen()
@@ -614,6 +558,8 @@ func _show_fork_screen(fork_data: Dictionary) -> void:
 	_set_cursor_hidden(false)
 	var fork_screen = ForkScene.instantiate()
 	fork_screen.show_map_button = _map_enabled
+	fork_screen.show_round_counts = _show_fork_counts
+	fork_screen.auto_advance_secs = _auto_advance_fork_secs if _auto_advance_enabled else 0
 	fork_screen.path_chosen.connect(_on_fork_path_chosen)
 	fork_screen.map_requested.connect(_open_map_viewer)
 	add_child(fork_screen)
@@ -672,7 +618,26 @@ func _conditional_path(fork_data: Dictionary) -> int:
 			0,
 			Callable(GameState, "HasFlag")
 		)
-	var value: int = ScoreService.LastRoundScore if metric == "score" else CoinService.Balance
+	# Counter: each choice gates on its OWN counter (paths carry the effective cond_counter, already
+	# resolved against the fork default in GameState.ParseFork), so it can't collapse to one scalar
+	# like score/coins — ForkResolver reads each path's counter through this lookup instead.
+	if metric == "counter":
+		var counter_of: Callable = func(cn: String) -> int: return GameState.CounterValue(cn)
+		return ForkResolver.conditional_path(
+			fork_data.get("paths", []),
+			metric,
+			int(fork_data.get("default_path", 0)),
+			0,
+			Callable(InventoryService, "OwnsItem"),
+			counter_of
+		)
+	# score / coins resolve by threshold against one scalar — only the source of the value differs.
+	var value: int
+	match metric:
+		"coins":
+			value = CoinService.Balance
+		_:
+			value = ScoreService.LastRoundScore
 	return ForkResolver.conditional_path(
 		fork_data.get("paths", []),
 		metric,
@@ -693,6 +658,9 @@ func _conditional_caption(fork_data: Dictionary) -> String:
 			return "BY WHAT YOU CARRY…"
 		"flag":
 			return "BY WHERE YOU'VE BEEN…"
+		"counter":
+			var cn: String = str(fork_data.get("cond_counter", "")).strip_edges()
+			return ("BY YOUR %s…" % cn.to_upper()) if cn != "" else "BY THE TALLY…"
 	return "FATE DECIDES…"
 
 
@@ -709,13 +677,16 @@ func _on_fork_path_chosen(path_index: int) -> void:
 
 
 func _load_current_round() -> void:
-	_cutscene_playing = false
-	_hide_cutscene_skip()
 	var round: Dictionary = GameState.CurrentRound().duplicate(true)
 	if round.is_empty():
 		push_error("GameLoop: GameState has no current round — returning to menu")
 		_go_to_menu()
 		return
+	# Prewarm the Handy's HSP session now (script-agnostic /hsp/setup), so its round-trip overlaps the intro
+	# card / mystery reveal / video load ahead — leaving only the anchored /hsp/play at the actual round
+	# start. Handy WiFi only; fire-and-forget.
+	if _handy_stroke_selected():
+		HandyService.prewarm()
 	# Migrate any legacy cursed/blessed round to the generic effect schema here, once,
 	# so every downstream reader (label, enter mode, reveal card) sees generic fields.
 	round.merge(JourneyData.normalize_effect_round(round), true)
@@ -747,20 +718,8 @@ func _load_current_round() -> void:
 	else:
 		_apply_round_label(round)
 
-	# Calendar cooldown rounds force Save & Quit (no Continue). Wins over a
-	# voluntary checkpoint on the same round. Otherwise author checkpoints offer
-	# Save & Quit or Continue before playback — honoured on every round type,
-	# bosses included (the banner precedes the boss intro).
-	var cooldown_days: int = int(round.get("cooldown_days", 0))
-	if cooldown_days > 0:
-		_pending_cooldown_until = JourneySaveService.stamp_cooldown_days(
-			GameState.Journey.get("folder_name", ""), cooldown_days
-		)
-		_show_cooldown_banner(round, cooldown_days)
-	elif round.get("is_checkpoint", false):
-		_show_checkpoint_banner(round, func() -> void: _start_round_after_gates(round))
-	else:
-		_start_round_after_gates(round)
+	# Checkpoints are their own node now (see _show_checkpoint_gate) — a round just starts.
+	_start_round_after_gates(round)
 
 
 # Starts a round once any checkpoint gate is cleared: a pool round plays its mystery reveal
@@ -768,14 +727,19 @@ func _load_current_round() -> void:
 # then boss rounds telegraph with their intro card (playback waits for BEGIN); everything
 # else begins now.
 func _start_round_after_gates(round: Dictionary) -> void:
+	var enc_root: Control = null
 	if _pending_encounter_card:
 		_pending_encounter_card = false
-		await _show_encounter_card()
+		enc_root = await _show_encounter_card()
 		_apply_round_label(round)  # reveal the real (possibly BOSS) label now the card is done
 	if _is_boss_round:
+		# A rolled boss: fade the encounter card out, THEN telegraph with the boss intro card.
+		if enc_root != null:
+			await _fade_and_free_overlay(enc_root)
 		_show_boss_intro(round)
 	else:
-		_begin_round(round)
+		# Non-boss: keep the encounter card up over the video load, then fade it to reveal the round.
+		_begin_round(round, enc_root)
 
 
 # Sets the HUD round label from the round's resolved type. Split out so a pool round can defer
@@ -799,7 +763,8 @@ func _apply_round_label(round: Dictionary) -> void:
 
 # Loads the round's scripts + video and starts playback. For boss rounds this
 # runs after the intro card's BEGIN; for normal rounds, immediately.
-func _begin_round(round: Dictionary) -> void:
+func _begin_round(round: Dictionary, cover: Control = null) -> void:
+	_round_ended_guard = false  # a fresh round can end once again
 	ScoreService.StartRound()
 	# Clear any pause left by a pre-round gate (boss intro / checkpoint banner) —
 	# _video.play() below doesn't reset the paused flag on its own.
@@ -810,27 +775,55 @@ func _begin_round(round: Dictionary) -> void:
 	# for the play log.
 	_active_round_length_ms = int(round.get("length_ms", 0))
 
+	if bool(round.get("is_warmup", false)):
+		_show_warmup_skip_button()
+	# FINISH ("I came") is available during every round when the journey opts in.
+	_show_finish_button()
+
 	var fs_path: String = round.get("funscript_path", "")
+	# Prefer a sibling ".alpha" funscript for the main (L0 / position) channel when it exists —
+	# that's the true alpha of an alpha/beta pair. Fall back to the plain funscript otherwise.
 	if fs_path != "":
+		var a_dir: String = fs_path.get_base_dir()
+		var a_base: String = ImportScanner.strip_script_suffix(fs_path)
+		var a_ext: String = fs_path.get_extension()
+		for a_cand: String in [
+			"%s/%s.alpha.%s" % [a_dir, a_base, a_ext],
+			"%s/%s_alpha.%s" % [a_dir, a_base, a_ext],
+		]:
+			if FileAccess.file_exists(a_cand):
+				fs_path = a_cand
+				break
 		FunscriptPlayer.LoadFunscript(fs_path)
 		ScoreService.SetRoundActions(FunscriptPlayer.ActionCount)
 		if _beat_bar != null:
 			_beat_bar.set_beats(FunscriptPlayer.GetBeats())
-	# The Handy (direct WiFi) plays the script itself — fire-and-forget the
-	# upload/setup/synced-play chain; scoring and the beat bar stay on
-	# FunscriptPlayer's clock regardless.
-	_handy_begin_round(fs_path)
+	_update_round_timer(true)  # this round's full length, before the first frame ticks
 
-	# Load secondary axis scripts (serial + dual Restim kits). Clear first so
-	# stale axes from a prior round are never replayed.
+	# Auto-detect sibling scripts sitting next to the main funscript on disk — e.g. a per-round
+	# folder holding <name>.beta / <name>.carrier_frequency next to <name>.funscript. This lets
+	# EXISTING journeys (whose journey.json has empty AxisScripts) drive restim without a
+	# re-import. Explicit journey.json entries always win over an auto-detected sibling.
+	var axis_scripts: Dictionary = (round.get("axis_scripts", {}) as Dictionary).duplicate()
+	var estim_scripts: Dictionary = (round.get("estim_scripts", {}) as Dictionary).duplicate()
+	if fs_path != "":
+		var sib: Dictionary = ImportScanner.find_sibling_scripts(
+			fs_path.get_base_dir(), ImportScanner.strip_script_suffix(fs_path)
+		)
+		for ax: String in sib["axis"]:
+			if not axis_scripts.has(ax):
+				axis_scripts[ax] = sib["axis"][ax]
+		for eax: String in sib["estim"]:
+			if not estim_scripts.has(eax):
+				estim_scripts[eax] = sib["estim"][eax]
+
+	# Load secondary axis scripts (serial + restim motion axes). Clear first so stale axes
+	# from a prior round are never replayed.
 	FunscriptPlayer.ClearAxisScripts()
-	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(round)
-	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-		var slot_map: Dictionary = ras[slot] as Dictionary
-		for axis: String in slot_map:
-			var ax_path: String = str(slot_map[axis])
-			if ax_path != "":
-				FunscriptPlayer.LoadRestimAxisScript(slot, axis, ax_path)
+	for axis: String in axis_scripts:
+		var ax_path: String = axis_scripts[axis]
+		if ax_path != "":
+			FunscriptPlayer.LoadAxisScript(axis, ax_path)
 
 	# Load vibrator-channel scripts (Buttplug vibrators only; ignored for linear
 	# devices and serial output). Clear first so stale channels from a prior round
@@ -842,6 +835,14 @@ func _begin_round(round: Dictionary) -> void:
 		if vib_path != "":
 			var channel: int = 0 if ch_key == "vib1" else 1
 			FunscriptPlayer.LoadVibScript(channel, vib_path)
+
+	# Load restim (E-Stim Full) parameter scripts (restim output only; ignored when
+	# restim isn't connected). Clear first so a prior round's params aren't replayed.
+	FunscriptPlayer.ClearRestimScripts()
+	for eax: String in estim_scripts:
+		var estim_path: String = estim_scripts[eax]
+		if estim_path != "":
+			FunscriptPlayer.LoadRestimScript(eax, estim_path)
 
 	# Boss / effect setup must run before _load_video → FunscriptPlayer.Play() so
 	# the forced modifier is already active on the first dispatched stroke. Each
@@ -855,8 +856,9 @@ func _begin_round(round: Dictionary) -> void:
 	# Effect rounds get an animated intro card before playback starts (auto-advances; any
 	# cleanse choice stays in-round) — whenever the author left it on, even with no effects
 	# (a pure-visual round shows just the header). Normal/boss rounds never show it.
+	var reveal_root: Control = null
 	if _is_effect_round and bool(round.get("show_reveal", true)):
-		await _show_reveal_card(round)
+		reveal_root = await _show_reveal_card(round)
 
 	# Prefer the explicit video_path (set by the scanner from VideoPath, or by
 	# JourneyData._round_video); fall back to a folder-scan for pre-VideoPath
@@ -865,7 +867,22 @@ func _begin_round(round: Dictionary) -> void:
 	if video_path == "":
 		video_path = _find_video(round.get("folder", ""))
 	_load_video(video_path)
-	_setup_release(round)
+
+	# The Handy (direct WiFi) plays the script itself — fire-and-forget the setup/synced-play chain. MUST run
+	# AFTER _load_video (so the anchor reads THIS clip's position, not the previous round's stale one) and
+	# after the boss/effect setup above (so forced modifiers are baked into the streamed script). The old
+	# slow per-round handshake used to defer this by accident; now that ensure_ready is instant, the order is
+	# explicit. Scoring + beat bar stay on FunscriptPlayer's clock regardless.
+	#
+	_handy_begin_round(fs_path)
+
+	# The effect reveal card held over the (opaque) video load; now the round is playing, fade it out so
+	# it reveals the round rather than hard-cutting from black.
+	if reveal_root != null and is_instance_valid(reveal_root):
+		_fade_and_free_overlay(reveal_root)
+	# A pool encounter card (passed in as the cover) held over the same load — fade it out to reveal too.
+	if cover != null and is_instance_valid(cover):
+		_fade_and_free_overlay(cover)
 
 
 # ---------------------------------------------------------------------------
@@ -873,26 +890,33 @@ func _begin_round(round: Dictionary) -> void:
 # ---------------------------------------------------------------------------
 
 
-# CHECKPOINT REACHED banner shown at the start of any round/cutscene the author
-# marked as a checkpoint. Two buttons: Save & Quit (writes a save + returns to
-# catalogue) or Continue (`on_continue` starts the node normally).
-# Pattern mirrors _show_boss_intro since both gate start on user input.
-func _show_checkpoint_banner(node_data: Dictionary, on_continue: Callable) -> void:
+# CHECKPOINT REACHED banner shown at the start of any round the author marked
+# as a checkpoint. Two buttons: Save & Quit (writes a save + returns to
+# catalogue) or Continue (dismisses the banner and starts the round normally).
+# Pattern mirrors _show_boss_intro since both gate round start on user input.
+# The checkpoint node's gate: a Save & Quit / Continue banner reached BETWEEN rounds (its own
+# node now, not a round flag). Continue advances to the next item; Save & Quit writes a one-time
+# save at this node and exits. Dispatched from _load_current_item.
+func _show_checkpoint_gate() -> void:
+	var data: Dictionary = GameState.CurrentItem().get("data", {})
 	_is_overlay_open = true  # suppress gameplay hotkeys while the banner is up
 	_halt_playback_for_gate()  # freeze any leftover playback so the score can't tick
 
 	var parts: Dictionary = UITheme.build_centered_modal(
-		"◆  CHECKPOINT REACHED  ◆", UITheme.AMBER, Vector2i(620, 320)
+		"◆  CHECKPOINT REACHED  ◆", UITheme.AMBER, Vector2i(620, 320), 1.0  # opaque — sits over the video
 	)
 	var modal: Control = parts["modal"]
 	var vbox: VBoxContainer = parts["vbox"]
 	vbox.add_theme_constant_override("separation", 18)
 
-	var subtitle: Label = Label.new()
-	subtitle.text = (node_data.get("name", "") as String).to_upper()
-	UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
-	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(subtitle)
+	# Optional author label. Omitted from the card when blank rather than showing an empty line.
+	var label: String = str(data.get("name", "")).strip_edges()
+	if label != "":
+		var subtitle: Label = Label.new()
+		subtitle.text = label.to_upper()
+		UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
+		subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vbox.add_child(subtitle)
 
 	var hint: Label = Label.new()
 	hint.text = "You've reached a save point. Save & Quit to resume from here later, or continue playing now. The save is one-time — used up when you resume."
@@ -926,97 +950,40 @@ func _show_checkpoint_banner(node_data: Dictionary, on_continue: Callable) -> vo
 		func() -> void:
 			modal.queue_free()
 			_is_overlay_open = false
-			if on_continue.is_valid():
-				on_continue.call()
+			_apply_checkpoint_continue_reward(data)  # reward for skipping the break (not on resume)
+			_advance_from_checkpoint()
 	)
 	btn_row.add_child(continue_btn)
 
 	add_child(modal)
 
 
-# FORCE SAVE & QUIT banner for calendar cooldown (dedicated cooldown node, or
-# legacy round.cooldown_days > 0). No Continue in normal play — the player must
-# save out and wait for cooldown_until. Save advances past this gap first so
-# Resume lands on the next node (see _on_cooldown_save_and_quit) — otherwise
-# Resume would re-enter this node and lock out again forever.
-# Dev/QA: Ignore Cooldowns or Dev Cheats adds Continue (advance without quitting).
-func _show_cooldown_banner(data: Dictionary, days: int) -> void:
-	_is_overlay_open = true
-	_cooldown_banner_open = true
-	_halt_playback_for_gate()
-
-	var parts: Dictionary = UITheme.build_centered_modal(
-		"⏳  COOLDOWN  ⏳", UITheme.DANGER, Vector2i(620, 380)
-	)
-	var modal: Control = parts["modal"]
-	var vbox: VBoxContainer = parts["vbox"]
-	vbox.add_theme_constant_override("separation", 18)
-
-	var subtitle: Label = Label.new()
-	subtitle.text = (data.get("name", "") as String).to_upper()
-	UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
-	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(subtitle)
-
-	var custom_msg: String = str(data.get("message", "")).strip_edges()
-	var hint: Label = Label.new()
-	if custom_msg != "":
-		hint.text = custom_msg
-	else:
-		hint.text = (
-			(
-				"This starts a %d-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
-				% days
-			)
-			if days != 1
-			else "This starts a 1-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
-		)
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	UITheme.style_label(hint, UITheme.PURPLE_MID, 12, false)
-	vbox.add_child(hint)
-
-	var btn_row: HBoxContainer = HBoxContainer.new()
-	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	btn_row.add_theme_constant_override("separation", 16)
-	vbox.add_child(btn_row)
-
-	var save_btn: Button = Button.new()
-	save_btn.text = "💾  SAVE & QUIT"
-	save_btn.custom_minimum_size = Vector2(200, 0)
-	UITheme.style_button(save_btn, UITheme.AMBER)
-	save_btn.pressed.connect(
-		func() -> void:
-			_dismiss_cooldown_banner()
-			_on_cooldown_save_and_quit()
-	)
-	btn_row.add_child(save_btn)
-
-	if (
-		SettingsService.get_ignore_journey_cooldowns()
-		or SettingsService.get_dev_cheats_enabled()
-	):
-		var cont_btn: Button = Button.new()
-		cont_btn.text = "▶  CONTINUE (DEV)"
-		cont_btn.custom_minimum_size = Vector2(200, 0)
-		UITheme.style_button(cont_btn, UITheme.PURPLE_BRIGHT)
-		cont_btn.pressed.connect(
-			func() -> void:
-				_dismiss_cooldown_banner()
-				_dev_skip_cooldown_gap()
-		)
-		btn_row.add_child(cont_btn)
-
-	add_child(modal)
-	_cooldown_modal = modal
+# Grants a checkpoint's ON-CONTINUE reward — only when the player skips the save and keeps going (the
+# interactive Continue button), never on a resume (which re-enters the checkpoint after taking the break).
+# Lets an author reward pressing on: an item, a counter bump, and/or a flag, then gate a secret path or
+# ending on it (e.g. "collected every safe word → bonus finale"). No-op when nothing is configured.
+func _apply_checkpoint_continue_reward(data: Dictionary) -> void:
+	var reward: Dictionary = data.get("continue_reward", {})
+	if reward.is_empty():
+		return
+	_grant_item(str(reward.get("award_item", "")))  # guards "" internally, pops "✦ RECEIVED"
+	GameState.ApplyItemFlagsCounters(reward)  # reward carries set_counters / set_flags in the node shape
 
 
-func _dismiss_cooldown_banner() -> void:
-	if is_instance_valid(_cooldown_modal):
-		_cooldown_modal.queue_free()
-	_cooldown_modal = null
-	_is_overlay_open = false
-	_cooldown_banner_open = false
+# Continue past a checkpoint node → advance to the next item (mirrors _on_shop_closed: a
+# content-less node that just moves the sequence forward).
+func _advance_from_checkpoint() -> void:
+	GameState.ApplyCurrentNodeCounters()  # a checkpoint's own set_counters (rare, but authoring allows it)
+	GameState.Advance()
+	if GameState.IsSequenceDone():
+		_transition_to_end_screen()
+		return
+	await _transition_swap(func() -> void: _load_current_item())
+
+
+# ---------------------------------------------------------------------------
+# Boss rounds
+# ---------------------------------------------------------------------------
 
 
 # Freezes playback while a pre-round modal (boss intro / checkpoint banner) is up.
@@ -1031,6 +998,19 @@ func _halt_playback_for_gate() -> void:
 
 # Telegraphed intro card. The round's scripts/video do not load and playback
 # does not start until the player clicks BEGIN.
+# Fades a full-screen intro-card overlay out (over the round video now playing beneath it) and frees it —
+# the smooth exit once the round has started under the card, instead of a hard cut from black. Non-blocking.
+func _fade_and_free_overlay(node: Control, dur: float = 0.4) -> void:
+	if not is_instance_valid(node):
+		return
+	node.mouse_filter = Control.MOUSE_FILTER_IGNORE  # don't eat input while it fades
+	var t: Tween = create_tween()
+	t.tween_property(node, "modulate:a", 0.0, dur)
+	await t.finished
+	if is_instance_valid(node):
+		node.queue_free()
+
+
 func _show_boss_intro(round: Dictionary) -> void:
 	_is_overlay_open = true  # suppress gameplay hotkeys while the card is up
 	_halt_playback_for_gate()  # don't let leftover playback tick the score behind the card
@@ -1040,7 +1020,7 @@ func _show_boss_intro(round: Dictionary) -> void:
 	add_child(overlay)
 
 	var backdrop: ColorRect = ColorRect.new()
-	backdrop.color = Color(0, 0, 0, 0.92)
+	backdrop.color = Color(0, 0, 0, 1.0)  # opaque — don't bleed the previous round's frozen frame
 	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
 	overlay.add_child(backdrop)
 
@@ -1065,31 +1045,36 @@ func _show_boss_intro(round: Dictionary) -> void:
 
 	var col: VBoxContainer = VBoxContainer.new()
 	col.add_theme_constant_override("separation", 16)
+	col.custom_minimum_size = Vector2(440, 0)  # bounds scaled text so it wraps, not overflows
 	panel.add_child(col)
 
 	var banner: Label = Label.new()
 	banner.text = "⚔   B O S S   R O U N D   ⚔"
 	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	banner.add_theme_color_override("font_color", UITheme.DANGER)
-	banner.add_theme_font_size_override("font_size", 28)
+	banner.add_theme_font_size_override("font_size", UITheme.story_font_size(28))
 	col.add_child(banner)
 
 	var boss_image: String = round.get("boss_image", "")
 	if boss_image != "":
-		var img: Image = JourneyData.load_image_smart(boss_image)
-		if img != null:
-			var tex: TextureRect = TextureRect.new()
-			tex.texture = ImageTexture.create_from_image(img)
-			tex.custom_minimum_size = Vector2(380, 240)
-			tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			col.add_child(tex)
+		# May be a still or a baked animation (JourneyImage decides from the path); same
+		# expand/stretch either way, so an animated boss portrait frames exactly like a still one.
+		var img_ctl: JourneyImage = JourneyImage.new()
+		img_ctl.custom_minimum_size = Vector2(380, 240)
+		col.add_child(img_ctl)
+		var boss_fit: int = JourneyImage.stretch_for_fit(
+			str(round.get("image_fit", "")), TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		)
+		if not img_ctl.show_path(boss_image, TextureRect.EXPAND_IGNORE_SIZE, boss_fit):
+			img_ctl.queue_free()  # nothing to show — don't leave a 380x240 hole in the card
 
 	var name_lbl: Label = Label.new()
 	name_lbl.text = (round.get("name", "") as String).to_upper()
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	name_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
-	name_lbl.add_theme_font_size_override("font_size", 22)
+	name_lbl.add_theme_font_size_override("font_size", UITheme.story_font_size(22))
 	col.add_child(name_lbl)
 
 	var tagline: String = round.get("boss_tagline", "")
@@ -1100,14 +1085,34 @@ func _show_boss_intro(round: Dictionary) -> void:
 		tag_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		tag_lbl.custom_minimum_size = Vector2(440, 0)
 		tag_lbl.add_theme_color_override("font_color", UITheme.PURPLE_BRIGHT)
-		tag_lbl.add_theme_font_size_override("font_size", 14)
+		tag_lbl.add_theme_font_size_override("font_size", UITheme.story_font_size(14))
 		col.add_child(tag_lbl)
+
+	# Name the gameplay effects the boss carries so the player isn't blindsided — the boss
+	# equivalent of the effect round's reveal card, folded onto the intro. Each coloured by
+	# valence (boon green, hindrance red). Empty for a boss with only raw modifiers. Resolved
+	# fresh here because the card is built before _enter_boss_mode applies them.
+	var boss_fx: Array = _resolve_gameplay_effects(
+		round, JourneyData.catalog_subset(JourneyData.gameplay_effects(), round.get("effects", []))
+	)
+	for fx: Dictionary in boss_fx:
+		var fx_lbl: Label = Label.new()
+		fx_lbl.text = (fx.get("name", "") as String).to_upper()
+		fx_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		fx_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		var benefit: bool = JourneyData.effect_is_benefit(str(fx.get("_ref", fx.get("name", ""))))
+		fx_lbl.add_theme_color_override(
+			"font_color", UITheme.SUCCESS if benefit else UITheme.ERROR_SOFT
+		)
+		fx_lbl.add_theme_font_size_override("font_size", UITheme.story_font_size(14))
+		col.add_child(fx_lbl)
 
 	var rules_lbl: Label = Label.new()
 	rules_lbl.text = "NO ITEMS  ·  FORCED MODIFIERS"
 	rules_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rules_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	rules_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
-	rules_lbl.add_theme_font_size_override("font_size", 11)
+	rules_lbl.add_theme_font_size_override("font_size", UITheme.story_font_size(11))
 	col.add_child(rules_lbl)
 
 	var begin_btn: Button = Button.new()
@@ -1117,15 +1122,17 @@ func _show_boss_intro(round: Dictionary) -> void:
 	col.add_child(begin_btn)
 	begin_btn.pressed.connect(
 		func() -> void:
-			overlay.queue_free()
 			_is_overlay_open = false
-			_begin_round(round)
+			_begin_round(round)  # loads + plays the round's video under the card
+			_fade_and_free_overlay(overlay)  # then fade the black card out, revealing it
 	)
 
 
 # Clean slate, forced modifiers, item lockout, red frame on.
 func _enter_boss_mode(round: Dictionary) -> void:
-	# Clean slate — drop any effects the player activated before the boss.
+	# Clean slate — drop any effects the player activated before the boss. Clear this round's sensory
+	# list first so the ActiveEffectsChanged from ClearActiveEffects reconciles against an empty set.
+	_round_sensory.clear()
 	InventoryService.ClearActiveEffects()
 
 	# Inject the designer's forced modifiers as boss effects.
@@ -1135,14 +1142,25 @@ func _enter_boss_mode(round: Dictionary) -> void:
 	if not boss_effects.is_empty():
 		InventoryService.AddBossEffects(boss_effects)
 
+	# Forced gameplay effects (hindrances/boons) — a boss can carry the full effect catalog on
+	# top of its raw stroke modifiers. All ticked effects apply: forced, no roll, no cleanse.
+	_apply_gameplay_effects(
+		round, JourneyData.catalog_subset(JourneyData.gameplay_effects(), round.get("effects", []))
+	)
+
 	# Optional non-gameplay (visual/audio) modifiers, explicitly authored — same hex
 	# pipeline as a cursed round, but forced (no cleanse). Each surfaces as a red
 	# HUD chip and is torn down by _clear_curse_hexes at round end (_exit_boss_mode).
-	for roll: Dictionary in _catalog_subset(JourneyData.SENSORY_CATALOG, round.get("sensory", [])):
+	for roll: Dictionary in JourneyData.catalog_subset(
+		JourneyData.SENSORY_CATALOG, round.get("sensory", [])
+	):
 		var hx: Dictionary = _make_boss_effect(roll)
 		hx["name"] = roll.get("name", hx["name"])
 		InventoryService.AddBossEffects([hx])
 		_apply_hex(roll, SensoryFX.intensity_for(round, roll))
+
+	_reconcile_sensory()  # apply the round's collected sensory (plus any surviving item sensory)
+	_reconcile_hud_hide()  # round Fog (or a surviving item Fog) → HUD hidden
 
 	# Item use is disabled for the whole boss round.
 	if is_instance_valid(_inventory_panel):
@@ -1161,6 +1179,7 @@ func _enter_boss_mode(round: Dictionary) -> void:
 func _enter_effect_mode(round: Dictionary) -> void:
 	_effect_resolvable = bool(round.get("resolvable", false))
 	_effect_cleanse_cost = int(round.get("cleanse_cost", CLEANSE_COST_DEFAULT))
+	_round_sensory.clear()  # rebuilt below via _apply_hex; item sensory (if any) is folded in on reconcile
 
 	var selected: Array = round.get("effects", [])
 	var random_mode: bool = bool(round.get("effect_random", true))
@@ -1172,38 +1191,23 @@ func _enter_effect_mode(round: Dictionary) -> void:
 	var to_apply: Array = []
 	if not selected.is_empty():
 		if random_mode:
-			var pool: Array = _catalog_subset(JourneyData.gameplay_effects(), selected)
+			var pool: Array = JourneyData.catalog_subset(JourneyData.gameplay_effects(), selected)
 			if sensory_in_pool:
 				pool = pool + JourneyData.SENSORY_CATALOG
 			to_apply = _roll_from(pool)
 		else:
-			to_apply = _catalog_subset(JourneyData.gameplay_effects(), selected)
+			to_apply = JourneyData.catalog_subset(JourneyData.gameplay_effects(), selected)
 
 	# Ticked non-gameplay (sensory) modifiers always apply (deduped against the roll).
-	for s: Dictionary in _catalog_subset(JourneyData.SENSORY_CATALOG, round.get("sensory", [])):
+	for s: Dictionary in JourneyData.catalog_subset(
+		JourneyData.SENSORY_CATALOG, round.get("sensory", [])
+	):
 		if s not in to_apply:
 			to_apply.append(s)
 
-	# Fold each catalog entry together with the round's per-effect override (tuned magnitude
-	# + custom name/flavor). Keeps `_ref` = the original name so valence stays correct after
-	# a rename. Sensory entries pass through unchanged (no gameplay overrides apply to them).
-	var overrides: Dictionary = round.get("effect_overrides", {})
-	var resolved: Array = []
-	for e: Dictionary in to_apply:
-		var r: Dictionary = JourneyData.resolved_effect(str(e.get("name", "")), overrides)
-		if not r.is_empty():
-			resolved.append(r)
-	to_apply = resolved
-
-	var applied: Array = []
-	for roll: Dictionary in to_apply:
-		var fx: Dictionary = _make_boss_effect(roll)
-		fx["name"] = roll.get("name", fx["name"])
-		if JourneyData.effect_is_benefit(str(roll.get("_ref", roll.get("name", "")))):
-			fx["benefit"] = true  # green chip; hindrances/sensory stay red
-		InventoryService.AddBossEffects([fx])
-		_apply_effect(roll, round)
-		applied.append(roll)
+	to_apply = _apply_gameplay_effects(round, to_apply)
+	_reconcile_sensory()  # apply the round's collected sensory alongside any active item sensory
+	_reconcile_hud_hide()  # round Fog (or a surviving item Fog) → HUD hidden
 
 	# Optional coloured border (author-toggled); the resolvable cleanse layer when enabled.
 	var v: Dictionary = _effect_visuals(round)
@@ -1211,7 +1215,36 @@ func _enter_effect_mode(round: Dictionary) -> void:
 	if _effect_resolvable:
 		_effect_resolved = false
 		_show_cleanse_button()
-	_reveal_effects = _build_reveal_effects(applied)
+	_reveal_effects = _build_reveal_effects(to_apply)
+
+
+# Resolves a round's ticked catalog entries against its per-effect overrides (tuned magnitude +
+# custom name/flavor) — pure, no side effects. `_ref` is preserved so valence survives a rename;
+# sensory entries pass through unchanged. The boss card resolves for DISPLAY before the round's
+# effects are applied, so resolution is split out from application.
+func _resolve_gameplay_effects(round: Dictionary, entries: Array) -> Array:
+	var overrides: Dictionary = round.get("effect_overrides", {})
+	var resolved: Array = []
+	for e: Dictionary in entries:
+		var r: Dictionary = JourneyData.resolved_effect(str(e.get("name", "")), overrides)
+		if not r.is_empty():
+			resolved.append(r)
+	return resolved
+
+
+# Applies already-resolved effects as boss effects: into the shared effect pipeline, chip
+# coloured by valence, then its GameLoop-side behaviour. Shared by boss and effect rounds — a
+# boss now surfaces gameplay effects exactly as an effect round does.
+func _apply_gameplay_effects(round: Dictionary, entries: Array) -> Array:
+	var resolved: Array = _resolve_gameplay_effects(round, entries)
+	for roll: Dictionary in resolved:
+		var fx: Dictionary = _make_boss_effect(roll)
+		fx["name"] = roll.get("name", fx["name"])
+		if JourneyData.effect_is_benefit(str(roll.get("_ref", roll.get("name", "")))):
+			fx["benefit"] = true  # green chip; hindrances/sensory stay red
+		InventoryService.AddBossEffects([fx])
+		_apply_effect(roll, round)
+	return resolved
 
 
 # Dispatches an effect to its GameLoop-side behaviour. Stroke/economy modifiers
@@ -1230,13 +1263,9 @@ func _apply_effect(roll: Dictionary, round: Dictionary) -> void:
 func _apply_boon(roll: Dictionary, round: Dictionary) -> void:
 	match String(roll.get("kind", "")):
 		"gift":
-			var gift: String = str(round.get("gift_item", ""))
-			if gift != "":
-				InventoryService.AddItem(gift)
+			_grant_item(str(round.get("gift_item", "")))
 		"interest":
-			var gain: int = roundi(CoinService.Balance * float(roll.get("pct", INTEREST_PCT)))
-			if gain > 0:
-				CoinService.AddCoins(gain)
+			_grant_coins(roundi(CoinService.Balance * float(roll.get("pct", INTEREST_PCT))))
 		"lingering":
 			_effect_lingering = true
 			InventoryService.SetPaused(true)  # freeze the effect clock for the round
@@ -1268,7 +1297,7 @@ func _nonblank_str(value: String, fallback: String) -> String:
 # Animated pre-round reveal card naming the effect(s) and what they do. Fades + pops
 # in, holds, fades out — then the round's video plays. Awaited by _begin_round so
 # playback waits for it. Header / icon / accent come from the round's effect visuals.
-func _show_reveal_card(round: Dictionary) -> void:
+func _show_reveal_card(round: Dictionary) -> Control:
 	var v: Dictionary = _effect_visuals(round)
 	var accent: Color = v["accent"]
 
@@ -1279,7 +1308,7 @@ func _show_reveal_card(round: Dictionary) -> void:
 
 	var backdrop: ColorRect = ColorRect.new()
 	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
-	backdrop.color = Color(0, 0, 0, 0.6)
+	backdrop.color = Color(0, 0, 0, 1.0)  # opaque — don't bleed the previous round's frozen frame
 	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(backdrop)
 
@@ -1306,25 +1335,27 @@ func _show_reveal_card(round: Dictionary) -> void:
 	var header: Label = Label.new()
 	header.text = "%s  %s" % [v["icon"], v["header"]]
 	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	header.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	header.add_theme_color_override("font_color", accent)
-	header.add_theme_font_size_override("font_size", 34)
+	header.add_theme_font_size_override("font_size", UITheme.story_font_size(34))
 	col.add_child(header)
 
 	for fx: Dictionary in _reveal_effects:
 		var name_lbl: Label = Label.new()
 		name_lbl.text = (fx.get("name", "") as String).to_upper()
 		name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		name_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		name_lbl.add_theme_color_override(
 			"font_color", UITheme.SUCCESS if fx.get("benefit", false) else UITheme.ERROR_SOFT
 		)
-		name_lbl.add_theme_font_size_override("font_size", 20)
+		name_lbl.add_theme_font_size_override("font_size", UITheme.story_font_size(20))
 		col.add_child(name_lbl)
 		var desc_lbl: Label = Label.new()
 		desc_lbl.text = fx.get("desc", "")
 		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		desc_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
-		desc_lbl.add_theme_font_size_override("font_size", 13)
+		desc_lbl.add_theme_font_size_override("font_size", UITheme.story_font_size(13))
 		col.add_child(desc_lbl)
 
 	# Animate: fade + pop in, hold, fade out.
@@ -1340,11 +1371,10 @@ func _show_reveal_card(round: Dictionary) -> void:
 	await tin.finished
 	await get_tree().create_timer(REVEAL_HOLD_SECS).timeout
 	if not is_inside_tree():
-		return
-	var tout: Tween = create_tween()
-	tout.tween_property(root, "modulate:a", 0.0, 0.3)
-	await tout.finished
-	root.queue_free()
+		return null
+	# Leave the card up and hand it back — the caller loads the video, then fades this out over it so the
+	# card reveals the round instead of a hard cut to black.
+	return root
 
 
 # Pool round: weighted-pick one encounter entry and swap its resolved media into the
@@ -1354,16 +1384,24 @@ func _resolve_pool_round(round: Dictionary) -> void:
 	var entries: Array = round.get("pool_entries", [])
 	if entries.is_empty():
 		return
-	var weights: Array = JourneyData.pool_entry_weights(entries)
+	# No-repeat (opt-in): drop entries whose clip already played this run so two copies of the pool
+	# don't show the same video. Falls back to the full set once every entry has been drawn.
+	var no_repeat: bool = bool(round.get("no_repeat", false))
+	var weights: Array = (
+		JourneyData.pool_draw_weights(entries, GameState.PlayedPoolClips())
+		if no_repeat
+		else JourneyData.pool_entry_weights(entries)
+	)
 	var total_w: int = 0
 	for w: int in weights:
 		total_w += w
 	var idx: int = ForkResolver.weighted_pick(weights, randi() % maxi(1, total_w))
 	var e: Dictionary = entries[idx]
+	if no_repeat:
+		GameState.MarkPoolClipPlayed(str(e.get("video_path", "")))
 	round["video_path"] = str(e.get("video_path", ""))
 	round["funscript_path"] = str(e.get("funscript_path", ""))
 	round["axis_scripts"] = (e.get("axis_scripts", {}) as Dictionary).duplicate(true)
-	round["restim_axis_scripts"] = JourneyData.duplicate_restim_axis_scripts(e)
 	round["vib_scripts"] = (e.get("vib_scripts", {}) as Dictionary).duplicate(true)
 	# Carry the chosen entry's stats too, so round length + action count (HUD,
 	# no-video timer, and the end-screen recap) reflect what actually played.
@@ -1383,7 +1421,7 @@ func _resolve_pool_round(round: Dictionary) -> void:
 # The mystery "ENCOUNTER!" reveal for a pool round: slides in from the right, holds,
 # slides out to the left. Awaited by _begin_round before playback. Deliberately shows
 # no name — the video reveals which encounter it is.
-func _show_encounter_card() -> void:
+func _show_encounter_card() -> Control:
 	var accent: Color = UITheme.MAGENTA
 
 	var root: Control = Control.new()
@@ -1393,7 +1431,7 @@ func _show_encounter_card() -> void:
 
 	var backdrop: ColorRect = ColorRect.new()
 	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
-	backdrop.color = Color(0, 0, 0, 0.6)
+	backdrop.color = Color(0, 0, 0, 1.0)  # opaque — don't bleed the previous round's frozen frame
 	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(backdrop)
 
@@ -1427,12 +1465,10 @@ func _show_encounter_card() -> void:
 	await tin.finished
 	await get_tree().create_timer(ENCOUNTER_HOLD_SECS).timeout
 	if not is_inside_tree():
-		return
-	var tout: Tween = create_tween().set_parallel(true)
-	tout.tween_property(root, "modulate:a", 0.0, 0.3)
-	tout.tween_property(panel, "position", target - off, 0.3).set_ease(Tween.EASE_IN)
-	await tout.finished
-	root.queue_free()
+		return null
+	# Hand the card back up — the caller fades it out after the round starts (video reveal), or before the
+	# boss intro, instead of self-fading to black here.
+	return root
 
 
 # Slow drift on the effect-round frame — breathes rather than snaps. The colour is
@@ -1472,15 +1508,6 @@ func _roll_from(pool: Array) -> Array:
 	return shuffled.slice(0, count)
 
 
-# Entries of `catalog` whose name is in `names`, preserving catalog order.
-func _catalog_subset(catalog: Array, names: Array) -> Array:
-	var out: Array = []
-	for entry: Dictionary in catalog:
-		if entry.get("name", "") in names:
-			out.append(entry)
-	return out
-
-
 # Floating "cleanse" button shown during a cursed round — outside the HUD so a
 # Fog hex can't hide it. Pay the round's cleanse cost to lift the curse, or endure
 # to the end for the round's bonus.
@@ -1509,159 +1536,251 @@ func _show_cleanse_button() -> void:
 	_effect_cleanse_btn = btn
 
 
+# Free skip offered on a warmup round. Deliberately OUTSIDE the HUD, like the cleanse button —
+# an effect that hides the HUD must not be able to trap a player in a round they were told they
+# could leave. Sits above the cleanse button so an effect round marked warmup shows both.
+func _show_warmup_skip_button() -> void:
+	_remove_warmup_skip_button()
+	var btn: Button = Button.new()
+	btn.text = "⏭ SKIP WARMUP"
+	btn.tooltip_text = "Skip this warmup round. It pays no coins, score or reward."
+	UITheme.style_button(btn, UITheme.CYAN)
+	btn.anchor_left = 0.5
+	btn.anchor_right = 0.5
+	btn.anchor_top = 1.0
+	btn.anchor_bottom = 1.0
+	btn.offset_top = -146
+	btn.offset_bottom = -106
+	btn.offset_left = -110
+	btn.offset_right = 110
+	btn.pressed.connect(_on_warmup_skip_pressed)
+	add_child(btn)
+	_warmup_skip_btn = btn
+	# Match the HUD's current fade state so it FADES IN with the HUD (via the next _show_hud, which the
+	# round-start transition always fires) instead of popping in solid over the transition black.
+	# Deliberately not calling _show_hud here — that runs *under* the transition black and would start
+	# the idle timer before the player can see anything.
+	btn.modulate.a = 1.0 if _hud.visible else 0.0
+
+
+# Fades the warmup skip in/out on the HUD's idle cycle so it doesn't sit over the video for the
+# whole round. Kept *visible* (alpha only) rather than hidden, and never gated on the Fog curse —
+# it stays clickable even at rest, so a player reaching for it mid-fade isn't punished.
+func _fade_warmup_skip_button(shown: bool) -> void:
+	if not is_instance_valid(_warmup_skip_btn):
+		return
+	var to: float = 1.0 if shown else 0.0
+	if is_equal_approx(_warmup_skip_btn.modulate.a, to):
+		return
+	create_tween().tween_property(_warmup_skip_btn, "modulate:a", to, 0.3)
+
+
+func _remove_warmup_skip_button() -> void:
+	if is_instance_valid(_warmup_skip_btn):
+		_warmup_skip_btn.queue_free()
+	_warmup_skip_btn = null
+
+
+const _FINISH_IDLE_TEXT: String = "✔ HOLD TO FINISH"
+
+
+# The FINISH ("I came") button — a hold-to-confirm floating button (a tap can't end the session), shown
+# only during rounds when the journey opts in. Sits just ABOVE the HUD bar, hugging the RIGHT edge (like
+# the cleanse button but right-aligned). Fades with the HUD's idle cycle — when the UI fades out it does
+# too — but stays clickable at rest so a hold started as it fades isn't broken.
+func _show_finish_button() -> void:
+	_remove_finish_button()
+	if not _allow_finish or _finishing:
+		return
+	var btn: Button = Button.new()
+	btn.text = _FINISH_IDLE_TEXT
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.tooltip_text = UITheme.wrap_tip(
+		"Hold to finish the session (I came). Ends the run and shows the finale."
+	)
+	UITheme.style_button(btn, UITheme.MAGENTA)
+	btn.anchor_left = 1.0
+	btn.anchor_right = 1.0
+	btn.anchor_top = 1.0
+	btn.anchor_bottom = 1.0
+	btn.offset_left = -232
+	btn.offset_right = -20
+	btn.offset_top = -(HUD_BAR_HEIGHT + 48)  # 40px tall, an 8px gap above the bar
+	btn.offset_bottom = -(HUD_BAR_HEIGHT + 8)
+	btn.button_down.connect(_on_finish_hold_start)
+	btn.button_up.connect(_on_finish_hold_cancel)
+	add_child(btn)
+	_finish_btn = btn
+
+
+# Fades the FINISH button with the HUD's idle cycle (alpha only) — it disappears when the UI does. Kept
+# clickable at rest (alpha, not visibility) so a hold in progress as it fades still resolves on release.
+func _fade_finish_button(shown: bool) -> void:
+	if not is_instance_valid(_finish_btn):
+		return
+	var to: float = 1.0 if shown else 0.0
+	if is_equal_approx(_finish_btn.modulate.a, to):
+		return
+	create_tween().tween_property(_finish_btn, "modulate:a", to, 0.3)
+
+
+func _remove_finish_button() -> void:
+	_cancel_finish_hold()
+	if is_instance_valid(_finish_btn):
+		_finish_btn.queue_free()
+	_finish_btn = null
+
+
+func _on_finish_hold_start() -> void:
+	if _finishing:
+		return
+	_cancel_finish_hold()
+	_finish_hold_tween = create_tween()
+	_finish_hold_tween.tween_method(_set_finish_fill, 0.0, 1.0, FINISH_HOLD_SECS)
+	_finish_hold_tween.finished.connect(_finish_journey)
+
+
+func _on_finish_hold_cancel() -> void:
+	if _finishing:
+		return
+	_cancel_finish_hold()
+	_set_finish_fill(0.0)  # reset the fill label
+
+
+func _cancel_finish_hold() -> void:
+	if _finish_hold_tween != null and _finish_hold_tween.is_valid():
+		_finish_hold_tween.kill()
+	_finish_hold_tween = null
+
+
+# Draws the hold progress into the button label as a small filling bar.
+func _set_finish_fill(t: float) -> void:
+	if not is_instance_valid(_finish_btn):
+		return
+	if t <= 0.0:
+		_finish_btn.text = _FINISH_IDLE_TEXT
+		return
+	var filled: int = clampi(int(round(t * 6.0)), 0, 6)
+	_finish_btn.text = "%s%s" % ["▰".repeat(filled), "▱".repeat(6 - filled)]
+
+
+# FINISH confirmed: discard the in-progress round (no payout — the skip semantic), tear down any round
+# effects, then JUMP to the designated aftercare node and play it through the normal pipeline. That
+# node is the ENTRY to an off-graph aftercare SEQUENCE — its out-edges advance through the chain like
+# any node, so a "you lose" storyboard → aftercare round → … plays in turn until a node with no exit
+# reaches "done" → the end screen. No node designated → straight to the end screen. `_finishing` guards
+# against a re-trigger from a late button_up (and suppresses the button on the aftercare rounds, so it
+# can't loop).
+func _finish_journey() -> void:
+	if _finishing:
+		return
+	_finishing = true
+	_cancel_finish_hold()
+	_remove_finish_button()
+	_video.stop()
+	_end_timer.stop()
+	FunscriptPlayer.Stop()
+	ScoreService.DiscardRound()  # the in-progress round banks nothing (same as a skip)
+	_exit_boss_mode()  # drop any active round effects / frames before leaving
+	if _finish_node_id != "" and GameState.JumpToFinish(_finish_node_id):
+		await _transition_swap(_load_current_item)  # fade into the aftercare node
+	else:
+		_transition_to_end_screen()
+
+
+# Exit-to-menu hold-to-confirm. Begins on Esc-key-down or MENU-button-down; a centered overlay fills over
+# EXIT_HOLD_SECS and leaves to the menu at completion. Releasing (key / button up) cancels before then.
+func _begin_exit_hold() -> void:
+	if _exiting:
+		return
+	_cancel_exit_hold()
+	_show_exit_hold_overlay()
+	_exit_hold_tween = create_tween()
+	_exit_hold_tween.tween_method(_set_exit_hold_fill, 0.0, 1.0, EXIT_HOLD_SECS)
+	_exit_hold_tween.finished.connect(_confirm_exit)
+
+
+func _cancel_exit_hold() -> void:
+	if _exit_hold_tween != null and _exit_hold_tween.is_valid():
+		_exit_hold_tween.kill()
+	_exit_hold_tween = null
+	_hide_exit_hold_overlay()
+
+
+func _confirm_exit() -> void:
+	if _exiting:
+		return
+	_exiting = true
+	_exit_hold_tween = null
+	_hide_exit_hold_overlay()
+	_go_to_menu()
+
+
+# A centered "keep holding to exit" card with a filling bar, on its own layer above the HUD.
+func _show_exit_hold_overlay() -> void:
+	_hide_exit_hold_overlay()
+	var layer: CanvasLayer = CanvasLayer.new()
+	layer.layer = 4
+	_exit_hold_layer = layer
+	add_child(layer)
+	var center: CenterContainer = CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(center)
+	var card: PanelContainer = PanelContainer.new()
+	var sb: StyleBoxFlat = StyleBoxFlat.new()
+	sb.bg_color = Color(0.04, 0.0, 0.06, 0.92)
+	sb.border_color = UITheme.MAGENTA
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(10)
+	sb.content_margin_left = 22
+	sb.content_margin_right = 22
+	sb.content_margin_top = 16
+	sb.content_margin_bottom = 16
+	card.add_theme_stylebox_override("panel", sb)
+	center.add_child(card)
+	var vb: VBoxContainer = VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 10)
+	card.add_child(vb)
+	var lbl: Label = Label.new()
+	lbl.text = "HOLD TO EXIT TO MENU"
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(lbl, UITheme.MAGENTA, 15, true)
+	vb.add_child(lbl)
+	var fill: Label = Label.new()
+	fill.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(fill, UITheme.WHITE_SOFT, 18, false)
+	vb.add_child(fill)
+	_exit_hold_fill = fill
+	_set_exit_hold_fill(0.0)
+
+
+func _hide_exit_hold_overlay() -> void:
+	if is_instance_valid(_exit_hold_layer):
+		_exit_hold_layer.queue_free()
+	_exit_hold_layer = null
+	_exit_hold_fill = null
+
+
+func _set_exit_hold_fill(t: float) -> void:
+	if not is_instance_valid(_exit_hold_fill):
+		return
+	var filled: int = clampi(int(round(t * 8.0)), 0, 8)
+	_exit_hold_fill.text = "%s%s" % ["▰".repeat(filled), "▱".repeat(8 - filled)]
+
+
+# Same exit as the Bail Out item: no payout, marked on the route. One skip semantic, not two.
+func _on_warmup_skip_pressed() -> void:
+	_video.stop()
+	_end_timer.stop()
+	_show_save_toast("⏭  WARMUP SKIPPED")
+	_on_round_ended(true)
+
+
 func _remove_cleanse_button() -> void:
 	if is_instance_valid(_effect_cleanse_btn):
 		_effect_cleanse_btn.queue_free()
 	_effect_cleanse_btn = null
-
-
-# ---------------------------------------------------------------------------
-# Release
-# ---------------------------------------------------------------------------
-
-
-func _setup_release(round: Dictionary) -> void:
-	_remove_release_button()
-	_release_cfg = JourneyData.normalize_release_round(round)
-	_release_pressed = false
-	_release_deadline_resolved = false
-	_release_jumping = false
-	if ReleaseLogic.is_available(_release_cfg, func(f: String) -> bool: return GameState.HasFlag(f)):
-		_show_release_button()
-
-
-# Release control lives in the HUD bar (same row/style as Pause / Map / Inventory)
-# so idle HUD hide fades it with the rest of the chrome.
-func _show_release_button() -> void:
-	_remove_release_button()
-	var btn: Button = Button.new()
-	btn.text = "RELEASE"
-	btn.focus_mode = Control.FOCUS_NONE
-	btn.tooltip_text = "Release (hotkey R) — outcome depends on this round's release mode."
-	_style_button(btn, UITheme.WHITE_SOFT)
-	btn.pressed.connect(_on_release_pressed)
-	btn.mouse_entered.connect(_show_hud)
-	_hud_layout.add_child(btn)
-	# Sit just before Pause (left of the action cluster).
-	_hud_layout.move_child(btn, _pause_btn.get_index())
-	_release_btn = btn
-	_show_hud()
-
-
-func _remove_release_button() -> void:
-	if is_instance_valid(_release_btn):
-		_release_btn.queue_free()
-	_release_btn = null
-
-
-func _on_release_pressed() -> void:
-	if _is_overlay_open or _release_jumping:
-		return
-	if not ReleaseLogic.is_available(_release_cfg, func(f: String) -> bool: return GameState.HasFlag(f)):
-		return
-	# After the first press, ignore further presses unless looping (restart clears).
-	if _release_pressed and str(_release_cfg.get("release_mode", "")) != "loop_until_clean":
-		return
-
-	var action: String = ReleaseLogic.press_action(_release_cfg)
-	match action:
-		ReleaseLogic.ACTION_SET_FLAG, ReleaseLogic.ACTION_SUCCESS_STAMP:
-			_release_pressed = true
-			var flag: String = str(_release_cfg.get("release_flag", ""))
-			if flag != "":
-				GameState.SetFlag(flag)
-			if bool(_release_cfg.get("release_remove_on_press", true)):
-				_remove_release_button()
-			_show_save_toast(
-				"RELEASED" if action == ReleaseLogic.ACTION_SET_FLAG else "RELEASED — SUCCESS"
-			)
-		ReleaseLogic.ACTION_STAMP:
-			_release_pressed = true
-			var stamp_flag: String = str(_release_cfg.get("release_flag", ""))
-			if stamp_flag != "":
-				GameState.SetFlag(stamp_flag)
-			if bool(_release_cfg.get("release_remove_on_press", true)):
-				_remove_release_button()
-			_show_save_toast("RELEASED")
-		ReleaseLogic.ACTION_FAIL_JUMP:
-			_release_pressed = true
-			await _release_fail_jump()
-		ReleaseLogic.ACTION_RESTART:
-			await _release_restart_round()
-		_:
-			pass
-
-
-func _tick_release_deadline() -> void:
-	if _release_deadline_resolved or _release_jumping:
-		return
-	if str(_release_cfg.get("release_mode", "")) != "timed_window":
-		return
-	if not bool(_release_cfg.get("release_enabled", false)):
-		return
-	var deadline: int = int(_release_cfg.get("release_deadline_ms", 0))
-	if deadline <= 0:
-		return
-	if int(FunscriptPlayer.PositionMs) < deadline:
-		return
-	_release_deadline_resolved = true
-	var delta: int = ReleaseLogic.deadline_score(_release_cfg, _release_pressed)
-	if delta != 0:
-		ScoreService.AddScore(delta)
-		if delta > 0:
-			_show_save_toast("RELEASE WINDOW  +%d" % delta)
-		else:
-			_show_save_toast("RELEASE WINDOW  %d" % delta)
-	# Hide the button once the window closes (further presses no longer matter).
-	_remove_release_button()
-
-
-# Stop the round and JumpToNode(release_jump_to), preserving run flags.
-func _release_fail_jump() -> void:
-	if _release_jumping:
-		return
-	_release_jumping = true
-	_remove_release_button()
-	_handy_stop()
-	FunscriptPlayer.Stop()
-	_video.stop()
-	if _end_timer != null:
-		_end_timer.stop()
-	ScoreService.EndRound()
-	_exit_boss_mode()
-	var target: String = str(_release_cfg.get("release_jump_to", ""))
-	if target == "" or not GameState.JumpToNode(target):
-		_release_jumping = false
-		_show_save_toast("✕  RELEASE JUMP TARGET MISSING")
-		return
-	_show_save_toast("RELEASED — JUMP")
-	await _transition_swap(
-		func() -> void:
-			_release_jumping = false
-			_load_current_item()
-	)
-
-
-# loop_until_clean: seek/restart the same round without advancing.
-func _release_restart_round() -> void:
-	_handy_stop()
-	FunscriptPlayer.Stop()
-	_video.stop()
-	if _end_timer != null:
-		_end_timer.stop()
-	if not GameState.RestartCurrentRound():
-		return
-	_exit_boss_mode()
-	_remove_release_button()
-	_release_pressed = false
-	_release_deadline_resolved = false
-	var round: Dictionary = GameState.CurrentRound().duplicate(true)
-	round.merge(JourneyData.normalize_effect_round(round), true)
-	var rtype: String = str(round.get("round_type", "normal"))
-	_is_boss_round = rtype == "boss"
-	_is_effect_round = rtype == "effect"
-	_show_save_toast("RESTART — GO AGAIN")
-	await _begin_round(round)
 
 
 func _on_cleanse_pressed() -> void:
@@ -1690,13 +1809,18 @@ func _cleanse_curse() -> void:
 # (HUD/pause/blackout) here. Safe to call when none are active (boss rounds,
 # plain rounds) — each branch no-ops.
 func _clear_curse_hexes() -> void:
-	_curse_hud_hidden = false
 	if _curse_no_pause:
 		_curse_no_pause = false
 		_pause_btn.disabled = false
 	_video.visible = true  # undo a Blinded (blackout) hex
-	if _sensory != null:
-		_sensory.clear_all()
+	# Drop THIS round's sensory and reconcile: the round's kinds ease out (they left the desired set),
+	# while any active ITEM sensory persists until its own timer expires. (Full teardown on scene exit
+	# is handled by SensoryFX._exit_tree, not here.)
+	_round_sensory.clear()
+	_reconcile_sensory()
+	# Fog (hud_hide) is active-list-driven: round Fog clears once its boss effects are removed, while a
+	# timed item Fog persists until its own timer expires — so reconcile rather than force the HUD back.
+	_reconcile_hud_hide()
 
 
 # Applies a "hex" curse — effects beyond the stroke (which FunscriptPlayer can't
@@ -1704,12 +1828,16 @@ func _clear_curse_hexes() -> void:
 # (0–1) mapped through the catalog's imin/imax; the gameplay kinds are handled
 # here. coin_penalty is read at round end, not applied here.
 func _apply_hex(roll: Dictionary, intensity: float = 1.0) -> void:
-	if _sensory != null and _sensory.apply(roll, intensity):
+	var kind: String = String(roll.get("kind", ""))
+	# Sensory (visual/audio) kinds are collected for the reconcile pass, not applied here — so the
+	# round's sensory shares one engine state with any active item sensory. "blackout" (Blinded) is a
+	# sensory catalog entry SensoryFX does NOT own (the HUD hides the video for it), so it's excluded.
+	if kind != "blackout" and JourneyData.is_sensory_kind(kind):
+		_round_sensory.append({"roll": roll, "intensity": intensity})
 		return
-	match String(roll.get("kind", "")):
-		"hud_hide":
-			_curse_hud_hidden = true
-			_hud.visible = false
+	# hud_hide (Fog) is reconciled from the active list in _reconcile_hud_hide (so round + item Fog share
+	# one state), not applied here.
+	match kind:
 		"toll":
 			var take: int = mini(int(roll.get("amount", TOLL_AMOUNT)), CoinService.Balance)
 			if take > 0:
@@ -1717,6 +1845,87 @@ func _apply_hex(roll: Dictionary, intensity: float = 1.0) -> void:
 		"no_pause":
 			_curse_no_pause = true
 			_pause_btn.disabled = true
+
+
+# Pushes the combined desired sensory set to SensoryFX: this round's own sensory (_round_sensory) plus
+# every active ITEM sensory effect (timed — identified by start_time_ms, as the chips are). The engine
+# applies additions, updates intensities, and fades out anything that left the set. Item sensory that
+# outlives the round therefore keeps running until its timer expires. Cheap; safe to call often.
+func _reconcile_sensory() -> void:
+	if _sensory == null:
+		return
+	var requests: Array = _round_sensory.duplicate()
+	for fx: Dictionary in InventoryService.GetActiveEffects():
+		var kind: String = String(fx.get("kind", ""))
+		if fx.has("start_time_ms") and kind != "blackout" and JourneyData.is_sensory_kind(kind):
+			(
+				requests
+				. append(
+					{
+						"roll": JourneyData.sensory_entry_by_kind(kind),
+						"intensity": float(fx.get("intensity", 1.0)),
+					}
+				)
+			)
+	_sensory.reconcile(requests)
+
+
+# Applies one-shot ITEM effects (toll / interest / flag / counter) the moment they enter the active list
+# from an activation, then consumes each so it fires exactly once. Only player-activated effects
+# (start_time_ms) are handled — round versions apply at their own boundaries. Re-entrancy-guarded
+# because ConsumeEffects re-emits ActiveEffectsChanged.
+func _apply_oneshot_item_effects() -> void:
+	if _applying_oneshots:
+		return
+	_applying_oneshots = true
+	var applied: Dictionary = {}  # kinds actually present, consumed once each below
+	for fx: Dictionary in InventoryService.GetActiveEffects():
+		if not fx.has("start_time_ms"):
+			continue
+		match String(fx.get("kind", "")):
+			"toll":
+				var take: int = mini(int(fx.get("amount", TOLL_AMOUNT)), CoinService.Balance)
+				if take > 0:
+					CoinService.SpendCoins(take)
+					_show_pop(
+						"TOLL", "-♦ %d" % take, "→ ♦ %d" % CoinService.Balance, UITheme.MAGENTA
+					)
+				applied["toll"] = true
+			"interest":
+				_grant_coins(roundi(CoinService.Balance * float(fx.get("pct", INTEREST_PCT))))
+				applied["interest"] = true
+			"flag":
+				var fname: String = str(fx.get("flag", "")).strip_edges()
+				if fname != "":
+					GameState.ApplyItemFlagsCounters({"set_flags": [fname]})
+				applied["flag"] = true
+			"counter":
+				var cname: String = str(fx.get("counter", "")).strip_edges()
+				if cname != "":
+					GameState.ApplyItemFlagsCounters(
+						{"set_counters": {cname: int(fx.get("delta", 1))}}
+					)
+				applied["counter"] = true
+	for kind: String in applied:
+		InventoryService.ConsumeEffects(kind)
+	_applying_oneshots = false
+
+
+# Hides the HUD while any active effect (round Fog OR a timed item Fog) is `hud_hide`, else restores it.
+# Driven off the active list so round + item Fog share one state and item Fog persists across rounds.
+func _reconcile_hud_hide() -> void:
+	var want_hidden: bool = false
+	for fx: Dictionary in InventoryService.GetActiveEffects():
+		if String(fx.get("kind", "")) == "hud_hide":
+			want_hidden = true
+			break
+	if want_hidden == _curse_hud_hidden:
+		return
+	_curse_hud_hidden = want_hidden
+	if want_hidden:
+		_hud.visible = false
+	else:
+		_show_hud()  # restore + rejoin the idle-fade cycle
 
 
 # Tears down boss / effect state at round end. Safe to call on plain rounds.
@@ -1727,7 +1936,6 @@ func _exit_boss_mode() -> void:
 	_clear_curse_hexes()
 	_hide_effect_overlay()
 	_remove_cleanse_button()
-	_remove_release_button()
 	# A "Lingering" boon un-freezes the effect clock at round end.
 	if _effect_lingering:
 		_effect_lingering = false
@@ -1762,7 +1970,7 @@ func _make_boss_effect(mod: Dictionary) -> Dictionary:
 func _build_beat_bar() -> void:
 	if not SettingsService.get_beat_bar_enabled():
 		return
-	_beat_bar = BeatBarScript.new()
+	_beat_bar = BeatBar.new()
 	_beat_bar.anchor_left = 0.0
 	_beat_bar.anchor_right = 1.0
 	_beat_bar.anchor_top = 1.0
@@ -1923,7 +2131,7 @@ func _find_video(folder: String) -> String:
 	return ""
 
 
-func _load_video(path: String, with_funscript: bool = true) -> void:
+func _load_video(path: String) -> void:
 	_video.position = Vector2.ZERO
 	_video.size = get_viewport_rect().size
 	if path == "":
@@ -1938,8 +2146,7 @@ func _load_video(path: String, with_funscript: bool = true) -> void:
 		if stream and stream is VideoStream:
 			_video.stream = stream as VideoStream
 			_video.play()
-			if with_funscript:
-				FunscriptPlayer.Play()
+			FunscriptPlayer.Play()
 			return
 		push_warning("GameLoop: could not load .ogv at %s" % path)
 		_start_no_video_fallback()
@@ -1970,17 +2177,9 @@ func _load_video(path: String, with_funscript: bool = true) -> void:
 	if not _video.is_playing():
 		push_warning("GameLoop: video failed to open '%s' — funscript-only fallback." % abs_path)
 		_video.stream = null
-		if with_funscript:
-			_start_no_video_fallback()
-		elif _cutscene_playing:
-			# Cutscene with a broken/missing file — advance rather than hang.
-			await _on_cutscene_ended()
+		_start_no_video_fallback()
 		return
-	if with_funscript:
-		FunscriptPlayer.Play()
-	elif _cutscene_playing and _active_round_length_ms <= 0:
-		# Prefer video.finished; length_ms is optional UI metadata only.
-		pass
+	FunscriptPlayer.Play()
 
 
 func _start_no_video_fallback() -> void:
@@ -2000,26 +2199,12 @@ func _start_no_video_fallback() -> void:
 # ---------------------------------------------------------------------------
 
 
-func _on_video_finished() -> void:
-	# Prefer type over the playing flag: _video.stop() during cutscene teardown can
-	# re-emit finished after _cutscene_playing is cleared.
-	if GameState.CurrentItemType() == "cutscene" or _cutscene_playing:
-		await _on_cutscene_ended()
-	elif GameState.CurrentItemType() == "round":
-		await _on_round_ended()
-
-
-func _on_round_ended() -> void:
-	if _release_jumping:
+func _on_round_ended(skipped: bool = false) -> void:
+	if _round_ended_guard:
 		return
-	# Must-release fail: finishing without pressing jumps to the punishment node.
-	# Dev → complete sets _dev_bypass_release_fail so QA can clean-finish those rounds.
-	var bypass_fail: bool = _dev_bypass_release_fail
-	_dev_bypass_release_fail = false
-	if not bypass_fail and ReleaseLogic.fail_on_clean_finish(_release_cfg, _release_pressed):
-		await _release_fail_jump()
-		return
-	_remove_release_button()
+	_round_ended_guard = true
+	_remove_warmup_skip_button()
+	_remove_finish_button()  # FINISH is a during-round affordance; it doesn't carry into overlays
 	_handy_stop()  # the device would otherwise keep playing into the transition
 	# Extract the name here in GDScript where Dictionary access is reliable,
 	# then pass it explicitly so C# never needs to look up the key itself.
@@ -2027,7 +2212,7 @@ func _on_round_ended() -> void:
 	var _cur_name: String = _cur.get("name", "") as String
 	# Use the effective length captured at round start — a pool round's own
 	# length_ms is 0 (its media lives in entries; the chosen one was swapped in).
-	GameState.LogRound(_cur, _cur_name, _active_round_length_ms)
+	GameState.LogRound(_cur, _cur_name, _active_round_length_ms, skipped)
 
 	# Append to the GDScript-side round-name log (see _ready). EndScreen reads
 	# this directly, avoiding any potential C#→GDScript Dictionary marshalling
@@ -2037,10 +2222,13 @@ func _on_round_ended() -> void:
 	)
 	_names.append(_cur_name)
 	GameState.set_meta("_round_names", _names)
-	ScoreService.EndRound()
+	# A skipped round banks nothing: the partial score is discarded rather than added, so
+	# LastRoundScore still reports the last round actually played (score-based forks read it).
+	if skipped:
+		ScoreService.DiscardRound()
+	else:
+		ScoreService.EndRound()
 	FunscriptPlayer.Stop()
-	# Round-scoped volume attenuate must not leak into the next node.
-	InventoryService.ClearRoundScopedEffects()
 	# Capture coin modifiers BEFORE _exit_boss_mode clears the boss-effect list:
 	# a "Fortune" boon (coin_jackpot) and a "Greed"/"Pauper" curse (coin_penalty)
 	# both live there, alongside any active shop jackpot.
@@ -2063,29 +2251,29 @@ func _on_round_ended() -> void:
 
 	var coins: int = GameState.CurrentRound().get("coins", 0)
 	coins = roundi(coins * jackpot_factor)
-	# Consume any active shop jackpot so it only ever doubles one round's reward
-	# (the boss-effect Fortune was already cleared by _exit_boss_mode above).
-	InventoryService.ConsumeEffects("coin_jackpot")
 	# Greed/Pauper curse: coins reduced (captured above, before effects cleared).
 	coins = roundi(coins * penalty_factor)
+	# Consume the item coin effects so each activation settles exactly one round's payout (they don't
+	# expire on a timer — see InventoryService._MakeActiveEffect). Boss-round Fortune/Greed already went
+	# with _exit_boss_mode above; ConsumeEffects only touches the player-activated _active list.
+	InventoryService.ConsumeEffects("coin_jackpot")
+	InventoryService.ConsumeEffects("coin_penalty")
 	# Endure reward: bonus for carrying a curse to the end (on top of the round
 	# coins, so it survives a Greed penalty).
 	coins += endure_reward
-	if coins > 0:
-		CoinService.AddCoins(coins)
-	if endure_reward > 0:
-		_show_save_toast("✦  CURSE ENDURED  +♦ %d" % endure_reward)
-
-	# Optional item reward — granted when the round ends (parity with storyboards). Read from
-	# `_cur` (the round captured above, still current — Advance happens inside the transition).
-	# Skip silently if the id no longer resolves (item deleted from the registry after authoring),
-	# so a stale reward never shows a misleading "RECEIVED" toast.
-	var award_item: String = str(_cur.get("award_item", ""))
-	if award_item != "":
-		var award_data: Dictionary = InventoryService.GetItemData(award_item)
-		if not award_data.is_empty():
-			InventoryService.AddItem(award_item)
-			_show_save_toast("✦  RECEIVED: %s" % str(award_data.get("name", award_item)).to_upper())
+	# Skipping forfeits everything the round would have paid: coins, the endure bonus, and the
+	# item reward. _exit_boss_mode still ran above, so no effect leaks into the next round.
+	if not skipped:
+		# Bestow the round's counters at its END (see GameState.EnterCurrent) — the node is still
+		# current here (Advance runs inside the transition below). A skipped/finished round banks
+		# nothing, so its counters are forfeited alongside the coins and item reward.
+		GameState.ApplyCurrentNodeCounters()
+		_grant_coins(coins)
+		if endure_reward > 0:
+			_show_save_toast("✦  CURSE ENDURED  +♦ %d" % endure_reward)
+		# Optional item reward — granted when the round ends (parity with storyboards). Read
+		# from `_cur` (still current — Advance happens inside the transition).
+		_grant_item(str(_cur.get("award_item", "")))
 
 	if GameState.IsLastRound():
 		_transition_to_end_screen()
@@ -2136,9 +2324,12 @@ func _transition_swap(swap_action: Callable) -> void:
 
 	_transition.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	# Fade the HUD back in only when we've landed on a round — overlays (fork /
-	# shop / storyboard) cover the screen and own their own UI.
-	if not (GameState.CurrentItemType() in ["fork", "shop", "storyboard"]):
+	# Fade the HUD back in only when we've landed on a round — the gates (fork / shop /
+	# storyboard / checkpoint) cover the screen and own their own UI.
+	if not (
+		GameState.CurrentItemType()
+		in ["fork", "shop", "storyboard", "checkpoint", "loop_start", "loop_end"]
+	):
 		_show_hud(true)
 
 
@@ -2176,6 +2367,34 @@ func _free_current_overlay() -> void:
 # button. Self-contained: reads the journey accent locally. Skipped entirely when
 # the author has disabled the map for this journey — _map_view stays null, so
 # _open_map_viewer no-ops and the overlay map buttons aren't shown.
+# Pushes the journey's map backdrop STACK (if any) onto a map GraphView — always fully visible beneath the
+# (possibly fogged) nodes, layered in order. For a composed rendition the stack already carries the base's
+# layers plus each overlay's (see compose). Placement rides GameState.Journey, matching the editor exactly.
+func _apply_map_backdrop_to(view: Node) -> void:
+	var stack: Array = GameState.Journey.get("map_backdrops", [])
+	if stack.is_empty():
+		return
+	var render: Array = []
+	for e: Variant in stack:
+		var b: Dictionary = e
+		var img: Image = JourneyData.load_image_smart(str(b.get("path", "")))
+		if img == null:
+			continue
+		(
+			render
+			. append(
+				{
+					"texture": ImageTexture.create_from_image(img),
+					"offset": b.get("offset", Vector2.ZERO),
+					"scale": float(b.get("scale", 1.0)),
+					"opacity": float(b.get("opacity", 0.6)),
+					"rotation": float(b.get("rotation", 0.0)),
+				}
+			)
+		)
+	view.set_backdrops(render)
+
+
 func _build_map() -> void:
 	if not _map_enabled:
 		return
@@ -2214,11 +2433,16 @@ func _build_map() -> void:
 		"start": str(GameState.Journey.get("start", "")),
 		"nodes": (GameState.Journey.get("nodes", {}) as Dictionary).duplicate(true),
 	}
+	# Loops are hidden on the player map by default — splice the markers out so the flow reads clean.
+	# The author opts in per journey to reveal them.
+	if not _show_loops_on_map:
+		JourneyGraph.strip_loop_markers(map_graph)
 	for nid: String in map_graph["nodes"]:
 		if not (map_graph["nodes"][nid] as Dictionary).has("pos"):
 			GraphLayout.seed_positions(map_graph)  # any node missing a pos → seed the whole graph
 			break
 	_map_view.set_graph(map_graph)
+	_apply_map_backdrop_to(_map_view)
 
 	var title: Label = Label.new()
 	title.text = "◇  JOURNEY MAP"
@@ -2314,10 +2538,12 @@ func _close_map_viewer() -> void:
 
 # Suspends or restores the active overlay's input callbacks while the map is open.
 # No-op outside an overlay (plain in-round map open) — _current_overlay is null then.
+# Also toggles _process so a storyboard/fork auto-advance countdown pauses under the map viewer.
 func _set_overlay_input_enabled(enabled: bool) -> void:
 	if is_instance_valid(_current_overlay):
 		_current_overlay.set_process_input(enabled)
 		_current_overlay.set_process_unhandled_input(enabled)
+		_current_overlay.set_process(enabled)
 
 
 func _go_to_menu() -> void:
@@ -2347,8 +2573,38 @@ func _transition_to_end_screen() -> void:
 		_exit_test_to_builder()
 		return
 	_record_run(true)  # completed run → scoreboard
+	_capture_completion_carryover()  # feature #5: stash Part-1 end-state so an installed sequel can resume
 	JourneySaveService.delete_save(GameState.Journey.get("folder_name", ""))
 	Transition.change_scene("res://scenes/end_screen/EndScreen.tscn")
+
+
+# Feature #5: on completing a BASE journey, stash its end-state keyed by the base's JourneyId so an
+# installed rendition (a sequel) can resume from the ending the player reached — carrying coins, score,
+# items, flags, and counters. Skipped for a rendition run (that IS Part 2; its folder_name is namespaced
+# `…__rend_…`) and when the base has no id to key by. The payload mirrors _write_journey_save's run-state
+# snapshot plus `reached_node`, the ending finished on, which the resume path matches to a rendition anchor.
+func _capture_completion_carryover() -> void:
+	var journey: Dictionary = GameState.Journey
+	var base_id: String = str(journey.get("journey_id", ""))
+	if base_id == "":
+		return
+	# A COMPOSED (Part-2) run reaching the end CONSUMES the Part-1 carryover — you've played the sequel
+	# through, so "Resume Part 2" shouldn't linger (single-use, like a resume save). The composed journey
+	# carries the base's JourneyId, which is what the carryover is keyed by. Bailing out early (no end
+	# screen) leaves it intact, so an unfinished sequel can still be retried from Part 1.
+	if str(journey.get("folder_name", "")).contains("__rend_"):
+		JourneySaveService.delete_carryover(base_id)
+		return
+	var score_data: Dictionary = ScoreService.CaptureSaveData()
+	var payload: Dictionary = {
+		"coins": CoinService.Balance,
+		"score": score_data.get("score", 0),
+		"total_actions": score_data.get("strokes", 0),
+		"inventory": InventoryService.CaptureSaveData(),
+	}
+	payload.merge(GameState.CaptureSaveData())  # current_node, flags, counters, discovered, pool clips
+	payload["reached_node"] = str(payload.get("current_node", ""))  # the ending the sequel anchors to
+	JourneySaveService.write_carryover(base_id, payload)
 
 
 # Records this run's outcome to the journey's local scoreboard. `completed` is
@@ -2396,7 +2652,7 @@ func _exit_test_to_builder() -> void:
 # Top-center "TEST MODE" indicator shown for the duration of a test play, so the
 # author always knows this is a preview and how to leave it.
 func _show_test_banner() -> void:
-	var text: String = "▶  TEST MODE  —  ESC TO EXIT"
+	var text: String = "▶  TEST MODE  —  →  SKIP ROUND (KEEP REWARDS)  ·  ESC TO EXIT"
 	if _test_seed_score > 0 or _test_seed_coins > 0:
 		text += "    (SEED  %d PTS / ♦ %d)" % [_test_seed_score, _test_seed_coins]
 	var banner: Label = Label.new()
@@ -2424,9 +2680,6 @@ func _show_test_banner() -> void:
 # resume point. We don't preserve mid-round position — the player restarts
 # the current round from action 0 on resume. This keeps the save model
 # simple and predictable (you replay the round you were doing).
-#
-# Cooldown gaps are special: _on_cooldown_save_and_quit Advances past the gap
-# before calling this, so Resume lands on the next node after the calendar wait.
 func _write_journey_save() -> bool:
 	# Real saves are disabled during a test play — a preview must never write a
 	# run-save (the Safe Word item and checkpoint Save & Quit both route here).
@@ -2447,12 +2700,9 @@ func _write_journey_save() -> bool:
 		"score": score_data.get("score", 0),
 		"total_actions": score_data.get("strokes", 0),
 		"inventory": InventoryService.CaptureSaveData(),
-		"unlocked": InventoryService.CaptureUnlockedSaveData(),
 		"round_names": GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray,
 		"route_trail": GameState.get_meta("_route_trail", []),
 	}
-	if _pending_cooldown_until > 0:
-		payload["cooldown_until"] = _pending_cooldown_until
 	# GameState owns the graph-native position fields (current_node,
 	# rounds_entered, flags, discovered) — merge them in under their own names so
 	# LoadFromSave finds them. (Re-keying these through the old tree-model names
@@ -2460,98 +2710,6 @@ func _write_journey_save() -> bool:
 	# resume to the journey start and lost pre-save flags + fog discovery.)
 	payload.merge(GameState.CaptureSaveData())
 	return JourneySaveService.write_save(folder_name, payload)
-
-
-# Cooldown Force Save & Quit: advance past the gap before writing so the save's
-# current_node is the next out target (punish session / landing). cooldown_until
-# still gates Resume; after the wait the player starts that next node, not this
-# gap (which would re-fire cooldown_days).
-func _on_cooldown_save_and_quit() -> void:
-	if not GameState.IsLastRound():
-		GameState.Advance()
-	else:
-		push_warning(
-			"GameLoop: cooldown gap has no out edge — save will resume on this node"
-		)
-	_on_save_and_quit()
-
-
-# Dev/QA: leave a cooldown gap without quitting — same Advance as save, then play.
-func _dev_skip_cooldown_gap() -> void:
-	_pending_cooldown_until = 0
-	_cooldown_banner_open = false
-	if not GameState.IsLastRound():
-		GameState.Advance()
-	_show_save_toast("DEV  SKIPPED COOLDOWN")
-	_load_current_item()
-
-
-func _dev_cheats_on() -> bool:
-	return SettingsService.get_dev_cheats_enabled()
-
-
-# → : clean-finish the current round (coins/score), or skip a cutscene / cooldown.
-func _dev_complete_round() -> void:
-	if not _dev_cheats_on():
-		return
-	if _cooldown_banner_open:
-		_dismiss_cooldown_banner()
-		_dev_skip_cooldown_gap()
-		return
-	if _cutscene_playing or GameState.CurrentItemType() == "cutscene":
-		_show_save_toast("DEV  SKIP CUTSCENE")
-		await _on_cutscene_skip_pressed()
-		return
-	if _is_overlay_open:
-		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
-		return
-	if GameState.CurrentItemType() != "round":
-		_show_save_toast("DEV  NOT IN A ROUND")
-		return
-	_show_save_toast("DEV  COMPLETE ROUND")
-	_release_pressed = true
-	_dev_bypass_release_fail = true
-	_end_timer.stop()
-	_video.paused = false
-	await _on_round_ended()
-
-
-# ↑ : jump to the next node without awards (or skip cooldown gap / cutscene).
-func _dev_skip_node() -> void:
-	if not _dev_cheats_on():
-		return
-	if _cooldown_banner_open:
-		_dismiss_cooldown_banner()
-		_dev_skip_cooldown_gap()
-		return
-	if _cutscene_playing or GameState.CurrentItemType() == "cutscene":
-		_show_save_toast("DEV  SKIP CUTSCENE")
-		await _on_cutscene_skip_pressed()
-		return
-	if _is_overlay_open:
-		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
-		return
-	if GameState.CurrentItemType() != "round":
-		_show_save_toast("DEV  NOT IN A ROUND")
-		return
-	_show_save_toast("DEV  SKIP NODE")
-	_end_timer.stop()
-	_handy_stop()
-	FunscriptPlayer.Stop()
-	InventoryService.ClearRoundScopedEffects()
-	_remove_release_button()
-	_exit_boss_mode()
-	_video.stop()
-	_video.stream = null
-	_paused = false
-	if GameState.IsLastRound():
-		_transition_to_end_screen()
-		return
-	await _transition_swap(
-		func() -> void:
-			GameState.Advance()
-			_load_current_item()
-	)
 
 
 # Triggered by the checkpoint banner's "Save & Quit" button (also by the
@@ -2576,6 +2734,36 @@ func _on_save_and_quit() -> void:
 # player can return to later. Boss-round lockout is enforced by the inventory
 # panel which disables item use during bosses, so we don't need to check
 # round type here.
+# skip_round item: end this round here, paying nothing. Routed through the normal round-end so
+# every teardown still happens (boss/effect state, funscript stop, the Handy stop, the play log
+# and the transition) — only the payouts are skipped. Guarded against firing while a non-round
+# item is on screen: the inventory is reachable from shops and storyboards too.
+func _on_skip_item_used() -> void:
+	if str(GameState.CurrentItemType()) != "round":
+		_show_save_toast("✕  NOTHING TO SKIP")
+		return
+	_video.stop()
+	# A funscript-only round is driven by _end_timer, not the video clock — leave it running and
+	# it would end the NEXT round early.
+	_end_timer.stop()
+	_show_save_toast("⏭  ROUND SKIPPED")
+	_on_round_ended(true)
+
+
+# Test mode only: finish the current round NOW and pay out its rewards (coins / items / counters), then
+# advance — so QCing a long journey doesn't mean watching every video end to end. Unlike the Bail Out
+# skip (no payout), this ends the round as if COMPLETED so downstream nodes see the grants.
+func _on_test_skip_round() -> void:
+	if not _test_mode or _round_ended_guard:
+		return
+	if str(GameState.CurrentItemType()) != "round":
+		return
+	_video.stop()
+	_end_timer.stop()  # funscript-only rounds run on the end timer, not the video clock
+	_show_save_toast("⏭  ROUND COMPLETED (TEST)")
+	_on_round_ended(false)  # false = completed → grants this round's rewards
+
+
 func _on_save_item_used() -> void:
 	if _test_mode:
 		_show_save_toast("✕  SAVING DISABLED IN TEST")
@@ -2587,81 +2775,133 @@ func _on_save_item_used() -> void:
 		_show_save_toast("✕  SAVE FAILED")
 
 
-# Time Control — early-end as a clean finish (item already consumed).
-func _on_skip_round_requested() -> void:
-	# Close inventory if open so the transition isn't under the panel.
-	if is_instance_valid(_inventory_panel):
-		_inventory_panel.close()
-	await _on_round_ended()
+# A player-visible counter changed → transient top-right pop. Hidden counters (not in the journey's
+# ShownCounters) fire the signal but show nothing — they gate silently. The persistent value list
+# lives in the inventory panel.
+func _on_counter_changed(name: String, value: int, delta: int) -> void:
+	if name in _shown_counters:
+		_show_counter_pop(name, value, delta)
 
 
-# shave_cooldown mid-run: only meaningful if a pending Force-Quit cooldown was
-# stamped this session (usually used from Journey Select instead).
-func _on_shave_cooldown_requested(hours: int) -> void:
-	if _pending_cooldown_until <= 0:
-		_show_save_toast("✕  NO ACTIVE COOLDOWN")
+# Lowest free vertical slot for a counter pop, so simultaneous changes STACK instead of overlapping.
+# A slot is held for the pop's lifetime and released in _show_pop; freeing the lowest means a
+# vanished pop's row is reused top-down (no reflow of the survivors — they hold their place).
+func _alloc_counter_pop_slot() -> int:
+	var i: int = 0
+	while _counter_pop_slots.has(i):
+		i += 1
+	_counter_pop_slots[i] = true
+	return i
+
+
+# A counter changed: "BELT  +1  → 3". Green for a gain, magenta for a loss.
+func _show_counter_pop(name: String, value: int, delta: int) -> void:
+	_show_pop(
+		name, "%+d" % delta, "→ %d" % value, UITheme.SUCCESS if delta >= 0 else UITheme.MAGENTA
+	)
+
+
+# Coins awarded: "COINS  +♦ 25  → ♦ 140". Rewards used to land silently, so the only clue was
+# the HUD number ticking — easy to miss mid-round.
+func _grant_coins(amount: int) -> void:
+	if amount <= 0:
 		return
-	_pending_cooldown_until = maxi(0, _pending_cooldown_until - hours * 3600)
-	_show_save_toast("✓  COOLDOWN −%dh" % hours)
+	CoinService.AddCoins(amount)
+	_show_pop("COINS", "+♦ %d" % amount, "→ ♦ %d" % CoinService.Balance, UITheme.AMBER)
 
 
-# ---------------------------------------------------------------------------
-# Inventory item gates (called by InventoryPanel before consuming)
-# ---------------------------------------------------------------------------
+# Grants an item and announces it. Returns false when the id no longer resolves (deleted from
+# the registry after authoring) — the caller stays silent rather than showing a misleading pop.
+func _grant_item(item_id: String) -> bool:
+	if item_id == "":
+		return false
+	var data: Dictionary = InventoryService.GetItemData(item_id)
+	if data.is_empty():
+		return false
+	InventoryService.AddItem(item_id)
+	_show_pop("✦ RECEIVED", str(data.get("name", item_id)).to_upper(), "", UITheme.CYAN)
+	return true
 
 
-# "" = ok to activate; "disabled" = grey out; otherwise toast and keep item.
-func inventory_activation_gate(data: Dictionary) -> String:
-	var kind: String = str(data.get("kind", ""))
-	match kind:
-		"skip_round":
-			return _skip_round_block_reason()
-		"shave_cooldown":
-			if _pending_cooldown_until > int(Time.get_unix_time_from_system()):
-				return ""
-			return "✕  NO ACTIVE COOLDOWN"
-		_:
-			return ""
+# The high CanvasLayer that carries reward pops above full-screen overlays (shop / intro cards, all on
+# layer 0) so a chip is never hidden behind one. Layer 3 — above the transition (1) and map (2), below
+# the exit-hold (4). Created lazily.
+func _ensure_pop_layer() -> CanvasLayer:
+	if _pop_layer == null or not is_instance_valid(_pop_layer):
+		_pop_layer = CanvasLayer.new()
+		_pop_layer.layer = 3
+		add_child(_pop_layer)
+	return _pop_layer
 
 
-# Non-empty = blocked (toast). Empty = allowed.
-func _skip_round_block_reason() -> String:
-	if _is_overlay_open:
-		return "✕  NOT DURING OVERLAY"
-	if _cutscene_playing:
-		var cut: Dictionary = GameState.CurrentCutscene()
-		if bool(cut.get("items_blocked", true)):
-			return "✕  ITEMS BLOCKED HERE"
-		return "✕  NOT IN A ROUND"
-	var round: Dictionary = GameState.CurrentRound()
-	if round.is_empty():
-		return "✕  NOT IN A ROUND"
-	if str(round.get("round_type", "normal")) == "boss":
-		return "✕  BLOCKED ON BOSS"
-	if bool(round.get("items_blocked", false)):
-		return "✕  ITEMS BLOCKED HERE"
-	# Must-release fail: skip would bypass punishment if we short-circuit; block.
-	if ReleaseLogic.fail_on_clean_finish(_release_cfg, false):
-		return "✕  MUST RELEASE — CAN'T SKIP"
-	if GameState.IsLastRound():
-		return "✕  LAST ROUND — CAN'T SKIP"
-	return ""
+# Slides a chip in from the right, holds, slides out. Non-blocking. Parented to a high CanvasLayer so it
+# stays above full-screen overlays (the HUD hides during play). `tail` may be "" for a two-part chip.
+func _show_pop(title: String, detail: String, tail: String, accent: Color) -> void:
+	var slot: int = _alloc_counter_pop_slot()
 
+	var pop: PanelContainer = PanelContainer.new()
+	pop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color = Color(
+		UITheme.PANEL_BG_DEEP.r, UITheme.PANEL_BG_DEEP.g, UITheme.PANEL_BG_DEEP.b, 0.92
+	)
+	s.border_color = accent
+	s.set_border_width_all(2)
+	s.set_corner_radius_all(6)
+	s.set_content_margin_all(10)
+	pop.add_theme_stylebox_override("panel", s)
 
-# Duration override for round-scoped modifiers (remaining round ms).
-func inventory_duration_override_ms(data: Dictionary) -> int:
-	if not bool(data.get("round_scoped", false)):
-		return -1
-	var left: float = _round_time_left()
-	if left > 0.0:
-		return maxi(1000, int(left * 1000.0))
-	# Unknown length — keep attenuation for a long fallback window.
-	return 3_600_000
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	pop.add_child(row)
+	var title_lbl: Label = Label.new()
+	title_lbl.text = title.to_upper()
+	UITheme.style_label(title_lbl, UITheme.WHITE_SOFT, 13, true)
+	row.add_child(title_lbl)
+	var detail_lbl: Label = Label.new()
+	detail_lbl.text = detail
+	UITheme.style_label(detail_lbl, accent, 13, true)
+	row.add_child(detail_lbl)
+	if tail != "":
+		var tail_lbl: Label = Label.new()
+		tail_lbl.text = tail
+		UITheme.style_label(tail_lbl, UITheme.DARK_TEXT, 13, true)
+		row.add_child(tail_lbl)
+
+	_ensure_pop_layer().add_child(pop)
+	await get_tree().process_frame  # let it size before we place it
+	if not is_instance_valid(pop):
+		_counter_pop_slots.erase(slot)
+		return
+	var screen_w: float = get_viewport_rect().size.x
+	var off_x: float = screen_w + 8.0  # off-screen right
+	var target_x: float = screen_w - pop.size.x - 16.0
+	# Stack downward from below the HUD bar, one row per slot.
+	pop.position = Vector2(off_x, COUNTER_POP_BASE_Y + slot * COUNTER_POP_STEP)
+	pop.modulate.a = 0.0
+
+	var tin: Tween = create_tween().set_parallel(true)
+	tin.tween_property(pop, "position:x", target_x, 0.35).set_trans(Tween.TRANS_BACK).set_ease(
+		Tween.EASE_OUT
+	)
+	tin.tween_property(pop, "modulate:a", 1.0, 0.25)
+	await tin.finished
+	await get_tree().create_timer(COUNTER_POP_HOLD_SECS).timeout
+	if not is_instance_valid(pop):
+		_counter_pop_slots.erase(slot)
+		return
+	var tout: Tween = create_tween().set_parallel(true)
+	tout.tween_property(pop, "position:x", off_x, 0.3).set_ease(Tween.EASE_IN)
+	tout.tween_property(pop, "modulate:a", 0.0, 0.3)
+	await tout.finished
+	_counter_pop_slots.erase(slot)
+	if is_instance_valid(pop):
+		pop.queue_free()
 
 
 # Brief auto-dismissing notification used after the save_now item fires. Keeps
 # the player in the round instead of pulling them into a modal.
-func _show_save_toast(text: String) -> void:
+func _show_save_toast(text: String, hold: float = 1.6) -> void:
 	var toast: PanelContainer = PanelContainer.new()
 	toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	toast.anchor_left = 0.5
@@ -2694,9 +2934,9 @@ func _show_save_toast(text: String) -> void:
 	toast.add_child(lbl)
 	add_child(toast)
 
-	# Fade out after ~2 seconds.
+	# Hold, then fade out (default ~2s total; callers with an actionable message pass a longer hold).
 	var tween: Tween = create_tween()
-	tween.tween_interval(1.6)
+	tween.tween_interval(hold)
 	tween.tween_property(toast, "modulate:a", 0.0, 0.4)
 	tween.finished.connect(func() -> void: toast.queue_free())
 
@@ -2720,13 +2960,11 @@ func _on_options_closed() -> void:
 	_update_muffle()
 	# Only resume if the round was not separately paused via the pause button —
 	# in that case the effect clock must stay frozen until the player resumes.
-	# Cutscenes never run FunscriptPlayer — do not Resume leftover actions.
 	if not _paused:
 		_video.paused = false
+		FunscriptPlayer.Resume()
 		InventoryService.SetPaused(false)
-		if not _cutscene_playing:
-			FunscriptPlayer.Resume()
-			_handy_resume()
+		_handy_resume()
 	# Output mode may have changed in Options — re-evaluate the disconnect
 	# banner against whatever backend is now selected.
 	_refresh_device_warning()
@@ -2758,11 +2996,9 @@ func _toggle_pause() -> void:
 		_pause_btn.text = "> RESUME"
 		_handy_pause()
 	else:
+		FunscriptPlayer.Resume()
 		_pause_btn.text = "|| PAUSE"
-		# Cutscenes never run FunscriptPlayer — do not Resume leftover actions.
-		if not _cutscene_playing:
-			FunscriptPlayer.Resume()
-			_handy_resume()
+		_handy_resume()
 	_update_muffle()
 
 
@@ -2783,6 +3019,55 @@ func _handy_stroke_selected() -> bool:
 	return SettingsService.get_stroke_target() == DeviceRouting.HANDY_TARGET
 
 
+# One-time journey-start sync for Handy WiFi: run the full clock handshake up front (behind a themed
+# overlay) so round 1 starts clean, confirm the device is live with a quick stroke, and only then let the
+# journey begin. No-op unless the Handy is the stroker with a key and isn't already synced; never BLOCKS
+# play — an unreachable device just falls through to deviceless, same as a round would. Skipped in test mode.
+func _handy_journey_sync_gate() -> void:
+	if _test_mode or not _handy_stroke_selected() or not HandyService.has_key():
+		return
+	if HandyService.is_connected_ok():
+		return  # already synced (e.g. CONNECT pressed in Options) — nothing to wait for
+
+	var overlay: ColorRect = ColorRect.new()
+	overlay.color = Color(0.0, 0.0, 0.0, 0.82)
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP  # swallow clicks while we sync
+	add_child(overlay)
+
+	var center: CenterContainer = CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.add_child(center)
+
+	var vb: VBoxContainer = VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 14)
+	center.add_child(vb)
+
+	var title: Label = Label.new()
+	title.text = "GETTING THE HANDY READY"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(title, UITheme.CYAN, 22, true)
+	vb.add_child(title)
+
+	var status: Label = Label.new()
+	status.text = "● Syncing with the device…"
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(status, UITheme.WHITE_SOFT, 14, false)
+	vb.add_child(status)
+
+	var ok: bool = await HandyService.connect_and_sync()
+	if ok:
+		status.text = "● Connected"
+		status.add_theme_color_override("font_color", UITheme.SUCCESS)
+		await HandyService.test_stroke()  # a quick buzz so you can feel it's live
+		await get_tree().create_timer(0.7).timeout
+	else:
+		status.text = "✕ Not reachable — playing without the Handy"
+		status.add_theme_color_override("font_color", UITheme.DANGER)
+		await get_tree().create_timer(1.4).timeout
+	overlay.queue_free()
+
+
 # Per-round setup: reachability/clock sync → load the script as HSP points →
 # open a session and start streaming at the current video position → apply the
 # stroke range. Any failure drops to a toast; the round plays without the device.
@@ -2791,8 +3076,10 @@ func _handy_begin_round(fs_path: String) -> void:
 	_handy_ready = false
 	if not _handy_active or fs_path == "":
 		return
-	if not await HandyService.connect_and_sync():
-		_show_save_toast("✕  THE HANDY IS UNREACHABLE — CHECK KEYS / WIFI")
+	# ensure_ready reuses the cached session clock-sync — only the FIRST round (or after a long gap) pays the
+	# full ~9-call handshake; later rounds skip straight to setup+play, so the device starts near-instantly.
+	if not await HandyService.ensure_ready():
+		_show_save_toast("✕  THE HANDY IS UNREACHABLE — CHECK KEYS / WIFI", 5.0)
 		return
 	HandyService.load_actions(JourneyData.read_funscript_actions(fs_path))
 	# Bake in this round's active stroke effects (boss/curse modifiers are added
@@ -2800,11 +3087,19 @@ func _handy_begin_round(fs_path: String) -> void:
 	HandyService.set_effects(
 		InventoryService.GetActiveEffects(), SettingsService.get_home_position()
 	)
-	if not await HandyService.start(int(_video.stream_position * 1000.0)):
-		_show_save_toast("✕  HANDY SYNC FAILED — ROUND PLAYS WITHOUT IT")
+	# Pass a live position source (not a snapshot): HandyService reads it AFTER /hsp/setup so the anchor and
+	# server_time line up — the video keeps advancing during the setup round-trip, and a stale snapshot here
+	# is what left the device ~1s behind for the round.
+	if not await HandyService.start(_handy_video_ms):
+		_show_save_toast("✕  HANDY SYNC FAILED — ROUND PLAYS WITHOUT IT", 5.0)
 		return
 	_handy_ready = true
 	await HandyService.set_slider(SettingsService.get_range_min(), SettingsService.get_range_max())
+
+
+# The live video clock in ms — passed to HandyService.start so it can read the anchor at play-send time.
+func _handy_video_ms() -> int:
+	return int(_video.stream_position * 1000.0)
 
 
 # Active stroke effects changed mid-round (item activated / expired, cleanse,
@@ -2833,13 +3128,17 @@ func _handy_pause() -> void:
 
 
 func _handy_resume() -> void:
+	# Re-anchor to the video clock rather than a bare /hsp/resume. Pause/resume aren't
+	# simultaneous with the device (each command is a network round-trip), so a plain resume
+	# leaves the device drifted by that latency; seeking to the current position wipes it.
 	if _handy_ready:
-		HandyService.resume()
+		HandyService.seek(int(_video.stream_position * 1000.0))
 
 
 func _handy_stop() -> void:
-	if _handy_ready:
-		HandyService.stop()
+	# Always call stop(): it clears any prewarmed-but-unused session flag and only sends /hsp/stop when the
+	# device is actually playing, so it's safe even on a round that never engaged the Handy.
+	HandyService.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -2955,6 +3254,10 @@ func _show_hud(fade: bool = false) -> void:
 	# Bringing the HUD back always brings the cursor back with it — real activity
 	# reveals both together.
 	_set_cursor_hidden(false)
+	# The warmup skip fades in and out with the HUD, but is NOT subject to the curse below: a
+	# player told they can leave a round must always be able to.
+	_fade_warmup_skip_button(true)
+	_fade_finish_button(true)  # fades in with the HUD (stays clickable at rest for an in-progress hold)
 	# A "Fog" curse hides the HUD for the whole round — don't let hover / timers
 	# reveal it.
 	if _curse_hud_hidden:
@@ -2973,6 +3276,8 @@ func _show_hud(fade: bool = false) -> void:
 
 func _on_hide_timer_timeout() -> void:
 	_hud.visible = false
+	_fade_warmup_skip_button(false)
+	_fade_finish_button(false)
 	# Hide the mouse cursor during uninterrupted playback so it stops covering the
 	# video — but only when there's nothing the player might need to click. If a
 	# menu/overlay/panel/map is up or the round is paused, keep it visible.
@@ -3059,36 +3364,34 @@ func _input(event: InputEvent) -> void:
 					if not _is_overlay_open and not _is_boss_round:
 						_on_inventory_pressed()
 						get_viewport().set_input_as_handled()
+				KEY_RIGHT:
+					# Test mode only: complete this round now (grant its rewards) and advance, so a long
+					# journey can be QC'd without watching each video through. No-op outside test mode.
+					if _test_mode and not _is_overlay_open:
+						_on_test_skip_round()
+						get_viewport().set_input_as_handled()
 				KEY_ESCAPE:
-					# Esc: close the Quick Settings drawer or inventory if open, otherwise leave to menu.
-					# Overlay screens (shop/storyboard) capture Esc themselves before
-					# it reaches here; the fork screen intentionally does not (no escape).
+					# Esc: close the Quick Settings drawer or inventory if open, otherwise begin the
+					# hold-to-exit (a stray tap can't dump the run; releasing cancels — see the key-up
+					# branch below). Overlay screens (shop/storyboard) capture Esc themselves before it
+					# reaches here; the fork screen intentionally does not (no escape).
 					if not _is_overlay_open:
 						if is_instance_valid(_session_panel):
 							_session_panel.close()
 						elif is_instance_valid(_inventory_panel):
 							_inventory_panel.close()
 						else:
-							_go_to_menu()
+							_begin_exit_hold()
 						get_viewport().set_input_as_handled()
 				KEY_S:
 					# S: toggle the in-play Quick Settings drawer (stroke range + delay).
 					if not _is_overlay_open:
 						_on_session_settings_pressed()
 						get_viewport().set_input_as_handled()
-				KEY_R:
-					# R: Release — same as the HUD button when the round enables it.
-					if not _is_overlay_open:
-						_on_release_pressed()
-						get_viewport().set_input_as_handled()
-				# Arrow keys: with Quick Settings open they nudge stroke range.
-				# With Dev Cheats on (and drawer closed): → complete, ↑ skip.
+				# Arrow keys nudge the stroke range, but only while the drawer is open: ↑/↓ max, →/← min.
 				KEY_UP:
 					if is_instance_valid(_session_panel):
 						_session_panel.nudge_range(0, STROKE_RANGE_STEP)
-						get_viewport().set_input_as_handled()
-					elif SettingsService.get_dev_cheats_enabled():
-						_dev_skip_node()
 						get_viewport().set_input_as_handled()
 				KEY_DOWN:
 					if is_instance_valid(_session_panel):
@@ -3097,9 +3400,6 @@ func _input(event: InputEvent) -> void:
 				KEY_RIGHT:
 					if is_instance_valid(_session_panel):
 						_session_panel.nudge_range(STROKE_RANGE_STEP, 0)
-						get_viewport().set_input_as_handled()
-					elif SettingsService.get_dev_cheats_enabled():
-						_dev_complete_round()
 						get_viewport().set_input_as_handled()
 				KEY_LEFT:
 					if is_instance_valid(_session_panel):
@@ -3122,6 +3422,9 @@ func _input(event: InputEvent) -> void:
 					if not _is_overlay_open:
 						_nudge_intiface_delay(DELAY_STEP)
 						get_viewport().set_input_as_handled()
+		elif not key_event.pressed and key_event.keycode == KEY_ESCAPE:
+			# Esc released — abort an in-progress hold-to-exit (a no-op when none is running).
+			_cancel_exit_hold()
 
 
 # ---------------------------------------------------------------------------
@@ -3206,10 +3509,13 @@ func _set_counter_color(c: Color, lbl: Label) -> void:
 
 
 func _connect_signals() -> void:
-	_video.finished.connect(_on_video_finished)
-	_end_timer.timeout.connect(_on_video_finished)
+	_video.finished.connect(_on_round_ended)
+	_end_timer.timeout.connect(_on_round_ended)
 	_pause_btn.pressed.connect(_toggle_pause)
-	_menu_btn.pressed.connect(_go_to_menu)
+	# MENU is hold-to-confirm too (matches Esc), so a misclick can't drop the run mid-play.
+	_menu_btn.button_down.connect(_begin_exit_hold)
+	_menu_btn.button_up.connect(_cancel_exit_hold)
+	_menu_btn.tooltip_text = "Hold to exit to the main menu"
 	_hide_timer.timeout.connect(_on_hide_timer_timeout)
 	_pause_btn.mouse_entered.connect(_show_hud)
 	_menu_btn.mouse_entered.connect(_show_hud)
@@ -3219,13 +3525,19 @@ func _connect_signals() -> void:
 	_inv_btn.mouse_entered.connect(_show_hud)
 	ScoreService.ScoreChanged.connect(_on_score_changed)
 	CoinService.BalanceChanged.connect(_on_coin_balance_changed)
+	GameState.CounterChanged.connect(_on_counter_changed)
+	# One-shots first: they apply + consume before the chips render, so a fire-once item effect
+	# (toll/interest/flag/counter) never flashes a chip.
+	InventoryService.ActiveEffectsChanged.connect(_apply_oneshot_item_effects)
 	InventoryService.ActiveEffectsChanged.connect(_refresh_effect_chips)
 	InventoryService.ActiveEffectsChanged.connect(_handy_effects_changed)
+	InventoryService.ActiveEffectsChanged.connect(_reconcile_sensory)
+	InventoryService.ActiveEffectsChanged.connect(_reconcile_hud_hide)
 	# save_now utility item: writes a save mid-round so the player can resume
 	# from the start of this round if they quit later. Doesn't end the run.
 	InventoryService.connect("SaveRequested", _on_save_item_used)
-	InventoryService.connect("SkipRoundRequested", _on_skip_round_requested)
-	InventoryService.connect("ShaveCooldownRequested", _on_shave_cooldown_requested)
+	# skip_round utility item: ends the round here, paying nothing.
+	InventoryService.connect("SkipRoundRequested", _on_skip_item_used)
 
 	# Device-connection signals — surface a banner when the currently selected
 	# output device drops its connection, and clear it on reconnect. We watch
@@ -3364,12 +3676,33 @@ func _refresh_coin_label(instant: bool = false) -> void:
 func _refresh_effect_chips() -> void:
 	for child in _chips_row.get_children():
 		child.queue_free()
+	# Blackout is decided over EVERY active effect; chips render the consolidated view so a multi-
+	# effect item shows one chip, not one identical chip per bundled effect.
 	var has_blackout: bool = false
 	for effect: Dictionary in InventoryService.GetActiveEffects():
-		_chips_row.add_child(_make_chip(effect))
 		if effect.get("kind", "") == "blackout":
 			has_blackout = true
+	for effect: Dictionary in _visible_effects():
+		_chips_row.add_child(_make_chip(effect))
 	_video.visible = not has_blackout
+
+
+# One representative effect per HUD chip. Effects from the same item activation (a shared non-empty
+# id + start time) collapse to a single chip — a multi-effect modifier item is one item to the player,
+# so it reads as one chip with the item's name. Boss / effect-round effects carry no start_time_ms and
+# are never grouped, so each keeps its own chip.
+func _visible_effects() -> Array:
+	var out: Array = []
+	var seen: Dictionary = {}
+	for fx: Dictionary in InventoryService.GetActiveEffects():
+		var id: String = str(fx.get("id", ""))
+		if id != "" and fx.has("start_time_ms"):
+			var key: String = "%s|%s" % [id, str(fx.get("start_time_ms"))]
+			if seen.has(key):
+				continue
+			seen[key] = true
+		out.append(fx)
+	return out
 
 
 func _make_chip(effect: Dictionary) -> Control:
@@ -3407,8 +3740,12 @@ func _make_chip(effect: Dictionary) -> Control:
 
 func _update_chip_text(lbl: Label, effect: Dictionary) -> void:
 	var name_str: String = (effect.get("name", "") as String).to_upper()
-	# Boss forced modifiers last the whole round — no countdown.
-	if effect.get("boss", false):
+	# Boss forced modifiers last the whole round, and coin effects settle at round end (they don't run
+	# on a wall clock) — neither shows a countdown.
+	if (
+		effect.get("boss", false)
+		or String(effect.get("kind", "")) in ["coin_jackpot", "coin_penalty"]
+	):
 		lbl.text = name_str
 		return
 	var remaining: float = InventoryService.GetRemainingSeconds(effect)
@@ -3416,7 +3753,7 @@ func _update_chip_text(lbl: Label, effect: Dictionary) -> void:
 
 
 func _update_chip_countdowns() -> void:
-	var effects: Array = InventoryService.GetActiveEffects()
+	var effects: Array = _visible_effects()
 	if effects.size() != _chips_row.get_child_count():
 		_refresh_effect_chips()
 		return

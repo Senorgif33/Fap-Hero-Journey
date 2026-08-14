@@ -42,12 +42,29 @@ var map_mode: bool = false
 var _pan_offset: Vector2 = Vector2(40, 40)
 var _zoom: float = 1.0
 var _panning: bool = false
+# Keyboard panning (builder only — the map/end-screen leave it off). Arrows or WASD scroll the
+# canvas at a steady on-screen rate; screen-space so the feel is the same at any zoom.
+var keyboard_pan_enabled: bool = false
+const KEY_PAN_SPEED: float = 1100.0  # screen px / second
 var _last_mouse: Vector2 = Vector2.ZERO
 var _has_initial_center: bool = false
 
 # Auto-layout artefacts (rebuilt on refresh).
 # Edges: list of {from: Vector2, to: Vector2, color: Color, dashed?: bool}
 var _edges: Array = []
+
+# Region bands drawn beneath the edges/nodes — one per Loop pair: {rect: Rect2, color: Color}.
+var _bands: Array = []
+
+# Map backdrops (a journey's location images, a stack drawn beneath everything in canvas-local space). The
+# editor can toggle a reposition mode on ONE layer: a full-view catcher turns left-drag into "move that
+# layer" without disturbing the nodes. Emits backdrop_moved(index, offset) on release so the builder can
+# persist it. _backdrops mirrors what's on the canvas so drags/transforms can mutate in place.
+signal backdrop_moved(index: int, offset: Vector2)
+var _backdrops: Array = []  # [{texture, offset, scale, opacity}]
+var _backdrop_catcher: Control = null
+var _backdrop_dragging: bool = false
+var _reposition_index: int = -1  # which layer the catcher drags; -1 = off
 
 # The free-form graph model (GRAPH_EDITOR_OVERHAUL.md): {start, nodes:{id:{type,data,pos,out}}}.
 # Rendered by _layout_graph — nodes at their saved pos, edges from each node's out-list.
@@ -58,11 +75,13 @@ var _fog_enabled: bool = false
 var _fog_depth: int = 1  # ghost levels revealed beyond the visited trail (< 0 = whole structure)
 var _fog_revealed: Dictionary = {}  # node_id -> true (discovered this run; full render)
 var _fog_ghost: Dictionary = {}  # node_id -> true (within _fog_depth of the trail; "?" ghost render)
+var _ghost_nodes: Dictionary = {}  # node_id -> true; rendition PARENT nodes — dimmed, read-only base
 var _selected_ids: Array = []  # selected node ids (graph mode) — drives the highlight + group ops
 var _current_layout_node_id: String = ""  # transient: the node _make_node is building (graph mode)
 var _node_ctrls: Dictionary = {}  # node_id -> Control (graph mode), for live drag moves
 var _node_warnings: Dictionary = {}  # node_id -> soft-validation summary (author badge); pulled per layout
 var warning_provider: Callable = Callable()  # builder hook → {node_id: warning}; called each layout (editor only)
+var finish_id_provider: Callable = Callable()  # builder hook → the FINISH aftercare-entry node id; badged each layout
 # Traffic heatmap (audit Monte-Carlo results): {nodes: {id: pct}, edges: {"id:ei": pct}}.
 # Non-empty → editor edges are tinted/thickened by traffic share and nodes get a % chip.
 # Never rendered in map_mode (player map / image export). Set via set_traffic({}) to clear.
@@ -85,6 +104,7 @@ var _comment_ctrls: Array = []  # index -> Control, rebuilt each layout
 var _dragging_comment: int = -1  # the pressed comment index, or -1 when none
 var _comment_drag_moved: bool = false
 var _comment_drag_started: bool = false
+var _selected_comments: Array = []  # comment indices grabbed by a marquee — move + delete with the nodes
 
 # Group-frame drag/resize state — a labelled rectangle that moves the nodes inside it.
 var _frame_ctrls: Array = []  # index -> Control, rebuilt each layout
@@ -106,7 +126,7 @@ var _connect_drag_edge_idx: int = -1  # fork choice index, or -1 for a regular n
 var _connect_drag_from: Vector2 = Vector2.ZERO  # canvas-space handle position (line start)
 var _connect_drag_to: Vector2 = Vector2.ZERO  # canvas-space cursor position (line end)
 var _connect_drag_target: String = ""  # node under the cursor (the drop target), or ""
-var _connect_drag_invalid: Dictionary = {}  # node ids that can't be targets (self + disallowed cycles)
+var _connect_drag_invalid: Dictionary = {}  # node ids that can't be targets (source + ancestors → would cycle)
 
 # Marquee (box-select) state, in GraphView-local (screen) space.
 var _marquee_active: bool = false
@@ -187,6 +207,12 @@ func _ready() -> void:
 
 # Render entry: set the graph model and rebuild — nodes at their saved positions,
 # edges from out-lists. See _layout_graph.
+# Marks a set of nodes as "ghosted" — the dimmed, read-only base nodes shown behind a rendition overlay
+# being authored. Call before set_graph (the render reads this). Empty dict = normal editing.
+func set_ghost_nodes(ids: Dictionary) -> void:
+	_ghost_nodes = ids.duplicate()
+
+
 func set_graph(graph: Dictionary) -> void:
 	_graph_model = graph
 	refresh()
@@ -271,6 +297,9 @@ func _layout_graph() -> void:
 	_node_warnings = (
 		warning_provider.call() if (not map_mode and warning_provider.is_valid()) else {}
 	)
+	var finish_node_id: String = (
+		str(finish_id_provider.call()) if (not map_mode and finish_id_provider.is_valid()) else ""
+	)
 	# Group frames render at the very back, then sticky-note comments, then the nodes on top. Both are
 	# editor furniture the player map never has; image export shows them static (map_mode → no gui_input).
 	_frame_ctrls = []
@@ -295,6 +324,8 @@ func _layout_graph() -> void:
 		cc.position = (comments[ci] as Dictionary).get("pos", Vector2.ZERO)
 		_canvas.add_child(cc)
 		_comment_ctrls.append(cc)
+	# Per-type ordinals so a node can show its number (e.g. "STORYBOARD 4") matching save-error text.
+	var ord_map: Dictionary = JourneyGraph.type_ordinals(nodes)
 	for id: String in nodes:
 		if _collapsed_frame_of.has(id):  # inside a collapsed group — drawn as the collapsed bar instead
 			continue
@@ -314,13 +345,23 @@ func _layout_graph() -> void:
 		if not map_mode:  # author-only badges (never on the player map)
 			disp["warning"] = str(_node_warnings.get(id, ""))
 			disp["is_start"] = (id == str(_graph_model.get("start", "")))
+			disp["is_finish"] = (finish_node_id != "" and id == finish_node_id)
+			disp["type_ordinal"] = int(ord_map.get(id, 0))
 		var ctrl: Control = _make_node(disp, JourneyGraph.is_end(_graph_model, id))
 		ctrl.position = n.get("pos", Vector2.ZERO)
 		ctrl.set_meta("graph_node_id", id)
-		if not map_mode:  # player-facing map: nodes are read-only (no select/drag wiring)
+		# player-facing map is read-only; ghosted rendition parent nodes are read-only too (no
+		# select/drag/edit — they're the locked base behind the overlay being authored). The exception:
+		# a ghosted base FORK or ROUND is select-only, so the rendition can add overlay choices (fork) or
+		# channel overlays (round) to it. Other ghosted node types stay fully locked.
+		if not map_mode and not _ghost_nodes.has(id):
 			ctrl.gui_input.connect(_on_graph_node_gui_input.bind(id))
+		elif not map_mode and str(n.get("type", "")) in ["fork", "round"]:
+			ctrl.gui_input.connect(_on_ghost_node_gui_input.bind(id))
 		_canvas.add_child(ctrl)
 		_node_ctrls[id] = ctrl
+		if _ghost_nodes.has(id):
+			ctrl.modulate = Color(1, 1, 1, 0.4)  # rendition parent node — ghosted (read-only)
 		if not map_mode and not _traffic.is_empty():
 			_attach_traffic_chip(
 				ctrl, float((_traffic.get("nodes", {}) as Dictionary).get(id, 0.0))
@@ -328,7 +369,9 @@ func _layout_graph() -> void:
 		# Route recap: everything the run didn't visit is ghosted.
 		if not _route_nodes.is_empty() and not _route_nodes.has(id):
 			ctrl.modulate = Color(1, 1, 1, 0.35)
-	# Out-handles in a second pass so they're the topmost (always-clickable) children.
+	# Out-handles in a second pass so they're the topmost (always-clickable) children. Ghosted parent
+	# nodes DO get a handle — dragging from it attaches a rendition ANCHOR to a new node (the builder
+	# routes a ghosted source to an additive anchor edge rather than mutating the locked base).
 	if not map_mode:
 		for id: String in nodes:
 			if _node_ctrls.has(id):
@@ -357,6 +400,8 @@ func _layout_graph() -> void:
 				continue
 			drawn[key] = true
 			var color: Color = UITheme.FORK_EDGE if is_fork else UITheme.EDGE
+			if bool(e.get("_anchor", false)):
+				color = UITheme.CYAN  # rendition overlay edge (anchor / overlay fork choice / slot fill)
 			var width: float = 2.0
 			if not map_mode and not _traffic.is_empty():
 				# Heatmap: the edge's traffic share replaces its type color —
@@ -374,6 +419,25 @@ func _layout_graph() -> void:
 				else:
 					color = Color(color, color.a * 0.22)
 			_add_edge_between(src_ctrl, tgt_ctrl, color, width)
+	# Loop pairs: the End's loop_to is a special back-jump (not an out-edge), drawn dashed in the loop
+	# colour so the replayed stretch reads as distinct from forward flow — and a faint band is laid behind
+	# the whole Start→body→End region so the looped stretch is legible at a glance.
+	_bands.clear()
+	for id: String in nodes:
+		var ln: Dictionary = nodes[id]
+		if str(ln.get("type", "")) != "loop_end":
+			continue
+		var back: String = str((ln.get("data", {}) as Dictionary).get("loop_to", ""))
+		if back == "":
+			continue
+		var lsrc: Control = _edge_endpoint_ctrl(id)
+		var ltgt: Control = _edge_endpoint_ctrl(back)
+		if lsrc == null or ltgt == null or lsrc == ltgt:
+			continue
+		if not map_mode:  # the region band is an editor aid — skip it on the player's (fogged) map
+			_add_loop_band(back, id, nodes)
+		_add_edge_between(lsrc, ltgt, UITheme.TOXIC_GREEN, 2.0, true)
+	_canvas.set_bands(_bands)
 	_canvas.set_edges(_edges)
 	_resize_canvas_to_content(_graph_content_size(_node_ctrls))
 	if not _has_initial_center:
@@ -475,6 +539,20 @@ func _on_graph_node_gui_input(event: InputEvent, node_id: String) -> void:
 	accept_event()
 
 
+# A ghosted base FORK or ROUND is select-only during rendition authoring: a left-click selects it (so the
+# side panel opens the rendition fork editor / channel-overlay editor) but never arms a drag or joins a
+# marquee — the locked base can't be moved or multi-edited. Out-handles still drive anchor/slot connects.
+func _on_ghost_node_gui_input(event: InputEvent, node_id: String) -> void:
+	if not (event is InputEventMouseButton):
+		return
+	var mb := event as InputEventMouseButton
+	if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+		if _connect_mode:
+			return  # not a valid connect target — you attach overlay content, not the base
+		_set_selection([node_id])
+		accept_event()
+
+
 # Drives a node drag armed by _on_graph_node_gui_input. Global (not gui_input) so it keeps tracking
 # when the cursor leaves the node. Moves the WHOLE selection live; grid-snaps each on release. A
 # press with no motion collapses a kept multi-selection to the pressed node. No-op when no drag.
@@ -505,6 +583,7 @@ func _input(event: InputEvent) -> void:
 				n["pos"] = (n.get("pos", Vector2.ZERO) as Vector2) + delta
 				if _node_ctrls.has(id):
 					(_node_ctrls[id] as Control).position = n["pos"]
+		_move_selected_comments(delta)  # pinned + marquee-selected notes move with the drag
 		_drag_moved = true
 		get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton:
@@ -516,6 +595,11 @@ func _input(event: InputEvent) -> void:
 					var n2: Dictionary = nodes.get(id, {})
 					if not n2.is_empty():
 						n2["pos"] = GraphLayout.snap(n2.get("pos", Vector2.ZERO))
+				var moved_cmts: Array = _graph_model.get("comments", [])
+				for ci: int in moved_cmts.size():
+					var c2: Dictionary = moved_cmts[ci]
+					if _selected_ids.has(str(c2.get("node_id", ""))) or _selected_comments.has(ci):
+						c2["pos"] = GraphLayout.snap(c2.get("pos", Vector2.ZERO))
 				refresh()  # re-render: highlights, grid-snapped positions, edges reconnected
 			elif _drag_collapse_to != "":
 				_set_selection([_drag_collapse_to])  # plain click on a multi-selected node → just it
@@ -529,14 +613,28 @@ func _input(event: InputEvent) -> void:
 # Adds the out-handle nub(s) to a node's bottom edge: one centred handle for a regular node (its
 # single out-edge), one per choice for a fork (spread along the bottom, tinted like fork edges).
 func _add_out_handles(node_id: String, node: Dictionary, node_pos: Vector2) -> void:
+	var ghost: bool = _ghost_nodes.has(node_id)
 	if node.get("type", "") == "fork":
 		var out: Array = node.get("out", [])
 		var count: int = maxi(1, out.size())
 		for ei in count:
+			# On a ghosted base fork, only an OPEN choice (blank `to`) — or one this overlay already
+			# filled (`_anchor`, so it can be re-pointed) — is draggable; base-wired choices stay locked.
+			if ghost:
+				var e: Dictionary = out[ei] if ei < out.size() else {}
+				if str(e.get("to", "")) != "" and not bool(e.get("_anchor", false)):
+					continue
 			var fx: float = NODE_WIDTH * float(ei + 1) / float(count + 1)
 			_make_handle(node_id, ei, node_pos + Vector2(fx, NODE_HEIGHT), UITheme.FORK_EDGE)
-	else:
-		_make_handle(node_id, -1, node_pos + Vector2(NODE_WIDTH * 0.5, NODE_HEIGHT), UITheme.EDGE)
+		return
+	# A ghosted non-fork node only offers a handle when it's an ENDING: a rendition anchor extends a base
+	# ending, so mid-graph base nodes (which already continue) get no handle to drag from. An anchor edge
+	# already added by the overlay doesn't disqualify it — the handle stays so its anchor can be re-pointed.
+	if ghost:
+		for e: Dictionary in node.get("out", []):
+			if not bool(e.get("_anchor", false)):
+				return  # a real base continuation — not an ending
+	_make_handle(node_id, -1, node_pos + Vector2(NODE_WIDTH * 0.5, NODE_HEIGHT), UITheme.EDGE)
 
 
 # One out-handle nub (a small circle straddling the bottom edge). Dragging it starts a connect-drag.
@@ -576,7 +674,7 @@ func _on_handle_gui_input(
 			_connect_drag_from = center
 			_connect_drag_to = center
 			_connect_drag_target = ""
-			_connect_drag_invalid = _disallowed_connect_targets(node_id)
+			_connect_drag_invalid = _ancestors_and_self(node_id)
 			# A fork can't point two choices at the same node — block any node another of this fork's
 			# choices already targets (one choice per target).
 			if edge_idx >= 0:
@@ -610,7 +708,7 @@ func _handle_connect_drag_input(event: InputEvent) -> void:
 			_connect_drag_source = ""
 			_connect_drag_target = ""
 			queue_redraw()
-			# Valid drop only: a node, not the source, not a disallowed cycle target.
+			# Valid drop only: a node, not the source, not an ancestor (which would form a cycle).
 			if target != "" and target != src and not _connect_drag_invalid.has(target):
 				edge_drawn.emit(src, eidx, target)
 			get_viewport().set_input_as_handled()
@@ -625,16 +723,28 @@ func _node_at_canvas_point(p: Vector2) -> String:
 	return ""
 
 
-# Targets that must not be wired from `source`: the source itself, plus any node where
-# source→that node would form a disallowed (non-fork-hub) cycle. Fork hubs may be re-entered.
-func _disallowed_connect_targets(source: String) -> Dictionary:
-	var invalid: Dictionary = {source: true}
+# Set of node ids that must NOT be wire targets for `source` — the source itself plus every node that
+# can reach it (an edge source→ancestor would close a cycle). Reverse BFS over the out-edges.
+func _ancestors_and_self(source: String) -> Dictionary:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var preds: Dictionary = {}
 	for id: String in nodes:
-		if id == source:
-			continue
-		if JourneyGraph.would_create_disallowed_cycle(_graph_model, source, id):
-			invalid[id] = true
+		preds[id] = []
+	for id: String in nodes:
+		for e: Dictionary in (nodes[id] as Dictionary).get("out", []):
+			var to: String = str(e.get("to", ""))
+			if to != "" and nodes.has(to):
+				(preds[to] as Array).append(id)
+	var invalid: Dictionary = {source: true}
+	var queue: Array = [source]
+	var qi: int = 0
+	while qi < queue.size():
+		var cur: String = queue[qi]
+		qi += 1
+		for p: String in preds.get(cur, []) as Array:
+			if not invalid.has(p):
+				invalid[p] = true
+				queue.append(p)
 	return invalid
 
 
@@ -642,8 +752,20 @@ func _disallowed_connect_targets(source: String) -> Dictionary:
 # helpers and the public select/clear all funnel through here so there's one emit path.
 func _set_selection(ids: Array) -> void:
 	_selected_ids = ids.duplicate()
+	_selected_comments = []  # a node click / clear resets any marquee note-selection (marquee re-sets it after)
 	refresh()
 	graph_selection_changed.emit(_selected_ids)
+
+
+# The comment indices grabbed by a marquee (for the builder's multi-delete).
+func get_selected_comments() -> Array:
+	return _selected_comments.duplicate()
+
+
+func clear_selected_comments() -> void:
+	if not _selected_comments.is_empty():
+		_selected_comments = []
+		refresh()
 
 
 # Ctrl+click: toggle a node in/out of the selection.
@@ -855,6 +977,17 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 		row.add_child(start_lbl)
 		row.move_child(start_lbl, 0)
 
+	# FINISH marker — the aftercare-sequence entry played by the "I came" button (off the main graph).
+	if item.get("is_finish", false):
+		var finish_lbl: Label = Label.new()
+		finish_lbl.text = "🏁 FINISH"
+		finish_lbl.add_theme_color_override("font_color", UITheme.MAGENTA)
+		finish_lbl.add_theme_font_size_override("font_size", 11)
+		finish_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		finish_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(finish_lbl)
+		row.move_child(finish_lbl, 0)
+
 	# Labels column
 	var col: VBoxContainer = VBoxContainer.new()
 	col.add_theme_constant_override("separation", 2)
@@ -932,9 +1065,9 @@ func _type_color(item_type: String) -> Color:
 			return UITheme.CYAN
 		"fork":
 			return UITheme.MAGENTA
-		"cooldown":
-			return UITheme.DANGER
-		"cutscene":
+		"checkpoint":
+			return UITheme.SUCCESS
+		"loop_start", "loop_end":
 			return UITheme.TOXIC_GREEN
 	return UITheme.PURPLE_MID
 
@@ -949,10 +1082,12 @@ func _type_icon(item_type: String) -> String:
 			return "◈"
 		"fork":
 			return "⑂"
-		"cooldown":
-			return "⏳"
-		"cutscene":
-			return "▣"
+		"checkpoint":
+			return "⚑"
+		"loop_start":
+			return "▸"
+		"loop_end":
+			return "↺"
 	return "•"
 
 
@@ -993,12 +1128,13 @@ func _type_label(item: Dictionary) -> String:
 		"fork":
 			var n3: String = item.get("title", "")
 			return n3 if n3 != "" else "Fork"
-		"cooldown":
-			var n4: String = item.get("name", "")
-			return n4 if n4 != "" else "Cooldown"
-		"cutscene":
-			var n5: String = item.get("name", "")
-			return n5 if n5 != "" else "Cutscene"
+		"checkpoint":
+			var cn: String = item.get("name", "")
+			return cn if cn != "" else "Checkpoint"
+		"loop_start":
+			return "Loop Start"
+		"loop_end":
+			return "Loop End"
 	return "?"
 
 
@@ -1014,28 +1150,35 @@ func _type_sublabel(item: Dictionary) -> String:
 					rlabel = "BOSS ROUND"
 				"effect", "cursed", "blessed":
 					rlabel = "✦ EFFECT ROUND"
-			# Checkpoint marker — author-set save point, honoured on every round
-			# type (the banner shows before a boss round's intro card).
-			if item.get("is_checkpoint", false):
-				rlabel += "   ◆ CHECKPOINT"
-			# Pending-trim marker (editor only by construction: saved journeys
-			# never carry trim keys — the save consumes them into the media).
-			var t_in: int = int(item.get("trim_start_ms", 0))
-			var t_out: int = int(item.get("trim_end_ms", 0))
-			if t_in > 0 or t_out > 0:
+			# (Checkpoints are their own node type now — no per-round marker.)
+			if item.get("is_warmup", false):
+				rlabel += "   ⏭ WARMUP"
+			# Pending-segments marker (editor only by construction: saved journeys never
+			# carry segment keys — the save consumes them into the media). One segment
+			# reads as the trim it is; several show the count instead of an unreadable
+			# list of windows.
+			var segs: Array = JourneyData.normalize_segments(item)
+			if segs.size() == 1:
+				var s: Dictionary = segs[0]
+				var s_out: int = int(s.get("out_ms", 0))
 				rlabel += (
 					"   ✂ %s–%s"
 					% [
-						JourneyData.ms_to_mmss(t_in),
-						JourneyData.ms_to_mmss(t_out) if t_out > 0 else "END",
+						JourneyData.ms_to_mmss(int(s.get("in_ms", 0))),
+						JourneyData.ms_to_mmss(s_out) if s_out > 0 else "END",
 					]
 				)
+			elif segs.size() > 1:
+				rlabel += "   ✂ %d SEGMENTS" % segs.size()
 			return "%s   ♦ %d" % [rlabel, c] if c > 0 else rlabel
 		"shop":
 			return "SHOP"
 		"storyboard":
 			var n: int = (item.get("lines", []) as Array).size()
-			var sub: String = "STORYBOARD   %d LINE%s" % [n, "S" if n != 1 else ""]
+			# Show the storyboard's number (matches "Storyboard N" in save errors) when known.
+			var ord: int = int(item.get("type_ordinal", 0))
+			var head: String = "STORYBOARD %d" % ord if ord > 0 else "STORYBOARD"
+			var sub: String = "%s   %d LINE%s" % [head, n, "S" if n != 1 else ""]
 			var rewards: Array = []
 			if int(item.get("coins", 0)) > 0:
 				rewards.append("♦ %d" % int(item.get("coins", 0)))
@@ -1049,18 +1192,38 @@ func _type_sublabel(item: Dictionary) -> String:
 			return (
 				"%s   %d PATHS" % [_fork_type_label(item.get("resolution", "choice")), paths.size()]
 			)
-		"cooldown":
-			var days: int = maxi(1, int(item.get("days", 1)))
-			return "COOLDOWN   %d DAY%s" % [days, "S" if days != 1 else ""]
-		"cutscene":
-			var csub: String = "CUTSCENE"
-			if item.get("is_checkpoint", false):
-				csub += "   ◆ CHECKPOINT"
-			if bool(item.get("items_blocked", true)):
-				csub += "   ITEMS BLOCKED"
-			var cc: int = int(item.get("coins", 0))
-			return "%s   ♦ %d" % [csub, cc] if cc > 0 else csub
+		"checkpoint":
+			return "SAVE POINT"
+		"loop_start":
+			return "TOP OF THE LOOP"
+		"loop_end":
+			var conds: Array = item.get("loop_conditions", [])
+			if conds.is_empty():
+				return "LOOP   (PLAYS ONCE)"
+			if conds.size() == 1:
+				return "LOOP   " + _loop_cond_short(conds[0])  # show the actual rule, not "1 condition"
+			var combine: String = "ALL" if str(item.get("loop_combine", "any")) == "all" else "ANY"
+			return "LOOP   EXIT %s OF %d" % [combine, conds.size()]
 	return ""
+
+
+# A compact one-line description of a single loop exit condition, for the Loop End node sublabel.
+func _loop_cond_short(c: Dictionary) -> String:
+	match str(c.get("kind", "repeats")):
+		"repeats":
+			return "×%d" % int(c.get("count", 1))
+		"counter":
+			var cn: String = str(c.get("counter", "")).strip_edges()
+			var op: String = "≤" if str(c.get("cmp", "gte")) == "lte" else "≥"
+			return (
+				"UNTIL %s %s %d" % [cn if cn != "" else "COUNTER", op, int(c.get("threshold", 0))]
+			)
+		"flag":
+			var fn: String = str(c.get("flag", "")).strip_edges()
+			return "UNTIL %s SET" % (fn if fn != "" else "FLAG")
+		"item":
+			return "UNTIL HAS ITEM"
+	return "EXIT"
 
 
 # Sublabel prefix for a fork node, by resolution: "FORK" (choice), "RANDOM FORK",
@@ -1074,6 +1237,142 @@ func _fork_type_label(resolution: String) -> String:
 		"sacrifice":
 			return "SACRIFICE FORK"
 	return "FORK"
+
+
+# ---------------------------------------------------------------------------
+# Loop region bands
+# ---------------------------------------------------------------------------
+
+
+# Appends a faint region band behind a Loop pair: the bounding box of the Start, the End, and every body
+# node between them, padded a little. Canvas-local coords — drawn on _canvas beneath the edges and cards.
+func _add_loop_band(start_id: String, end_id: String, nodes: Dictionary) -> void:
+	var body: Dictionary = _loop_body_ids(start_id, end_id, nodes)
+	var min_p: Vector2 = Vector2(INF, INF)
+	var max_p: Vector2 = Vector2(-INF, -INF)
+	var found: bool = false
+	for nid: String in body:
+		if not _node_ctrls.has(nid):
+			continue
+		var c: Control = _node_ctrls[nid]
+		found = true
+		min_p.x = minf(min_p.x, c.position.x)
+		min_p.y = minf(min_p.y, c.position.y)
+		max_p.x = maxf(max_p.x, c.position.x + c.size.x)
+		max_p.y = maxf(max_p.y, c.position.y + c.size.y)
+	if not found:
+		return
+	var pad: float = 14.0
+	var rect: Rect2 = Rect2(min_p - Vector2(pad, pad), (max_p - min_p) + Vector2(pad, pad) * 2.0)
+	_bands.append({"rect": rect, "color": UITheme.TOXIC_GREEN})
+
+
+# Body node ids of a Loop pair: the Start, the End, and every node on a path from Start to End. A forward
+# walk from the Start intersected with the End's ancestors (loop_to isn't an edge, so the exit branch past
+# the End is excluded). Local to the display graph — no dependency on the editor model.
+func _loop_body_ids(start_id: String, end_id: String, nodes: Dictionary) -> Dictionary:
+	var forward: Dictionary = {}
+	var stack: Array = [start_id]
+	while not stack.is_empty():
+		var id: String = str(stack.pop_back())
+		if id == "" or forward.has(id) or not nodes.has(id):
+			continue
+		forward[id] = true
+		for e: Dictionary in (nodes[id] as Dictionary).get("out", []):
+			stack.append(str(e.get("to", "")))
+	var reaches_end: Dictionary = {}
+	stack = [end_id]
+	while not stack.is_empty():
+		var id: String = str(stack.pop_back())
+		if id == "" or reaches_end.has(id) or not nodes.has(id):
+			continue
+		reaches_end[id] = true
+		for pid: String in nodes:  # predecessors of `id`
+			for e: Dictionary in (nodes[pid] as Dictionary).get("out", []):
+				if str(e.get("to", "")) == id:
+					stack.append(pid)
+	var body: Dictionary = {start_id: true, end_id: true}
+	for id: String in forward:
+		if reaches_end.has(id):
+			body[id] = true
+	return body
+
+
+# ---------------------------------------------------------------------------
+# Map backdrop
+# ---------------------------------------------------------------------------
+
+
+# Sets the full backdrop stack (empty clears), forwarding to the canvas. Each entry is
+# {texture, offset, scale, opacity}. Offsets/scales are canvas-local — the same space as node positions —
+# so the same values give identical alignment in the editor and the in-game map.
+func set_backdrops(list: Array) -> void:
+	_backdrops = list
+	_canvas.set_backdrops(list)
+
+
+# Updates just one layer's placement, reusing the loaded texture — for live slider edits without reload.
+func set_backdrop_transform(
+	index: int, offset: Vector2, image_scale: float, opacity: float, rotation: float
+) -> void:
+	if index < 0 or index >= _backdrops.size():
+		return
+	var b: Dictionary = _backdrops[index]
+	b["offset"] = offset
+	b["scale"] = image_scale
+	b["opacity"] = opacity
+	b["rotation"] = rotation
+	_canvas.set_backdrops(_backdrops)
+
+
+# Editor only: reposition mode on layer `index` (-1 = off). While on, a full-view catcher turns left-drag
+# into "move that layer" (wheel still zooms) so the author can slide it under the nodes. Persists on release.
+func set_backdrop_reposition(index: int) -> void:
+	_reposition_index = index
+	if index >= 0 and _backdrop_catcher == null:
+		_backdrop_catcher = Control.new()
+		_backdrop_catcher.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_backdrop_catcher.mouse_filter = Control.MOUSE_FILTER_STOP
+		_backdrop_catcher.gui_input.connect(_on_backdrop_catcher_input)
+		var hint: Label = Label.new()
+		hint.text = "REPOSITIONING BACKDROP — DRAG TO MOVE, SCROLL TO ZOOM. TURN OFF WHEN DONE."
+		hint.add_theme_color_override("font_color", UITheme.CYAN)
+		hint.add_theme_font_size_override("font_size", 12)
+		hint.position = Vector2(12, 12)
+		hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_backdrop_catcher.add_child(hint)
+		add_child(_backdrop_catcher)
+	elif index < 0 and _backdrop_catcher != null:
+		_backdrop_catcher.queue_free()
+		_backdrop_catcher = null
+
+
+func _on_backdrop_catcher_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
+			_zoom_at(mb.position, _zoom + ZOOM_STEP)
+		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
+			_zoom_at(mb.position, _zoom - ZOOM_STEP)
+		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			if mb.pressed:
+				_backdrop_dragging = true
+				_last_mouse = mb.position
+			elif _backdrop_dragging:
+				_backdrop_dragging = false
+				if _reposition_index >= 0 and _reposition_index < _backdrops.size():
+					backdrop_moved.emit(
+						_reposition_index, (_backdrops[_reposition_index] as Dictionary)["offset"]
+					)
+		_backdrop_catcher.accept_event()
+	elif event is InputEventMouseMotion and _backdrop_dragging:
+		if _reposition_index >= 0 and _reposition_index < _backdrops.size():
+			var mm := event as InputEventMouseMotion
+			var b: Dictionary = _backdrops[_reposition_index]
+			b["offset"] = (b["offset"] as Vector2) + (mm.position - _last_mouse) / _zoom
+			_last_mouse = mm.position
+			_canvas.set_backdrops(_backdrops)
+		_backdrop_catcher.accept_event()
 
 
 # ---------------------------------------------------------------------------
@@ -1095,10 +1394,21 @@ func _edge_endpoint_ctrl(id: String) -> Control:
 # Appends an orthogonal edge that leaves the source and enters the target on whichever faces point
 # toward each other (top / bottom / left / right) — so a sideways or upward connection lands on the
 # side or bottom of the node instead of always routing into its top.
-func _add_edge_between(src: Control, tgt: Control, color: Color, width: float = 2.0) -> void:
+func _add_edge_between(
+	src: Control, tgt: Control, color: Color, width: float = 2.0, dashed: bool = false
+) -> void:
 	var route: Dictionary = _edge_route(src, tgt)
-	_edges.append(
-		{"points": route["points"], "arrow_dir": route["arrow_dir"], "color": color, "width": width}
+	(
+		_edges
+		. append(
+			{
+				"points": route["points"],
+				"arrow_dir": route["arrow_dir"],
+				"color": color,
+				"width": width,
+				"dashed": dashed,
+			}
+		)
 	)
 
 
@@ -1214,7 +1524,9 @@ func _make_comment(_idx: int, comment: Dictionary) -> Control:
 	var color: Color = comment.get("color", UITheme.AMBER)
 	var panel: PanelContainer = PanelContainer.new()
 	panel.custom_minimum_size = Vector2(COMMENT_WIDTH, 0)
-	panel.add_theme_stylebox_override("panel", _comment_stylebox(color))
+	panel.add_theme_stylebox_override(
+		"panel", _comment_stylebox(color, _selected_comments.has(_idx))
+	)
 	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE if map_mode else Control.MOUSE_FILTER_STOP
 	var margin: MarginContainer = MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 10)
@@ -1226,7 +1538,8 @@ func _make_comment(_idx: int, comment: Dictionary) -> Control:
 	var lbl: Label = Label.new()
 	var text: String = str(comment.get("text", ""))
 	var has_text: bool = text.strip_edges() != ""
-	lbl.text = text if has_text else "(empty note)"
+	var pinned: bool = str(comment.get("node_id", "")) != ""  # 📌 marks a note that follows a node
+	lbl.text = ("📌 " if pinned else "") + (text if has_text else "(empty note)")
 	lbl.add_theme_color_override("font_color", color if has_text else UITheme.DARK_TEXT)
 	lbl.add_theme_font_size_override("font_size", 12)
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1238,9 +1551,21 @@ func _make_comment(_idx: int, comment: Dictionary) -> Control:
 	return panel
 
 
-func _comment_stylebox(color: Color) -> StyleBoxFlat:
+func _comment_stylebox(color: Color, selected: bool = false) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(color.r * 0.18, color.g * 0.18, color.b * 0.18, 0.92)
+	# Marquee-selected notes get a full bright border (like a selected node) instead of the usual tab.
+	if selected:
+		s.border_color = UITheme.CYAN
+		s.border_width_left = 2
+		s.border_width_right = 2
+		s.border_width_top = 2
+		s.border_width_bottom = 2
+		s.corner_radius_top_left = 3
+		s.corner_radius_top_right = 3
+		s.corner_radius_bottom_left = 3
+		s.corner_radius_bottom_right = 3
+		return s
 	s.border_color = Color(color.r, color.g, color.b, 0.7)
 	s.border_width_left = 3  # a sticky-note "tab" down the left edge
 	s.border_width_right = 1
@@ -1258,6 +1583,10 @@ func _on_comment_gui_input(event: InputEvent, idx: int) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			# Pressing a note that's part of a marquee group keeps the group (drag moves them all); pressing
+			# any other note starts a fresh single-note drag.
+			if not _selected_comments.has(idx):
+				_selected_comments = []
 			_dragging_comment = idx
 			_comment_drag_moved = false
 			_comment_drag_started = false
@@ -1269,15 +1598,20 @@ func _handle_comment_drag(event: InputEvent) -> void:
 	if _dragging_comment >= comments.size():
 		_dragging_comment = -1
 		return
+	# A group drag: the pressed note belongs to a marquee selection, so move every selected note together.
+	var group: bool = _selected_comments.has(_dragging_comment)
 	if event is InputEventMouseMotion:
 		if not _comment_drag_started:
 			_comment_drag_started = true
 			nodes_drag_started.emit()  # one undo entry per drag (the builder snapshots comments too)
 		var delta: Vector2 = (event as InputEventMouseMotion).relative / _zoom
-		var c: Dictionary = comments[_dragging_comment]
-		c["pos"] = (c.get("pos", Vector2.ZERO) as Vector2) + delta
-		if _dragging_comment < _comment_ctrls.size():
-			(_comment_ctrls[_dragging_comment] as Control).position = c["pos"]
+		var move_idxs: Array = _selected_comments if group else [_dragging_comment]
+		for mi: int in move_idxs:
+			if mi < comments.size():
+				var mc: Dictionary = comments[mi]
+				mc["pos"] = (mc.get("pos", Vector2.ZERO) as Vector2) + delta
+				if mi < _comment_ctrls.size():
+					(_comment_ctrls[mi] as Control).position = mc["pos"]
 		_comment_drag_moved = true
 		get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton:
@@ -1285,13 +1619,40 @@ func _handle_comment_drag(event: InputEvent) -> void:
 		if mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed:
 			var idx: int = _dragging_comment
 			_dragging_comment = -1
+			if group and _comment_drag_moved:
+				# Snap the whole group; keep it selected (no single-select, no pin-on-drop for a group).
+				for gi: int in _selected_comments:
+					if gi < comments.size():
+						var gc: Dictionary = comments[gi]
+						gc["pos"] = GraphLayout.snap(gc.get("pos", Vector2.ZERO))
+				refresh()
+				get_viewport().set_input_as_handled()
+				return
 			if _comment_drag_moved:
 				var cd: Dictionary = comments[idx]
 				cd["pos"] = GraphLayout.snap(cd.get("pos", Vector2.ZERO))
+				# Dropped onto a node → pin to it (the note then follows that node). Dropping over empty space
+				# keeps any existing pin, so a pinned note can be nudged; unpin from the note editor.
+				var over: String = _node_at_canvas_point(cd.get("pos", Vector2.ZERO))
+				if over != "":
+					cd["node_id"] = over
+			_selected_comments = []  # a single-note click/drag drops any marquee group
 			_selected_ids = []  # drop node highlights; the note becomes the active selection
 			refresh()
 			comment_clicked.emit(idx)  # select it (click or drag) so the side panel + Delete target it
 			get_viewport().set_input_as_handled()
+
+
+# Moves the sticky notes that should travel with a node drag by `delta`: notes pinned to a dragged node, plus
+# any grabbed by a marquee. One pass, so a note that's both pinned AND marquee-selected only moves once.
+func _move_selected_comments(delta: Vector2) -> void:
+	var comments: Array = _graph_model.get("comments", [])
+	for ci: int in comments.size():
+		var c: Dictionary = comments[ci]
+		if _selected_ids.has(str(c.get("node_id", ""))) or _selected_comments.has(ci):
+			c["pos"] = (c.get("pos", Vector2.ZERO) as Vector2) + delta
+			if ci < _comment_ctrls.size():
+				(_comment_ctrls[ci] as Control).position = c["pos"]
 
 
 # Canvas-space point at the centre of the current view (for placing a new comment).
@@ -1534,6 +1895,40 @@ func _handle_frame_resize(event: InputEvent) -> void:
 # ---------------------------------------------------------------------------
 
 
+# Continuous keyboard pan (builder only). Polled rather than event-driven so a held key scrolls
+# smoothly. Stands down while a text field is focused (so typing a node name doesn't pan) and
+# while a modifier is held (so Ctrl+S / Ctrl+D and friends don't also scroll).
+func _process(delta: float) -> void:
+	if not keyboard_pan_enabled or not is_visible_in_tree():
+		return
+	if _text_focused():
+		return
+	if (
+		Input.is_key_pressed(KEY_CTRL)
+		or Input.is_key_pressed(KEY_ALT)
+		or Input.is_key_pressed(KEY_META)
+	):
+		return
+	var dir: Vector2 = Vector2.ZERO
+	if Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
+		dir.x += 1.0
+	if Input.is_key_pressed(KEY_RIGHT) or Input.is_key_pressed(KEY_D):
+		dir.x -= 1.0
+	if Input.is_key_pressed(KEY_UP) or Input.is_key_pressed(KEY_W):
+		dir.y += 1.0
+	if Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S):
+		dir.y -= 1.0
+	if dir != Vector2.ZERO:
+		_pan_offset += dir.normalized() * KEY_PAN_SPEED * delta
+		_apply_transform()
+
+
+# True when a text-entry control has focus — pan/keys must yield to typing.
+func _text_focused() -> bool:
+	var f: Control = get_viewport().gui_get_focus_owner()
+	return f is LineEdit or f is TextEdit
+
+
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
@@ -1553,10 +1948,15 @@ func _gui_input(event: InputEvent) -> void:
 			canvas_context_menu_requested.emit((mb.position - _canvas.position) / _zoom)
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
-			if map_mode:
-				# Map mode has no selection — left-drag pans (like middle button).
-				_panning = mb.pressed
+			# Map mode, or the space-bar "hand tool" in the builder: left-drag pans (like the
+			# middle button) instead of box-selecting.
+			var want_pan: bool = map_mode or Input.is_key_pressed(KEY_SPACE)
+			if mb.pressed and want_pan:
+				_panning = true
 				_last_mouse = mb.position
+				accept_event()
+			elif not mb.pressed and _panning:
+				_panning = false  # end a left-drag pan on release (space may already be released)
 				accept_event()
 			elif mb.pressed:
 				# Left press on empty canvas (not a node) → start a marquee box-select. A press+release
@@ -1591,7 +1991,7 @@ func _draw() -> void:
 		draw_rect(rect, accent, false, 1.5)
 	if _connect_drag_active:
 		# Rubber-band from the handle to the cursor, in GraphView-screen space (canvas-local × zoom +
-		# pan). Red over an invalid target (self or disallowed cycle), else edge colour.
+		# pan). Red over an invalid target (the source or an ancestor → would loop), else edge colour.
 		var bad: bool = (
 			_connect_drag_target != ""
 			and (
@@ -1625,13 +2025,26 @@ func _finish_marquee() -> void:
 		if not _marquee_additive:
 			_set_selection([])
 		return
+	var prev_cmts: Array = _selected_comments.duplicate()  # _set_selection clears it; keep for additive
 	var ids: Array = _selected_ids.duplicate() if _marquee_additive else []
 	for id: String in _node_ctrls:
+		if _ghost_nodes.has(id):
+			continue  # locked base node — never marquee-selectable
 		var c: Control = _node_ctrls[id]
 		var screen_rect: Rect2 = Rect2(_canvas.position + c.position * _zoom, c.size * _zoom)
 		if rect.intersects(screen_rect) and not ids.has(id):
 			ids.append(id)
 	_set_selection(ids)
+	# Sticky notes inside the box join the selection so they highlight, then move / delete with the nodes.
+	var cmts: Array = prev_cmts if _marquee_additive else []
+	for ci: int in _comment_ctrls.size():
+		var cc: Control = _comment_ctrls[ci]
+		var crect: Rect2 = Rect2(_canvas.position + cc.position * _zoom, cc.size * _zoom)
+		if rect.intersects(crect) and not cmts.has(ci):
+			cmts.append(ci)
+	if not cmts.is_empty():
+		_selected_comments = cmts
+		refresh()  # re-render to draw the note highlights
 
 
 func _zoom_at(focus: Vector2, new_zoom: float) -> void:

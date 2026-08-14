@@ -6,15 +6,13 @@ public partial class InventoryService : Node
 {
     [Signal] public delegate void InventoryChangedEventHandler();
     [Signal] public delegate void ActiveEffectsChangedEventHandler();
-    // Fired when the run's unlocked-modifier set changes (shop unlock / gift / load).
-    [Signal] public delegate void UnlockedChangedEventHandler();
     // Fired when a utility item with kind == "save_now" is activated.
     // GameLoop listens and writes a journey save in response. Separate signal
     // from ActiveEffectsChanged because save_now never enters _active.
     [Signal] public delegate void SaveRequestedEventHandler();
-    // Instant utilities that need GameLoop / JourneySelect to finish the action.
+    // Fired when a utility item with kind == "skip_round" is activated. Same shape as
+    // SaveRequested: instantaneous, never enters _active.
     [Signal] public delegate void SkipRoundRequestedEventHandler();
-    [Signal] public delegate void ShaveCooldownRequestedEventHandler(int hours);
 
     // ---------------------------------------------------------------------------
     // Item registry
@@ -25,6 +23,12 @@ public partial class InventoryService : Node
 
     // Non-static so it is populated once the node is ready (autoload order is safe).
     private Dictionary _registry = new Dictionary();
+
+    // Author-defined, JOURNEY-scoped items — loaded from the journey's Items block each run
+    // (LoadJourneyItems) and merged into lookups alongside the built-in _registry. A journey item
+    // carries an "effects" bundle (a list of tuned effect dicts) instead of a single kind. Cleared
+    // and repopulated per journey load, so stale items from a prior journey never leak.
+    private Dictionary _journeyItems = new Dictionary();
 
     // Path of the JSON data file inside the project.
     private const string RegistryPath = "res://data/shop_items.json";
@@ -193,17 +197,6 @@ public partial class InventoryService : Node
             ["duration_ms"] = 30000,
             ["kind"] = "wildcard",
         };
-        _registry["soft_touch"] = new Dictionary
-        {
-            ["id"] = "soft_touch",
-            ["name"] = "Soft Touch",
-            ["description"] = "Softens intensity for 30 seconds (Restim volume / linear stroke scale).",
-            ["category"] = "modifier",
-            ["price"] = 35,
-            ["duration_ms"] = 30000,
-            ["kind"] = "volume_attenuate",
-            ["factor"] = 0.5f,
-        };
         // Utility item — saves progress at the start of the current round and
         // is consumed. Locked out during boss rounds (because the inventory
         // button itself is disabled during bosses). Doesn't apply a runtime
@@ -231,6 +224,18 @@ public partial class InventoryService : Node
             ["duration_ms"] = 0,
             ["kind"] = "key",
         };
+        // Bail Out — ends the current round for nothing. Manually activated, consumed on use.
+        // Mirrors data/shop_items.json.
+        _registry["skip_round"] = new Dictionary
+        {
+            ["id"] = "skip_round",
+            ["name"] = "Bail Out",
+            ["description"] = "Ends the current round immediately. It counts as played, but pays no coins, score or reward. Consumed when used.",
+            ["category"] = "utility",
+            ["price"] = 70,
+            ["duration_ms"] = 0,
+            ["kind"] = "skip_round",
+        };
         // Cleanse — held until used on a cursed round; not manually activatable
         // (see ActivateItem). Mirrors data/shop_items.json.
         _registry["cleanse"] = new Dictionary
@@ -243,61 +248,6 @@ public partial class InventoryService : Node
             ["duration_ms"] = 0,
             ["kind"] = "cleanse",
         };
-        _registry["erosphere_amulet"] = new Dictionary
-        {
-            ["id"] = "erosphere_amulet",
-            ["name"] = "Amulet of Sustenance",
-            ["description"] = "Shaves 24 hours off an active journey cooldown. Single-use.",
-            ["category"] = "modifier",
-            ["price"] = 0,
-            ["duration_ms"] = 0,
-            ["kind"] = "shave_cooldown",
-            ["shave_hours"] = 24,
-        };
-        _registry["erosphere_psychic_divorce"] = new Dictionary
-        {
-            ["id"] = "erosphere_psychic_divorce",
-            ["name"] = "Psychic Divorce",
-            ["description"] = "Shaves 48 hours off an active journey cooldown.",
-            ["category"] = "modifier",
-            ["price"] = 60,
-            ["duration_ms"] = 0,
-            ["kind"] = "shave_cooldown",
-            ["shave_hours"] = 48,
-        };
-        _registry["erosphere_feign_death"] = new Dictionary
-        {
-            ["id"] = "erosphere_feign_death",
-            ["name"] = "Feign Death",
-            ["description"] = "Softens intensity to 30% for the rest of the round (Restim volume / linear stroke).",
-            ["category"] = "modifier",
-            ["price"] = 40,
-            ["duration_ms"] = 0,
-            ["kind"] = "volume_attenuate",
-            ["factor"] = 0.30f,
-            ["round_scoped"] = true,
-        };
-        _registry["erosphere_blinding_light"] = new Dictionary
-        {
-            ["id"] = "erosphere_blinding_light",
-            ["name"] = "Blinding Light",
-            ["description"] = "Blackout for 30 seconds with intensity softened to 60% while the dark lasts.",
-            ["category"] = "modifier",
-            ["price"] = 60,
-            ["duration_ms"] = 30000,
-            ["kind"] = "blackout_soft",
-            ["factor"] = 0.60f,
-        };
-        _registry["erosphere_time_control"] = new Dictionary
-        {
-            ["id"] = "erosphere_time_control",
-            ["name"] = "Time Control",
-            ["description"] = "Ends the current round early and advances as a clean finish. Blocked on bosses and item-gated rounds.",
-            ["category"] = "modifier",
-            ["price"] = 40,
-            ["duration_ms"] = 0,
-            ["kind"] = "skip_round",
-        };
     }
 
     // --- Registry access -------------------------------------------------------
@@ -309,8 +259,36 @@ public partial class InventoryService : Node
 
         foreach (var key in _registry.Keys)
             ids.Add(key);
+        foreach (var key in _journeyItems.Keys)
+            ids.Add(key);
 
         return ids;
+    }
+
+    // Built-in registry ids only (no journey-scoped items). The BUILDER uses this: it merges these
+    // with its OWN live journey-item model, so it must not also pull in _journeyItems (play-state left
+    // over from a test-play — which would double-count this journey's items and leak another journey's).
+    public Array GetBuiltinItemIds()
+    {
+        var ids = new Array();
+        foreach (var key in _registry.Keys)
+            ids.Add(key);
+        return ids;
+    }
+
+    // Replaces the journey-scoped item set from the journey's Items block ([{id, name, description,
+    // category, price, duration_ms, effects:[…]}, …]). Called on every journey load (fresh or
+    // resumed), so it fully clears the previous journey's items first.
+    public void LoadJourneyItems(Array items)
+    {
+        _journeyItems.Clear();
+        foreach (var itemVar in items)
+        {
+            var item = itemVar.AsGodotDictionary();
+            var id = item.ContainsKey("id") ? item["id"].AsString() : "";
+            if (id != "")
+                _journeyItems[id] = item;
+        }
     }
 
     // Returns the data dictionary for the given item ID, or an empty dict if unknown.
@@ -318,36 +296,16 @@ public partial class InventoryService : Node
     {
         if (id != null && _registry.ContainsKey(id))
             return _registry[id].AsGodotDictionary();
+        if (id != null && _journeyItems.ContainsKey(id))
+            return _journeyItems[id].AsGodotDictionary();
         return new Dictionary();
     }
 
-    // True when the registry entry is a modifier (unlock + pay-per-use), not a
-    // utility charge (key / cleanse / save_now).
-    public bool IsModifier(string id)
-    {
-        var data = GetItemData(id);
-        if (data.Count == 0)
-            return false;
-        string category = data.ContainsKey("category") ? data["category"].AsString() : "modifier";
-        return category == "modifier";
-    }
-
     // ---------------------------------------------------------------------------
-    // Inventory (owned utility charges) + unlocked modifiers
+    // Inventory (owned, not-yet-activated items)
     // ---------------------------------------------------------------------------
 
     private readonly List<Dictionary> _items = new();
-
-    // Run-scoped set of modifier ids the player has unlocked (free at shop /
-    // gift). Activation spends coins via ActivateUnlocked — no inventory slot.
-    // Only used when UnlockPayPerUse is true for the current journey.
-    private readonly HashSet<string> _unlocked = new();
-
-    // Journey-level shop economy. false (default) = classic buy-charge / free
-    // activate; true = unlock modifiers free, pay price on ActivateUnlocked.
-    public bool UnlockPayPerUse { get; private set; } = false;
-
-    public void SetUnlockPayPerUse(bool enabled) => UnlockPayPerUse = enabled;
 
     // Active effects: one entry per activation, with absolute end time on engine clock (ms).
     private readonly List<Dictionary> _active = new();
@@ -393,15 +351,12 @@ public partial class InventoryService : Node
     public void Reset()
     {
         _items.Clear();
-        _unlocked.Clear();
         _active.Clear();
         _bossEffects.Clear();
-        UnlockPayPerUse = false;
         // Clear any stale pause state — a player can quit to menu mid-pause,
         // which would otherwise leave the effect clock frozen for the next journey.
         _paused = false;
         EmitSignal(SignalName.InventoryChanged);
-        EmitSignal(SignalName.UnlockedChanged);
         EmitSignal(SignalName.ActiveEffectsChanged);
     }
 
@@ -416,102 +371,20 @@ public partial class InventoryService : Node
         return arr;
     }
 
-    // Adds an inventory charge. In unlock-pay-per-use mode, modifiers unlock
-    // instead of stacking charges (see UnlockItem / ActivateUnlocked).
     public void AddItem(string id)
     {
         var data = GetItemData(id);
         if (data.Count == 0)
             return;
 
-        if (UnlockPayPerUse && IsModifier(id))
-        {
-            UnlockItem(id);
-            return;
-        }
-
         _items.Add(data);
         EmitSignal(SignalName.InventoryChanged);
     }
 
-    // --- Unlocks (modifiers) ------------------------------------------------
-
-    public bool IsUnlocked(string id) => id != null && _unlocked.Contains(id);
-
-    public Array GetUnlockedIds()
-    {
-        var arr = new Array();
-        foreach (var id in _unlocked)
-            arr.Add(id);
-        return arr;
-    }
-
-    // Marks a modifier as unlocked for this run. No-op if PPU is off, unknown,
-    // already unlocked, or not a modifier. Free — shop / gifts never charge.
-    public bool UnlockItem(string id)
-    {
-        if (!UnlockPayPerUse)
-            return false;
-        if (id == null || id == "" || !IsModifier(id) || _unlocked.Contains(id))
-            return false;
-
-        _unlocked.Add(id);
-        EmitSignal(SignalName.UnlockedChanged);
-        EmitSignal(SignalName.InventoryChanged);
-        return true;
-    }
-
-    // Pays registry price and starts the modifier effect. Does not consume an
-    // inventory slot. Returns false if PPU is off, not unlocked, not a modifier, or broke.
-    // durationOverrideMs >= 0 replaces item duration (round-scoped volume attenuate).
-    // Instant kinds (skip_round / shave_cooldown) fire the same signals as
-    // ActivateItem after the coin spend.
-    public bool ActivateUnlocked(string id, int durationOverrideMs = -1)
-    {
-        if (!UnlockPayPerUse || !IsUnlocked(id) || !IsModifier(id))
-            return false;
-
-        var item = GetItemData(id);
-        if (item.Count == 0)
-            return false;
-
-        int price = item.ContainsKey("price") ? item["price"].AsInt32() : 0;
-        var coins = GetNodeOrNull<CoinService>("/root/CoinService");
-        if (coins == null)
-            return false;
-        if (price > 0 && !coins.SpendCoins(price))
-            return false;
-
-        string itemKind = item.ContainsKey("kind") ? item["kind"].AsString() : "";
-        if (itemKind == "skip_round")
-        {
-            EmitSignal(SignalName.SkipRoundRequested);
-            return true;
-        }
-        if (itemKind == "shave_cooldown")
-        {
-            int hours = item.ContainsKey("shave_hours") ? item["shave_hours"].AsInt32() : 24;
-            // Amulet is single-use once unlocked — drop the unlock after shaving.
-            if (id == "erosphere_amulet")
-            {
-                _unlocked.Remove(id);
-                EmitSignal(SignalName.UnlockedChanged);
-                EmitSignal(SignalName.InventoryChanged);
-            }
-            EmitSignal(SignalName.ShaveCooldownRequested, hours);
-            return true;
-        }
-
-        return _StartEffectFromItem(item, durationOverrideMs);
-    }
-
-    // True if the player currently holds at least one charge with this id, or
-    // has unlocked it as a modifier. Used by Sacrifice forks (gating) and
-    // item-Conditional forks (the ownership check).
+    // True if the player currently holds at least one item with this id. Used by
+    // Sacrifice forks (gating) and item-Conditional forks (the ownership check).
     public bool OwnsItem(string id)
     {
-        if (IsUnlocked(id))
-            return true;
         foreach (var item in _items)
             if (item.ContainsKey("id") && item["id"].AsString() == id)
                 return true;
@@ -536,81 +409,40 @@ public partial class InventoryService : Node
 
     // ─── Save / Resume ────────────────────────────────────────────────────
     //
-    // Inventory portion of the journey save record. Only owned utility charges
-    // and unlocked modifier ids are persisted — active effects are deliberately
-    // NOT carried across saves so the player gets a clean modifier slate on resume.
+    // Inventory portion of the journey save record. Only owned (unactivated)
+    // items are persisted — active effects are deliberately NOT carried
+    // across saves so the player gets a clean modifier slate on resume.
 
-    // Captures owned utility charges for the save payload.
+    // Captures the current owned-inventory list for inclusion in the save
+    // payload. Same shape GetItems() exposes; we keep a dedicated method so
+    // the save callsite is explicit about intent.
     public Array CaptureSaveData() => GetItems();
 
-    // Captures unlocked modifier ids for the save payload (sibling key "unlocked").
-    public Array CaptureUnlockedSaveData() => GetUnlockedIds();
-
-    // Restores inventory from a save record. Each entry is looked up fresh in
-    // _registry by ID. In PPU mode, modifier entries in old saves are migrated
-    // into _unlocked; in classic mode they stay as charges. Unknown ids dropped.
+    // Restores an inventory list from a save record. Each entry is looked up
+    // fresh in _registry by ID so registry edits made since the save (item
+    // removed, price changed, description rewritten) take effect on resume.
+    // Saved IDs that no longer exist in the registry are silently dropped.
     public void LoadFromSave(Array savedItems)
     {
         _items.Clear();
-        _unlocked.Clear();
         foreach (var entry in savedItems)
         {
             if (entry.VariantType != Variant.Type.Dictionary)
                 continue;
             var saved = entry.AsGodotDictionary();
             string id = saved.ContainsKey("id") ? saved["id"].AsString() : "";
-            if (id == "" || !_registry.ContainsKey(id))
+            if (id == "")
                 continue;
-            // PPU only: promote legacy modifier charges into the unlock set.
-            if (UnlockPayPerUse && IsModifier(id))
-            {
-                _unlocked.Add(id);
-                continue;
-            }
-            _items.Add(_registry[id].AsGodotDictionary());
+            if (_registry.ContainsKey(id))
+                _items.Add(_registry[id].AsGodotDictionary());
+            // else: item id no longer in registry — silently drop. Common
+            // after a content update that removes or renames an item.
         }
-        EmitSignal(SignalName.InventoryChanged);
-        EmitSignal(SignalName.UnlockedChanged);
-    }
-
-    // Restores the unlock set from a save. Only meaningful in PPU mode.
-    // Missing / empty array = no unlocks (backward compatible). Unknown ids dropped.
-    public void LoadUnlockedFromSave(Array savedUnlocked)
-    {
-        if (!UnlockPayPerUse)
-        {
-            EmitSignal(SignalName.UnlockedChanged);
-            EmitSignal(SignalName.InventoryChanged);
-            return;
-        }
-        // Do not clear _unlocked first — LoadFromSave may have already migrated
-        // modifier charges from the inventory array. Union the explicit list.
-        if (savedUnlocked != null)
-        {
-            foreach (var entry in savedUnlocked)
-            {
-                string id = entry.AsString();
-                if (id != "" && IsModifier(id))
-                    _unlocked.Add(id);
-            }
-        }
-        EmitSignal(SignalName.UnlockedChanged);
         EmitSignal(SignalName.InventoryChanged);
     }
 
-    // Peek at a held charge without consuming it. Empty dict if out of range.
-    public Dictionary PeekItem(int slotIndex)
-    {
-        if (slotIndex < 0 || slotIndex >= _items.Count)
-            return new Dictionary();
-        return _items[slotIndex];
-    }
-
-    // Removes the utility charge at slotIndex and starts its effect (or fires
-    // SaveRequested for save_now). Modifiers should use ActivateUnlocked instead;
-    // this path stays coin-free for charge-based utilities / legacy charges.
-    // durationOverrideMs >= 0 replaces the item's duration_ms (round-scoped modifiers).
-    public bool ActivateItem(int slotIndex, int durationOverrideMs = -1)
+    // Removes the item at slotIndex and starts its effect timer immediately.
+    public bool ActivateItem(int slotIndex)
     {
         if (slotIndex < 0 || slotIndex >= _items.Count)
             return false;
@@ -626,38 +458,29 @@ public partial class InventoryService : Node
 
         _items.RemoveAt(slotIndex);
 
-        // Instant utilities — signal GameLoop / JourneySelect; never enter _active.
-        // Boss-round lockout is enforced by the inventory UI.
-        if (itemKind == "save_now")
+        // save_now is an instantaneous utility — it doesn't enter the active-
+        // effect list, it just fires a signal for GameLoop to handle and is
+        // consumed. Boss-round lockout is enforced by the inventory UI (which
+        // disables item use during bosses) so the activation-side code doesn't
+        // need its own boss check.
+        if (item.ContainsKey("kind") && item["kind"].AsString() == "save_now")
         {
             EmitSignal(SignalName.SaveRequested);
             EmitSignal(SignalName.InventoryChanged);
             return true;
         }
+
+        // skip_round is the same instantaneous shape: GameLoop ends the round with no payout.
         if (itemKind == "skip_round")
         {
             EmitSignal(SignalName.SkipRoundRequested);
             EmitSignal(SignalName.InventoryChanged);
             return true;
         }
-        if (itemKind == "shave_cooldown")
-        {
-            int hours = item.ContainsKey("shave_hours") ? item["shave_hours"].AsInt32() : 24;
-            EmitSignal(SignalName.ShaveCooldownRequested, hours);
-            EmitSignal(SignalName.InventoryChanged);
-            return true;
-        }
 
-        bool started = _StartEffectFromItem(item, durationOverrideMs);
-        EmitSignal(SignalName.InventoryChanged);
-        return started;
-    }
-
-    // Builds and registers a timed effect from a registry / inventory item dict.
-    // Shared by ActivateItem (utility / legacy charges) and ActivateUnlocked.
-    // durationOverrideMs >= 0 replaces the source duration (round-scoped modifiers).
-    private bool _StartEffectFromItem(Dictionary item, int durationOverrideMs = -1)
-    {
+        // Wildcard resolves to a random concrete modifier at activation time: the
+        // rolled effect supplies the kind + params, the displayed name reveals
+        // what was rolled. Every other item is its own effect source.
         var source = item;
         string displayName = item.ContainsKey("name") ? item["name"].AsString() : "";
         if (item.ContainsKey("kind") && item["kind"].AsString() == "wildcard")
@@ -672,57 +495,57 @@ public partial class InventoryService : Node
             }
         }
 
-        string kind = source.ContainsKey("kind") ? source["kind"].AsString() : "";
-        int duration = durationOverrideMs >= 0
-            ? durationOverrideMs
-            : (item.ContainsKey("duration_ms") ? item["duration_ms"].AsInt32() : 0);
-        bool roundScoped = item.ContainsKey("round_scoped") && item["round_scoped"].AsBool();
+        int duration = item.ContainsKey("duration_ms") ? item["duration_ms"].AsInt32() : 0;
+        string itemId = item.ContainsKey("id") ? item["id"].AsString() : "";
 
-        // blackout_soft: blackout + matching-duration volume_attenuate.
-        if (kind == "blackout_soft")
+        // A journey item carries an "effects" bundle (several tuned effects); a built-in item is a
+        // single kind. Push one active effect per effect in the bundle (all sharing the item's
+        // duration), else the single kind. Consumers match on `kind`, so N entries apply independently.
+        var bundle = source.ContainsKey("effects") ? source["effects"].AsGodotArray() : null;
+        if (bundle != null && bundle.Count > 0)
         {
-            float softFactor = source.ContainsKey("factor") ? source["factor"].AsSingle() : 0.60f;
-            if (duration <= 0)
-                duration = 30000;
-            _AddTimedEffect(item, displayName, "blackout", duration, roundScoped, null, null, null);
-            _AddTimedEffect(item, displayName, "volume_attenuate", duration, roundScoped, softFactor, null, null);
-            EmitSignal(SignalName.ActiveEffectsChanged);
-            return true;
+            foreach (var effVar in bundle)
+                _active.Add(_MakeActiveEffect(itemId, displayName, effVar.AsGodotDictionary(), duration));
+        }
+        else
+        {
+            _active.Add(_MakeActiveEffect(itemId, displayName, source, duration));
         }
 
-        float? factor = source.ContainsKey("factor") ? source["factor"].AsSingle() : null;
-        int? min = source.ContainsKey("min") ? source["min"].AsInt32() : null;
-        int? max = source.ContainsKey("max") ? source["max"].AsInt32() : null;
-        _AddTimedEffect(item, displayName, kind, duration, roundScoped, factor, min, max);
+        EmitSignal(SignalName.InventoryChanged);
         EmitSignal(SignalName.ActiveEffectsChanged);
         return true;
     }
 
-    private void _AddTimedEffect(
-        Dictionary item,
-        string displayName,
-        string kind,
-        int duration,
-        bool roundScoped,
-        float? factor,
-        int? min,
-        int? max)
+    // Builds one active-effect entry from an effect source (a built-in item or a bundle effect): the
+    // timing fields plus every tuning param (factor/min/max/…) carried through generically, so any
+    // kind's params reach the consumers. Meta keys (name/price/category/…) are skipped.
+    private Dictionary _MakeActiveEffect(string id, string name, Dictionary src, int duration)
     {
+        string kind = src.ContainsKey("kind") ? src["kind"].AsString() : "";
+        // coin_jackpot / coin_penalty are settled at the NEXT round end (GameLoop reads and then
+        // consumes them there), NOT on a wall clock. They must outlast the item's timer — a short
+        // bundle duration (default 30s) would otherwise drop the coin effect before the round paid
+        // out, so nothing applied. They persist until consumed; every other kind stays timed.
+        bool persistToRoundEnd = kind == "coin_jackpot" || kind == "coin_penalty";
         var effect = new Dictionary
         {
-            ["id"] = item.ContainsKey("id") ? item["id"] : "",
-            ["name"] = displayName,
-            ["kind"] = kind,
+            ["id"] = id,
+            ["name"] = name,
+            ["kind"] = src.ContainsKey("kind") ? src["kind"] : "",
             ["duration_ms"] = duration,
-            ["end_time_ms"] = _nowMs + duration,
+            ["end_time_ms"] = persistToRoundEnd ? double.MaxValue : _nowMs + duration,
             ["start_time_ms"] = _nowMs,
         };
-        if (roundScoped)
-            effect["round_scoped"] = true;
-        if (factor.HasValue) effect["factor"] = factor.Value;
-        if (min.HasValue) effect["min"] = min.Value;
-        if (max.HasValue) effect["max"] = max.Value;
-        _active.Add(effect);
+        foreach (var k in src.Keys)
+        {
+            var ks = k.AsString();
+            if (ks != "kind" && ks != "name" && ks != "desc" && ks != "description"
+                && ks != "id" && ks != "duration_ms" && ks != "price"
+                && ks != "category" && ks != "image" && ks != "effects")
+                effect[ks] = src[k];
+        }
+        return effect;
     }
 
     // Picks a random modifier dict from the registry for the Wildcard item.
@@ -735,13 +558,8 @@ public partial class InventoryService : Node
         {
             var d = _registry[key].AsGodotDictionary();
             string kind = d.ContainsKey("kind") ? d["kind"].AsString() : "";
-            // Stroke / sensory modifiers only — skip utilities and compound items.
-            if (kind == "" || kind == "wildcard" || kind == "coin_jackpot")
-                continue;
-            if (kind == "save_now" || kind == "key" || kind == "cleanse"
-                || kind == "shave_cooldown" || kind == "skip_round")
-                continue;
-            pool.Add(d);
+            if (kind != "" && kind != "wildcard" && kind != "coin_jackpot")
+                pool.Add(d);
         }
         if (pool.Count == 0)
             return new Dictionary();
@@ -769,23 +587,6 @@ public partial class InventoryService : Node
             return;
         _active.Clear();
         EmitSignal(SignalName.ActiveEffectsChanged);
-    }
-
-    // Drops effects tagged round_scoped at round transition so rest-of-round
-    // attenuations cannot leak into the next node.
-    public void ClearRoundScopedEffects()
-    {
-        bool removed = false;
-        for (int i = _active.Count - 1; i >= 0; i--)
-        {
-            if (_active[i].ContainsKey("round_scoped") && _active[i]["round_scoped"].AsBool())
-            {
-                _active.RemoveAt(i);
-                removed = true;
-            }
-        }
-        if (removed)
-            EmitSignal(SignalName.ActiveEffectsChanged);
     }
 
     // Installs a set of boss-round forced effects. Each entry must be a complete

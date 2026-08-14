@@ -17,36 +17,7 @@ extends RefCounted
 # ---------------------------------------------------------------------------
 
 const IMAGE_EXTS: Array[String] = ["png", "jpg", "jpeg", "webp"]
-# Suffixes that mark secondary / Restim-kit funscripts (not the main L0 stroke).
-const EXTRA_AXIS_SUFFIXES: Array[String] = [
-	"_L1",
-	"_L2",
-	"_R0",
-	"_R1",
-	"_R2",
-	".alpha",
-	".beta",
-	".e1",
-	".e2",
-	".e3",
-	".e4",
-	".volume",
-	".frequency",
-	".pulse_frequency",
-	".pulse_width",
-	".pulse_interval_random",
-	".pulse_rise_time",
-	".L1",
-	".L2",
-	".R0",
-	".R1",
-	".R2",
-	".surge",
-	".sway",
-	".twist",
-	".roll",
-	".pitch",
-]
+const EXTRA_AXIS_SUFFIXES: Array[String] = ["_L1", "_L2", "_R0", "_R1", "_R2"]
 
 
 # Scans `journeys_dir` for sub-folders containing a journey.json and returns the
@@ -64,16 +35,169 @@ static func scan_all(journeys_dir: String) -> Array:
 	var dir: DirAccess = DirAccess.open(journeys_dir)
 	if dir == null:
 		return result
+	# Rendition folders (Type: "rendition") are collected separately and attached to their parent
+	# journey by ParentId — an overlay never shows as its own catalogue card.
+	var renditions: Array = []
 	dir.list_dir_begin()
 	var entry: String = dir.get_next()
 	while entry != "":
 		if dir.current_is_dir() and not entry.begins_with("."):
-			var journey: Dictionary = parse_graph(journeys_dir + "/" + entry, entry)
-			if not journey.is_empty():
-				result.append(journey)
+			var folder_path: String = journeys_dir + "/" + entry
+			var raw: Dictionary = _read_raw_json(folder_path)
+			if not raw.is_empty():
+				if JourneyRendition.is_rendition(raw):
+					renditions.append(_rendition_summary(raw, folder_path, entry))
+				else:
+					var journey: Dictionary = parse_graph(folder_path, entry)
+					if not journey.is_empty():
+						result.append(journey)
 		entry = dir.get_next()
 	dir.list_dir_end()
+	group_renditions(result, renditions)
 	return result
+
+
+# Reads a folder's journey.json into its raw dict (or {} when missing/malformed). Used to peek at Type
+# before deciding whether to parse a full journey or collect a rendition summary.
+static func _read_raw_json(folder_path: String) -> Dictionary:
+	var json_path: String = folder_path + "/journey.json"
+	if not FileAccess.file_exists(json_path):
+		return {}
+	var file: FileAccess = FileAccess.open(json_path, FileAccess.READ)
+	if file == null:
+		return {}
+	var parser: JSON = JSON.new()
+	var err: int = parser.parse(file.get_as_text())
+	file.close()
+	if err != OK or not (parser.data is Dictionary):
+		return {}
+	return parser.data
+
+
+# The lightweight catalogue entry for a rendition (it's not a playable card on its own — it's listed
+# under its parent's detail modal as a selectable variant).
+static func _rendition_summary(
+	data: Dictionary, folder_path: String, folder_name: String
+) -> Dictionary:
+	return {
+		"folder": folder_path,
+		"folder_name": folder_name,
+		"journey_id": str(data.get("JourneyId", "")),
+		"name": str(data.get("Name", folder_name)),
+		"author": str(data.get("Author", "")),
+		"description": str(data.get("Description", "")),
+		"parent_id": str(data.get("ParentId", "")),
+		"parent_min_version": str(data.get("ParentMinVersion", "")),
+		# Soft edit-lock: true on a rendition installed from a paid pack (see the journey summary above).
+		"locked": bool(data.get("Locked", false)),
+		"cover_path": find_cover_image(folder_path),  # its own media/cover.* if the author set one, else ""
+	}
+
+
+# Attaches each rendition to its ultimate base journey's `renditions` list. A rendition's ParentId may be
+# a base journey OR ANOTHER rendition (sibling-dependency: e.g. a free-video overlay filling a paid-script
+# overlay's slots), so each rendition's parent chain is walked to the base. Every journey gets a
+# `renditions` array (all descendants, flattened). Each rendition gets `chain_folders` — the ordered list
+# of rendition folders to compose base-ward (…ancestors…, self) — which the loader/selector use to compose
+# the whole stack. An orphan (chain doesn't reach an installed base, or loops) is left out.
+static func group_renditions(journeys: Array, renditions: Array) -> void:
+	var base_by_id: Dictionary = {}
+	for j: Dictionary in journeys:
+		j["renditions"] = []
+		var jid: String = str(j.get("journey_id", ""))
+		if jid != "":
+			base_by_id[jid] = j
+	var rend_by_id: Dictionary = {}
+	for r: Dictionary in renditions:
+		var rid: String = str(r.get("journey_id", ""))
+		if rid != "":
+			rend_by_id[rid] = r
+	for rend: Dictionary in renditions:
+		var resolved: Dictionary = _resolve_rendition_chain(rend, base_by_id, rend_by_id)
+		if resolved.is_empty():
+			continue
+		rend["chain_folders"] = resolved["chain"]
+		((resolved["base"] as Dictionary)["renditions"] as Array).append(rend)
+
+
+# Walks a rendition's ParentId chain to its ultimate base journey. Returns {base, chain} where `chain` is
+# the ordered list of rendition FOLDERS to compose (base-ward first, ending with this rendition), or {} when
+# the chain doesn't reach an installed base (orphan) or loops.
+static func _resolve_rendition_chain(
+	r: Dictionary, base_by_id: Dictionary, rend_by_id: Dictionary
+) -> Dictionary:
+	var chain: Array = []  # self-ward; reversed to base-ward before returning
+	var seen: Dictionary = {}
+	var cur: Dictionary = r
+	while not seen.has(str(cur.get("journey_id", ""))):
+		seen[str(cur.get("journey_id", ""))] = true
+		chain.append(str(cur.get("folder", "")))
+		var pid: String = str(cur.get("parent_id", ""))
+		if base_by_id.has(pid):
+			chain.reverse()
+			return {"base": base_by_id[pid], "chain": chain}
+		if not rend_by_id.has(pid):
+			return {}  # parent (base or ancestor rendition) isn't installed
+		cur = rend_by_id[pid]
+	return {}  # the loop exited via `seen` → a cyclic dependency, so drop it
+
+
+# Reads a rendition folder's delta, with its media paths resolved against the RENDITION's own base
+# (per-origin). Returns the runtime delta JourneyCompose consumes, or {} when unreadable.
+static func load_rendition_delta(rendition_folder: String) -> Dictionary:
+	var data: Dictionary = _read_raw_json(rendition_folder)
+	if data.is_empty():
+		return {}
+	var delta: Dictionary = JourneyRendition.parse_rendition(data)
+	JourneyRendition.resolve_delta_paths(delta, rendition_folder)
+	delta["map_backdrops"] = _parse_map_backdrops(data.get("MapBackdrops", []), rendition_folder)
+	return delta
+
+
+# Produces a play-ready journey dict = the BASE journey (its meta, paths resolved against the base folder)
+# with its graph replaced by base ⊕ the whole rendition CHAIN. `chain_folders` is the ordered list of
+# rendition folders to compose base-ward (a single-rendition chain is just [that folder]); each is resolved
+# against its OWN folder before composing, so the merged graph carries correct absolute paths from every
+# origin. The runtime consumes it exactly like a normal journey (GameState.StartJourney); `compose_errors`
+# collects break-loudly reports from every layer for the caller to surface.
+static func compose_play_journey(
+	base_folder: String, base_folder_name: String, chain_folders: Array
+) -> Dictionary:
+	var base: Dictionary = parse_graph(base_folder, base_folder_name)
+	if base.is_empty():
+		return {}
+	var graph: Dictionary = {"start": base.get("start", ""), "nodes": base.get("nodes", {})}
+	var errors: Array = []
+	for rf: Variant in chain_folders:
+		var delta: Dictionary = load_rendition_delta(str(rf))
+		var composed: Dictionary = JourneyCompose.compose_graph(graph, delta)
+		graph = composed["graph"]
+		errors.append_array(composed["errors"] as Array)
+	base["start"] = graph["start"]
+	base["nodes"] = graph["nodes"]
+	base["compose_errors"] = errors
+	base["active_rendition"] = str(chain_folders[-1]) if not chain_folders.is_empty() else ""
+	# Rebuild the catalogue preview (round/fork/shop/storyboard lists + totals) from the MERGED graph so
+	# the detail modal and stats reflect base ⊕ rendition, not just the base.
+	var mgraph: Dictionary = {"start": base["start"], "nodes": base["nodes"]}
+	var seq: Dictionary = _graph_catalogue_sequence(mgraph)
+	base["rounds"] = seq["rounds"]
+	base["shops"] = seq["shops"]
+	base["storyboards"] = seq["storyboards"]
+	base["forks"] = seq["forks"]
+	base["total_rounds"] = JourneyGraph.longest_round_path(mgraph, str(mgraph["start"]))
+	var totals: Dictionary = _graph_node_totals(mgraph)
+	base["total_actions"] = totals["actions"]
+	base["total_length_ms"] = totals["length_ms"]
+	# Backdrops STACK through the chain: the base's layers (bottom, resolved against the base folder) plus
+	# each rendition's own (resolved against ITS folder), so a composed rendition's map shows them all.
+	var backdrops: Array = (base.get("map_backdrops", []) as Array).duplicate(true)
+	for rf: Variant in chain_folders:
+		backdrops.append_array(
+			_parse_map_backdrops(_read_raw_json(str(rf)).get("MapBackdrops", []), str(rf))
+		)
+	base["map_backdrops"] = backdrops
+	return base
 
 
 # Parses one journey folder's journey.json into the catalogue model.
@@ -102,16 +226,33 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		# Journey-level: author can disable the player map to enforce surprise.
 		# Absent → true so the whole pre-existing catalogue keeps the map.
 		"map_enabled": bool(data.get("MapEnabled", true)),
+		"show_fork_counts": bool(data.get("ShowForkCounts", true)),
+		"show_loops_on_map": bool(data.get("ShowLoopsOnMap", false)),
+		"map_backdrops": _parse_map_backdrops(data.get("MapBackdrops", []), path),
 		# Fog of war on the player map: reveal nodes as they're discovered (off → whole map shown).
 		"map_fog": bool(data.get("MapFog", false)),
 		# Fog reveal depth: ghost levels shown ahead of the visited trail (< 0 = whole structure ghosted).
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
-		# Shop economy: false (default) = classic buy-charge / free activate;
-		# true = unlock modifiers free in shop, pay price per mid-round activation.
-		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
+		# Auto-advance countdown on storyboards / interactive forks (journey opt-in; absent → off).
+		# Separate durations; the fork field falls back to the earlier single AutoAdvanceSecs key.
+		"auto_advance_enabled": bool(data.get("AutoAdvanceEnabled", false)),
+		"auto_advance_storyboard_secs": int(data.get("AutoAdvanceStoryboardSecs", 20)),
+		"auto_advance_fork_secs":
+		# Finish / "I came" button: author opt-in to end the run early, optionally into a designated
+		int(data.get("AutoAdvanceForkSecs", data.get("AutoAdvanceSecs", 45))),
+		# aftercare node (any type — a gentle round or a storyboard; off the main graph) before the end.
+		"allow_finish": bool(data.get("AllowFinish", false)),
+		"finish_node": str(data.get("FinishNode", "")),
 		# Version stamps (absent on pre-0.6.0 journeys → blank, which always passes the gate).
 		"min_version": str(data.get("MinVersion", "")),
 		"created_with": str(data.get("CreatedWith", "")),
+		# Counter names surfaced to the player (see _graph_meta).
+		"shown_counters": JourneyData.clean_flag_list(data.get("ShownCounters", [])),
+		# Stable journey id; blank on journeys written before ids existed (see _graph_meta).
+		"journey_id": str(data.get("JourneyId", "")),
+		# Soft edit-lock: true on a journey installed from a paid pack, so the buyer can't open it in the
+		# builder. A courtesy lock (journey.json is plaintext) — see JourneySelect._on_edit_pressed.
+		"locked": bool(data.get("Locked", false)),
 		# Redirect overlay (skip/converge/end), composed onto the graph in parse_graph.
 		"redirects": data.get("Redirects", {}),
 		"rounds": [],
@@ -200,8 +341,6 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 			if rel != "":
 				axis_scripts[axis] = path + "/" + rel
 
-		var restim_axis_scripts: Dictionary = _resolve_restim_axis_scripts_raw(raw, path, axis_scripts)
-
 		# Vib scripts — {ch_key: relative_path} in JSON, resolved to absolute paths.
 		var raw_vib: Dictionary = raw.get("VibScripts", raw.get("vib_scripts", {}))
 		var vib_scripts: Dictionary = {}
@@ -232,11 +371,9 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 			"video_path": video_path,
 			"funscript_path": funscript_stats["path"],
 			"axis_scripts": axis_scripts,
-			"restim_axis_scripts": restim_axis_scripts,
 			"vib_scripts": vib_scripts,
 			"is_checkpoint": bool(raw.get("IsCheckpoint", raw.get("is_checkpoint", false))),
-			"cooldown_days": int(raw.get("CooldownDays", raw.get("cooldown_days", 0))),
-			"items_blocked": bool(raw.get("ItemsBlocked", raw.get("items_blocked", false))),
+			"is_warmup": bool(raw.get("IsWarmup", raw.get("is_warmup", false))),
 			"boss_image": boss_image,
 			"boss_tagline": raw.get("BossTagline", ""),
 			"boss_modifiers": boss_modifiers,
@@ -372,6 +509,42 @@ static func parse_graph_for_editor(path: String, folder: String) -> Dictionary:
 # meta block. The nested rounds/forks/shops/storyboards arrays are intentionally empty
 # (graph journeys carry structure in start/nodes); the map/catalogue switch to the graph
 # in Phase 3, at which point those consumers stop reading the nested arrays.
+# Parses the journey's custom items and resolves each item's icon path (relative pooled path →
+# absolute), so the runtime (inventory / shop) can load it directly.
+static func _journey_items_resolved(data: Dictionary, base: String) -> Array:
+	var items: Array = JourneyData.parse_journey_items(data.get("Items", []))
+	for it: Dictionary in items:
+		var img: String = str(it.get("image", ""))
+		if (
+			img != ""
+			and not (
+				img.begins_with("res://") or img.begins_with("user://") or img.is_absolute_path()
+			)
+		):
+			it["image"] = base.path_join(img)
+	return items
+
+
+# Storyboard cast — parsed to runtime (snake-case) with every portrait's relative pooled path resolved
+# to absolute, so StoryboardScreen can load it directly. Placements are pure fractions (nothing to
+# resolve). Mirrors _journey_items_resolved.
+static func _journey_characters_resolved(data: Dictionary, base: String) -> Array:
+	var characters: Array = JourneyData.parse_journey_characters(data.get("Characters", []))
+	for c: Dictionary in characters:
+		for por: Variant in c.get("portraits", []):
+			var path: String = str((por as Dictionary).get("path", ""))
+			if (
+				path != ""
+				and not (
+					path.begins_with("res://")
+					or path.begins_with("user://")
+					or path.is_absolute_path()
+				)
+			):
+				(por as Dictionary)["path"] = base.path_join(path)
+	return characters
+
+
 static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dictionary:
 	return {
 		"folder": path,
@@ -382,12 +555,37 @@ static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dicti
 		"author": data.get("Author", "Unknown"),
 		"tags": TagRegistry.sanitize(data.get("Tags", [])),
 		"map_enabled": bool(data.get("MapEnabled", true)),
+		"show_fork_counts": bool(data.get("ShowForkCounts", true)),
+		"show_loops_on_map": bool(data.get("ShowLoopsOnMap", false)),
+		"map_backdrops": _parse_map_backdrops(data.get("MapBackdrops", []), path),
 		"map_fog": bool(data.get("MapFog", false)),
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
-		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
+		"auto_advance_enabled": bool(data.get("AutoAdvanceEnabled", false)),
+		"auto_advance_storyboard_secs": int(data.get("AutoAdvanceStoryboardSecs", 20)),
+		"auto_advance_fork_secs":
+		# Finish / "I came" button: author opt-in to end the run early, optionally into a designated
+		int(data.get("AutoAdvanceForkSecs", data.get("AutoAdvanceSecs", 45))),
+		# aftercare node (any type — a gentle round or a storyboard; off the main graph) before the end.
+		"allow_finish": bool(data.get("AllowFinish", false)),
+		"finish_node": str(data.get("FinishNode", "")),
 		# Version stamps (absent on pre-0.6.0 journeys → blank, which always passes the gate).
 		"min_version": str(data.get("MinVersion", "")),
 		"created_with": str(data.get("CreatedWith", "")),
+		# Stable journey id. Blank for journeys written before ids existed; the builder mints one
+		# on the next save. Carried here so a re-save preserves it rather than re-minting.
+		"journey_id": str(data.get("JourneyId", "")),
+		# Soft edit-lock: true on a journey installed from a paid pack, so the buyer can't open it in the
+		# builder. A courtesy lock (journey.json is plaintext) — see JourneySelect._on_edit_pressed.
+		"locked": bool(data.get("Locked", false)),
+		# Counter names the author chose to surface to the player (HUD pop + inventory list). The
+		# runtime reads this off GameState.Journey; other counters stay hidden, gating only.
+		"shown_counters": JourneyData.clean_flag_list(data.get("ShownCounters", [])),
+		# Author-defined journey-scoped items — loaded into InventoryService at play and listed in the
+		# builder's item dropdowns. Parsed to the runtime (snake-case) shape, image paths resolved.
+		"items": _journey_items_resolved(data, path),
+		# Storyboard cast — referenced by each storyboard line's `stage`. Each character carries its own
+		# portraits (paths resolved) and placements (position/size boxes).
+		"characters": _journey_characters_resolved(data, path),
 		"cover_path": find_cover_image(path),
 		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
 		"rounds": [],
@@ -408,6 +606,8 @@ static func _parse_comments(data: Dictionary) -> Array:
 		var hex: String = str(c.get("Color", ""))
 		if hex != "" and Color.html_is_valid(hex):
 			entry["color"] = Color.html(hex)
+		if str(c.get("NodeId", "")) != "":
+			entry["node_id"] = str(c["NodeId"])
 		out.append(entry)
 	return out
 
@@ -567,16 +767,16 @@ static func _fork_merge(
 ) -> String:
 	var out: Array = (graph["nodes"][fork_id] as Dictionary).get("out", [])
 	var reach_count: Dictionary = {}
-	for e: Dictionary in out:
-		for nid: String in _reachable(graph, str(e.get("to", ""))):
+	for edge: Dictionary in out:
+		for nid: String in _reachable(graph, str(edge.get("to", ""))):
 			reach_count[nid] = int(reach_count.get(nid, 0)) + 1
 	var best: String = ""
 	var best_depth: int = 0x7fffffff
 	for nid: String in reach_count:
 		if int(reach_count[nid]) >= 2 and nid != fork_id and not stop.has(nid):
-			var dpt: int = int(depth.get(nid, 0))
-			if dpt < best_depth:
-				best_depth = dpt
+			var node_depth: int = int(depth.get(nid, 0))
+			if node_depth < best_depth:
+				best_depth = node_depth
 				best = nid
 	return best
 
@@ -591,8 +791,8 @@ static func _reachable(graph: Dictionary, from_id: String) -> Dictionary:
 		if id == "" or not nodes.has(id) or seen.has(id):
 			continue
 		seen[id] = true
-		for e: Dictionary in (nodes[id] as Dictionary).get("out", []):
-			stack.append(str(e.get("to", "")))
+		for edge: Dictionary in (nodes[id] as Dictionary).get("out", []):
+			stack.append(str(edge.get("to", "")))
 	return seen
 
 
@@ -605,8 +805,8 @@ static func _longest_depths(graph: Dictionary) -> Dictionary:
 		indeg[id] = 0
 		succ[id] = []
 	for id: String in nodes:
-		for e: Dictionary in (nodes[id] as Dictionary).get("out", []):
-			var to: String = str(e.get("to", ""))
+		for edge: Dictionary in (nodes[id] as Dictionary).get("out", []):
+			var to: String = str(edge.get("to", ""))
 			if to != "" and nodes.has(to):
 				(succ[id] as Array).append(to)
 				indeg[to] = int(indeg[to]) + 1
@@ -616,10 +816,10 @@ static func _longest_depths(graph: Dictionary) -> Dictionary:
 		if int(indeg[id]) == 0:
 			depth[id] = 0
 			queue.append(id)
-	var qi: int = 0
-	while qi < queue.size():
-		var cur: String = queue[qi]
-		qi += 1
+	var head: int = 0  # index of the next node to pop (queue is never shrunk, just walked)
+	while head < queue.size():
+		var cur: String = queue[head]
+		head += 1
 		for to: String in succ[cur] as Array:
 			depth[to] = maxi(int(depth.get(to, 0)), int(depth[cur]) + 1)
 			indeg[to] = int(indeg[to]) - 1
@@ -643,6 +843,7 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 		"resolution": raw_fork.get("Resolution", raw_fork.get("resolution", "choice")),
 		"cond_metric": raw_fork.get("CondMetric", raw_fork.get("cond_metric", "score")),
 		"default_path": int(raw_fork.get("DefaultPath", raw_fork.get("default_path", 0))),
+		"timeout_path": int(raw_fork.get("TimeoutPath", raw_fork.get("timeout_path", -1))),
 		"paths": [],
 	}
 	var raw_paths: Array = raw_fork.get("Paths", raw_fork.get("paths", []))
@@ -678,10 +879,6 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				if rel != "":
 					pr_axis_scripts[axis] = journey_path + "/" + rel
 
-			var pr_restim_axis_scripts: Dictionary = _resolve_restim_axis_scripts_raw(
-				raw_pr, journey_path, pr_axis_scripts
-			)
-
 			var pr_raw_vib: Dictionary = raw_pr.get("VibScripts", raw_pr.get("vib_scripts", {}))
 			var pr_vib_scripts: Dictionary = {}
 			for ch_key: String in pr_raw_vib:
@@ -709,14 +906,9 @@ static func parse_fork(raw_fork: Dictionary, journey_path: String) -> Dictionary
 				"video_path": pr_video_path,
 				"funscript_path": pr_fs["path"],
 				"axis_scripts": pr_axis_scripts,
-				"restim_axis_scripts": pr_restim_axis_scripts,
 				"vib_scripts": pr_vib_scripts,
 				"is_checkpoint":
 				bool(raw_pr.get("IsCheckpoint", raw_pr.get("is_checkpoint", false))),
-				"cooldown_days":
-				int(raw_pr.get("CooldownDays", raw_pr.get("cooldown_days", 0))),
-				"items_blocked":
-				bool(raw_pr.get("ItemsBlocked", raw_pr.get("items_blocked", false))),
 				"boss_image": pr_boss_image,
 				"boss_tagline": raw_pr.get("BossTagline", ""),
 				"boss_modifiers": pr_boss_modifiers,
@@ -879,64 +1071,58 @@ static func _longest_path_stats(fork: Dictionary) -> Dictionary:
 # Finds the journey cover image. New journeys keep all images in a media/
 # subfolder; old journeys stored the cover at the journey root.
 static func find_cover_image(path: String) -> String:
-	var media_path: String = path + "/media"
-	var media_dir: DirAccess = DirAccess.open(media_path)
-	if media_dir != null:
-		# Scan once: prefer a file named "cover.*" — fork/storyboard/boss images
-		# are also stored in media/ and must not be mistaken for the journey cover.
-		var fallback: String = ""
-		media_dir.list_dir_begin()
-		var mfname: String = media_dir.get_next()
-		while mfname != "":
-			if not media_dir.current_is_dir() and mfname.get_extension().to_lower() in IMAGE_EXTS:
-				if mfname.get_basename().to_lower() == "cover":
-					media_dir.list_dir_end()
-					return media_path + "/" + mfname
-				elif fallback == "":
-					fallback = media_path + "/" + mfname
-			mfname = media_dir.get_next()
-		media_dir.list_dir_end()
-		if fallback != "":
-			return fallback
+	# A journey's cover is EXPLICIT: a file literally named cover.* (in media/, or at the journey root
+	# for old journeys). No cover set → no cover. We deliberately do NOT fall back to "the first image
+	# we find" — media/ also holds fork / storyboard / boss / portrait art, and borrowing one of those
+	# as the cover is exactly the surprise we're removing.
+	var media_cover: String = _find_named_image(path + "/media", "cover")
+	if media_cover != "":
+		return media_cover
+	return _find_named_image(path, "cover")
 
-	# Fallback: old journeys stored the cover at the journey root.
-	var dir: DirAccess = DirAccess.open(path)
+
+# Resolves a journey's MapBackdrops meta into [{path, offset, scale, opacity}], each image made absolute
+# against the journey's media/ folder. Skips entries with no image. Shared by the editor + the in-game map.
+static func _parse_map_backdrops(raw: Array, path: String) -> Array:
+	var out: Array = []
+	for e: Variant in raw:
+		var d: Dictionary = e
+		var img: String = str(d.get("Image", ""))
+		if img == "":
+			continue
+		(
+			out
+			. append(
+				{
+					"path": path + "/media/" + img,
+					"offset": Vector2(float(d.get("X", 0.0)), float(d.get("Y", 0.0))),
+					"scale": float(d.get("Scale", 1.0)),
+					"opacity": float(d.get("Opacity", 0.6)),
+					"rotation": float(d.get("Rot", 0.0)),
+				}
+			)
+		)
+	return out
+
+
+# Returns the path to a file named <base_name>.<image-ext> in `dir_path`, or "" if there isn't one.
+static func _find_named_image(dir_path: String, base_name: String) -> String:
+	var dir: DirAccess = DirAccess.open(dir_path)
 	if dir == null:
 		return ""
 	dir.list_dir_begin()
 	var fname: String = dir.get_next()
 	while fname != "":
-		if not dir.current_is_dir() and fname.get_extension().to_lower() in IMAGE_EXTS:
+		if (
+			not dir.current_is_dir()
+			and fname.get_basename().to_lower() == base_name
+			and fname.get_extension().to_lower() in IMAGE_EXTS
+		):
 			dir.list_dir_end()
-			return path + "/" + fname
+			return dir_path + "/" + fname
 		fname = dir.get_next()
 	dir.list_dir_end()
 	return ""
-
-
-# Resolves RestimAxisScripts / restim_axis_scripts from raw JSON into absolute
-# paths, merging legacy flat axis_scripts into shared when needed.
-static func _resolve_restim_axis_scripts_raw(
-	raw: Dictionary, base_path: String, resolved_axis_scripts: Dictionary
-) -> Dictionary:
-	var seed: Dictionary = {
-		"axis_scripts": resolved_axis_scripts,
-		"restim_axis_scripts": {},
-	}
-	var raw_ras: Variant = raw.get("RestimAxisScripts", raw.get("restim_axis_scripts", {}))
-	if raw_ras is Dictionary:
-		var abs_ras: Dictionary = JourneyData.empty_restim_axis_scripts()
-		for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-			var slot_map: Variant = (raw_ras as Dictionary).get(slot, {})
-			if slot_map is Dictionary:
-				var out_slot: Dictionary = {}
-				for axis: String in slot_map:
-					var rel: String = str(slot_map[axis])
-					if rel != "":
-						out_slot[axis] = base_path + "/" + rel
-				abs_ras[slot] = out_slot
-		seed["restim_axis_scripts"] = abs_ras
-	return JourneyData.coerce_restim_axis_scripts(seed)
 
 
 # Resolves a round's funscript stats as {count, length_ms, path}.
@@ -972,15 +1158,19 @@ static func _read_funscript_stats(folder: String) -> Dictionary:
 	var fname: String = dir.get_next()
 	while fname != "":
 		if not dir.current_is_dir() and fname.get_extension() in ["funscript", "json"]:
-			var full_path: String = folder + "/" + fname
-			# Skip secondary-axis / Restim-kit scripts — not the main L0 stroke.
-			if ImportScanner.detect_funscript_axis(full_path) != "L0":
-				fname = dir.get_next()
-				continue
-			dir.list_dir_end()
-			var stats: Dictionary = JourneyData.read_funscript_stats(full_path)
-			stats["path"] = full_path
-			return stats
+			# Skip secondary-axis scripts (e.g. "Name_L1.funscript") — not the L0 main script.
+			var stem: String = fname.get_basename()
+			var is_axis: bool = false
+			for ax: String in EXTRA_AXIS_SUFFIXES:
+				if stem.ends_with(ax):
+					is_axis = true
+					break
+			if not is_axis:
+				var full_path: String = folder + "/" + fname
+				dir.list_dir_end()
+				var stats: Dictionary = JourneyData.read_funscript_stats(full_path)
+				stats["path"] = full_path
+				return stats
 		fname = dir.get_next()
 	dir.list_dir_end()
 	return {"count": 0, "length_ms": 0, "path": ""}

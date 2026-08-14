@@ -11,8 +11,6 @@ extends RefCounted
 #   { type: "shop",       title, mode, count, items, price_multiplier }
 #   { type: "storyboard", coins, image, lines }
 #   { type: "fork",       title, description, paths: [ {name, description, image_path, items: [...]} ] }
-#   { type: "cooldown",   name, days, message }
-#   { type: "cutscene",   name, video_path, items_blocked, length_ms, award_item, coins, is_checkpoint }
 # Nested forks are stored inside a path's `items` array (recursive).
 #
 # Used by JourneyBuilder.gd via class-name calls:
@@ -25,7 +23,32 @@ const DIFFICULTIES: Array = ["Easy", "Medium", "Hard", "Very Hard", "Extreme", "
 
 const VIDEO_EXTENSIONS: Array[String] = ["mp4", "m4v", "mkv", "avi", "mov", "wmv", "webm"]
 const FUNSCRIPT_EXTENSIONS: Array[String] = ["funscript", "json"]
-const IMAGE_EXTENSIONS: Array[String] = ["png", "jpg", "jpeg", "webp"]
+const IMAGE_EXTENSIONS: Array[String] = ["png", "jpg", "jpeg", "webp", "gif"]
+
+# What the IN-GAME image slots accept (boss image, storyboard default + speaker, fork card): stills
+# plus anything the builder can bake to a looping H.264. Past the input filter there's no
+# difference — a GIF is converted to exactly what an .mp4 already is.
+#
+# Deliberately NOT merged into IMAGE_EXTENSIONS: that list also drives the journey COVER and the
+# canvas / side-panel drop handlers, where a dropped .mp4 already means "bulk-import rounds"
+# (VIDEO_EXTENSIONS). Adding video there would make those drops ambiguous. The cover stays on
+# IMAGE_EXTENSIONS: dropping a movie on it is far likelier a slip than intent.
+const ANIMATED_IMAGE_EXTENSIONS: Array[String] = [
+	"png", "jpg", "jpeg", "webp", "gif", "apng", "mp4", "m4v", "webm", "mkv", "mov"
+]
+
+# Bake ceilings for animated images, per surface (see MediaPoolService.bake_animation). Roughly 2x
+# the on-screen size, so UI scaling has headroom without paying for pixels nobody can see — a 1080p
+# GIF dropped into the 380x240 boss slot is ~20x more than is ever displayed. Never upscales: a
+# smaller source is baked at its own size.
+const ANIM_CAP_BOSS: Vector2i = Vector2i(760, 480)  # displayed at 380x240
+const ANIM_CAP_FORK: Vector2i = Vector2i(440, 720)  # fork cards are 220x360
+const ANIM_CAP_STORYBOARD: Vector2i = Vector2i(1920, 1080)  # fullscreen background
+const ANIM_CAP_PORTRAIT: Vector2i = Vector2i(720, 1080)  # VN cast portrait; tall, bottom-anchored, ~half-screen
+# The cover never animates (it sits in the catalogue grid), but a GIF cover still has to be
+# converted to a still PNG — Godot can't read GIF. Generous: an ordinary PNG/JPG cover isn't
+# downscaled at all, so this only exists to stop an absurd source, and it never upscales.
+const ANIM_CAP_COVER: Vector2i = Vector2i(2048, 2048)
 
 # Secondary T-code axes supported for serial devices (L0 = main stroke, handled separately).
 const EXTRA_AXES: Array[String] = ["L1", "L2", "R0", "R1", "R2"]
@@ -34,28 +57,37 @@ const EXTRA_AXES: Array[String] = ["L1", "L2", "R0", "R1", "R2"]
 # id. Used to name pooled channel scripts (content/m_<fp>.<suffix>.funscript) so the
 # pooled files stay self-describing and follow the funscript multi-axis convention.
 const AXIS_SUFFIXES: Dictionary = {
-	"alpha": "alpha",
-	"beta": "beta",
 	"L1": "surge",
 	"L2": "sway",
 	"R0": "twist",
 	"R1": "roll",
 	"R2": "pitch",
-	"e1": "e1",
-	"e2": "e2",
-	"e3": "e3",
-	"e4": "e4",
-	"volume": "volume",
-	"frequency": "frequency",
-	"pulse_frequency": "pulse_frequency",
-	"pulse_width": "pulse_width",
-	"pulse_interval_random": "pulse_interval_random",
-	"pulse_rise_time": "pulse_rise_time",
-	"sensor_suppression": "sensor_suppression",
 }
 const VIB_SUFFIXES: Dictionary = {
 	"vib1": "vibe1",
 	"vib2": "vibe2",
+}
+
+# restim (E-Stim Full) parameter scripts, keyed by restim T-code axis → funscript name suffix.
+# These have no serial/motion equivalent, so they stream to restim only. (alpha/beta are NOT
+# here — they map to the L0 main / L1 surge slots so they also drive serial, like position.)
+const ESTIM_SUFFIXES: Dictionary = {
+	"V0": "volume",
+	"C0": "carrier_frequency",
+	"P0": "pulse_frequency",
+	"P1": "pulse_width",
+	"P2": "pulse_interval_random",
+	"P3": "pulse_rise_time",
+	"V1": "vib1_frequency",
+	"V2": "vib1_strength",
+	"V3": "vib1_random",
+	"V4": "vib2_frequency",
+	"V5": "vib2_strength",
+	"V6": "vib1_left_right_bias",
+	"V7": "vib1_up_down_bias",
+	"V8": "vib2_left_right_bias",
+	"V9": "vib2_up_down_bias",
+	"W1": "vib2_random",
 }
 
 # Curse catalog — the GAMEPLAY afflictions a cursed round can apply (they change
@@ -363,6 +395,21 @@ static func effect_entry(name: String) -> Dictionary:
 	return {}
 
 
+# True when `kind` is a sensory (visual/audio) effect. Sensory effects are keyed by kind in item
+# bundles and applied through SensoryFX; the gameplay/stroke item kinds are keyed by kind too but
+# reconciled by their own consumers.
+static func is_sensory_kind(kind: String) -> bool:
+	return not sensory_entry_by_kind(kind).is_empty()
+
+
+# The SENSORY_CATALOG entry for a kind (carries name + imin/imax/idef intensity range). {} if none.
+static func sensory_entry_by_kind(kind: String) -> Dictionary:
+	for e: Dictionary in SENSORY_CATALOG:
+		if str(e.get("kind", "")) == kind:
+			return e
+	return {}
+
+
 # Stroke-modifier kinds — these change the funscript curve, so their magnitude is tuned
 # live in the funscript preview (where the author can watch the strokes), not the side
 # panel. reverse/block are stroke kinds but carry no magnitude.
@@ -458,6 +505,16 @@ static func effect_param_specs(kind: String) -> Array:
 # round's effect_overrides map (name → {changed params/name/desc}); only present keys win, so
 # untouched params keep the catalog default. Stamps `_ref` = the original catalog name so
 # valence (effect_is_benefit) and re-lookup still work after a custom rename. {} if unknown.
+# The catalog entries a round actually ticked, in catalog order. Shared by the runtime and the
+# builder's live sensory preview.
+static func catalog_subset(catalog: Array, names: Array) -> Array:
+	var out: Array = []
+	for entry: Dictionary in catalog:
+		if entry.get("name", "") in names:
+			out.append(entry)
+	return out
+
+
 static func resolved_effect(name: String, overrides: Dictionary) -> Dictionary:
 	var base: Dictionary = effect_entry(name)
 	if base.is_empty():
@@ -547,7 +604,12 @@ static func normalize_effect_round(src: Dictionary) -> Dictionary:
 			card_header = _nonblank(str(src.get("card_header", "")), "EFFECT")
 			card_icon = _nonblank(str(src.get("card_icon", "")), "✦")
 			show_border = bool(src.get("show_border", false))  # new rounds: border off by default
-		_:  # normal / boss — effect fields defaulted (unused).
+		_:  # normal / boss
+			# A BOSS can carry forced gameplay effects (kept from source); a normal round has
+			# none, so an empty source list leaves this empty and unused. The framing / reveal
+			# fields stay defaulted — a boss draws its own intro card, not the effect card.
+			for n: Variant in src.get("effects", []):
+				effects.append(str(n))
 			effect_random = bool(src.get("effect_random", true))
 			resolvable = bool(src.get("resolvable", false))
 			endure_reward = int(src.get("endure_reward", 0))
@@ -581,33 +643,6 @@ static func normalize_effect_round(src: Dictionary) -> Dictionary:
 	}
 
 
-# Mid-round Release / "I came" fields. Defaults keep legacy rounds inert (button
-# off). Modes match ReleaseLogic.MODES; GameLoop + Builder read this shape.
-static func normalize_release_round(src: Dictionary) -> Dictionary:
-	var modes: Array[String] = [
-		"stamp_flag",
-		"fail_jump",
-		"timed_window",
-		"loop_until_clean",
-		"punish_polarity",
-	]
-	var mode: String = str(src.get("release_mode", "stamp_flag")).strip_edges().to_lower()
-	if not (mode in modes):
-		mode = "stamp_flag"
-	return {
-		"release_enabled": bool(src.get("release_enabled", false)),
-		"release_mode": mode,
-		"release_flag": str(src.get("release_flag", "")).strip_edges(),
-		"release_jump_to": str(src.get("release_jump_to", "")).strip_edges(),
-		"release_deadline_ms": maxi(0, int(src.get("release_deadline_ms", 0))),
-		"release_score_hit": int(src.get("release_score_hit", 0)),
-		"release_score_miss": int(src.get("release_score_miss", 0)),
-		"release_remove_on_press": bool(src.get("release_remove_on_press", true)),
-		"release_invert": bool(src.get("release_invert", false)),
-		"release_disabled_if_flag": str(src.get("release_disabled_if_flag", "")).strip_edges(),
-	}
-
-
 # ── Round serialization ──────────────────────────────────────────────────────
 
 
@@ -624,10 +659,15 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 	out.erase("type")  # node-level — lives outside data on disk
 	out.erase("node_id")  # node-level — the node's dict key IS its id
 	out.erase("paths")  # legacy tree key; fork choices are out-edges in the graph
-	# A pending trim is CONSUMED by the save (the baked media IS the trim) —
-	# journey.json never carries trim values.
+	# Segments are consumed by the save — the baked media IS the cut, so journey.json never
+	# carries them. The legacy trim / section-loop fields go too, so a migrated round stops
+	# carrying both spellings after its first save.
+	out.erase("segments")
 	out.erase("trim_start_ms")
 	out.erase("trim_end_ms")
+	out.erase("loop_in_ms")
+	out.erase("loop_out_ms")
+	out.erase("loop_count")
 	# Scalars get coercing overwrites (value types — no aliasing). Collection fields (arrays /
 	# dicts) are ALREADY deep-copied into `out`; only fill a default when ABSENT — reassigning
 	# `out[k] = data.get(k, …)` would re-alias the source's live array/dict and let a later
@@ -638,11 +678,10 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			# action_count/length_ms + folder are overwritten afterwards by _save_round_node_media.
 			out["coins"] = int(data.get("coins", 0))
 			out["award_item"] = str(data.get("award_item", ""))  # optional item id granted at round end
-			out["is_checkpoint"] = bool(data.get("is_checkpoint", false))
-			out["cooldown_days"] = int(data.get("cooldown_days", 0))
-			out["items_blocked"] = bool(
-				data.get("items_blocked", data.get("skills_blocked", false))
-			)
+			# is_checkpoint is RETIRED — converted to a checkpoint node on load
+			# (JourneyGraph._migrate_checkpoint_flags) and stripped from the round below with the
+			# other legacy keys, so a re-save never carries it.
+			out["is_warmup"] = bool(data.get("is_warmup", false))
 			out["boss_tagline"] = str(data.get("boss_tagline", ""))
 			_fill_default(out, "boss_modifiers", [])  # lowercase {kind,…}; deep-copied pass-through
 			# Effect-round fields, migrated from any legacy cursed/blessed schema. Drop the retired
@@ -650,14 +689,17 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			# normalize_effect_round then supplies the canonical set (round_type, effects,
 			# resolvable, sensory layer, framing colours, …). "theme" is a retired interim key.
 			for legacy: String in [
-				"curses", "boons", "curse_random", "boon_random", "curse_reward", "theme"
+				"curses",
+				"boons",
+				"curse_random",
+				"boon_random",
+				"curse_reward",
+				"theme",
+				"is_checkpoint",  # retired — checkpoints are their own node type now
 			]:
 				out.erase(legacy)
 			out.merge(normalize_effect_round(data), true)
 			_prune_orphan_overrides(out)  # drop tuning for effects no longer ticked
-			# Release / "I came" control — always present on round data so authors and
-			# runtime share one typed shape (legacy rounds stay disabled).
-			out.merge(normalize_release_round(data), true)
 			# Pool round ("encounter"): a list of media-set entries, one weighted-picked
 			# at runtime. Only pool rounds carry the list; media inside is pooled later by
 			# _save_round_node_media (like a normal round's media, ×N entries).
@@ -668,9 +710,12 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 						pool_out.append(coerce_pool_entry(pe))
 				out["pool_entries"] = pool_out
 				out["show_encounter"] = bool(data.get("show_encounter", true))
+				# Opt-in: don't draw a clip this pool already showed this run (across its copies).
+				out["no_repeat"] = bool(data.get("no_repeat", false))
 			else:
 				out.erase("pool_entries")
 				out.erase("show_encounter")
+				out.erase("no_repeat")
 		"shop":
 			out["title"] = str(data.get("title", ""))
 			out["mode"] = str(data.get("mode", "pool"))
@@ -678,6 +723,7 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			out["price_multiplier"] = float(data.get("price_multiplier", 1.0))
 			_fill_default(out, "items", [])
 			_fill_default(out, "guaranteed", [])
+			_fill_default(out, "excluded", [])
 		"storyboard":
 			# image + lines are overwritten by _save_storyboard_node_media.
 			out["coins"] = int(data.get("coins", 0))
@@ -689,19 +735,21 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			out["cond_metric"] = str(data.get("cond_metric", "score"))
 			out["cond_decider"] = str(data.get("cond_decider", "game"))
 			out["default_path"] = int(data.get("default_path", 0))
+			out["timeout_path"] = int(data.get("timeout_path", -1))
 			out["after_order"] = int(data.get("after_order", 0))
-		"cooldown":
+			# Which counter a "counter" conditional fork gates on (blank for other metrics).
+			out["cond_counter"] = str(data.get("cond_counter", ""))
+		"checkpoint":
+			# A save point between rounds — its only field is the banner label.
 			out["name"] = str(data.get("name", ""))
-			out["days"] = maxi(1, int(data.get("days", 1)))
-			out["message"] = str(data.get("message", ""))
-		"cutscene":
-			out["name"] = str(data.get("name", ""))
-			out["video_path"] = str(data.get("video_path", ""))
-			out["items_blocked"] = bool(data.get("items_blocked", true))
-			out["length_ms"] = maxi(0, int(data.get("length_ms", 0)))
-			out["award_item"] = str(data.get("award_item", ""))  # optional item id granted when cutscene ends
-			out["coins"] = int(data.get("coins", 0))
-			out["is_checkpoint"] = bool(data.get("is_checkpoint", false))
+	# Counter deltas can ride on ANY node type (a round bumps "belt", a storyboard bumps "arousal"),
+	# so normalize them here rather than per type. Cleaned to {name:int}; dropped entirely when empty
+	# so the schema stays lean (mirrors how set_flags only appears when non-empty).
+	var counters: Dictionary = clean_counter_deltas(data.get("set_counters", {}))
+	if counters.is_empty():
+		out.erase("set_counters")
+	else:
+		out["set_counters"] = counters
 	return out
 
 
@@ -729,65 +777,6 @@ static func _prune_orphan_overrides(out: Dictionary) -> void:
 			overrides.erase(nm)
 
 
-# ── Dual Restim axis kits ─────────────────────────────────────────────────────
-# restim_axis_scripts: { "a": {axis: path}, "b": {...}, "shared": {...} }
-# Shared axes (e.g. pulse_*) fan out to both Restim websockets at play time.
-# Legacy flat axis_scripts merges into "shared" for keys not already in a/b/shared.
-
-const RESTIM_AXIS_SLOTS: PackedStringArray = ["a", "b", "shared"]
-
-
-static func empty_restim_axis_scripts() -> Dictionary:
-	return {"a": {}, "b": {}, "shared": {}}
-
-
-static func _axis_in_restim_kits(ras: Dictionary, axis: String) -> bool:
-	for slot: String in RESTIM_AXIS_SLOTS:
-		var m: Dictionary = ras.get(slot, {}) as Dictionary
-		if m.has(axis):
-			return true
-	return false
-
-
-# Normalizes round/pool media dict → restim_axis_scripts {a,b,shared}.
-# Prefers explicit restim_axis_scripts; merges leftover axis_scripts into shared.
-static func coerce_restim_axis_scripts(d: Dictionary) -> Dictionary:
-	var out: Dictionary = empty_restim_axis_scripts()
-	var ras: Variant = d.get("restim_axis_scripts", null)
-	if ras is Dictionary:
-		var rd: Dictionary = ras
-		for slot: String in RESTIM_AXIS_SLOTS:
-			var slot_map: Variant = rd.get(slot, {})
-			if slot_map is Dictionary:
-				out[slot] = (slot_map as Dictionary).duplicate(true)
-	var legacy: Dictionary = (d.get("axis_scripts", {}) as Dictionary).duplicate(true)
-	for axis: String in legacy:
-		if _axis_in_restim_kits(out, axis):
-			continue
-		(out["shared"] as Dictionary)[axis] = legacy[axis]
-	return out
-
-
-# Ensures d has restim_axis_scripts (coerced) and keeps axis_scripts as a flat
-# merge of shared (for serial / legacy readers). Returns the coerced kits.
-static func ensure_restim_axis_scripts(d: Dictionary) -> Dictionary:
-	var ras: Dictionary = coerce_restim_axis_scripts(d)
-	d["restim_axis_scripts"] = ras
-	# Flat axis_scripts = shared only (SSR + unprefixed kit) for serial path /
-	# older tooling; slot a/b kits live only under restim_axis_scripts.
-	d["axis_scripts"] = (ras["shared"] as Dictionary).duplicate(true)
-	return ras
-
-
-# Deep-copies restim_axis_scripts for pool entries / templates.
-static func duplicate_restim_axis_scripts(d: Dictionary) -> Dictionary:
-	var ras: Dictionary = coerce_restim_axis_scripts(d)
-	var out: Dictionary = empty_restim_axis_scripts()
-	for slot: String in RESTIM_AXIS_SLOTS:
-		out[slot] = (ras[slot] as Dictionary).duplicate(true)
-	return out
-
-
 # ── Pool round (random encounter) ─────────────────────────────────────────────
 # A pool round holds several media-set entries; the runtime weighted-picks one as
 # the "encounter" each play. Each entry is just media + a name + a spawn weight
@@ -795,13 +784,11 @@ static func duplicate_restim_axis_scripts(d: Dictionary) -> Dictionary:
 # the media paths are pooled into content/ by _save_round_node_media; at scan they
 # resolve back to absolute — same as a normal round's media, per entry.
 static func coerce_pool_entry(e: Dictionary) -> Dictionary:
-	var ras: Dictionary = duplicate_restim_axis_scripts(e)
 	var out: Dictionary = {
 		"name": str(e.get("name", "")),
 		"video_path": str(e.get("video_path", "")),
 		"funscript_path": str(e.get("funscript_path", "")),
-		"axis_scripts": (ras["shared"] as Dictionary).duplicate(true),
-		"restim_axis_scripts": ras,
+		"axis_scripts": (e.get("axis_scripts", {}) as Dictionary).duplicate(true),
 		"vib_scripts": (e.get("vib_scripts", {}) as Dictionary).duplicate(true),
 		"weight": maxi(1, int(e.get("weight", 1))),
 		# Per-entry round type: a rolled encounter can play as normal or as a boss (the round
@@ -825,6 +812,97 @@ static func pool_entry_weights(entries: Array) -> Array:
 	return w
 
 
+# Weights for a NO-REPEAT pool draw: an entry whose video already played this run (its video_path is
+# in `played`, a {video_path: true} set) gets weight 0 so it's skipped — UNLESS every entry has
+# played, in which case the full weights are returned (repeat rather than dead-end). Pure; pairs with
+# pool_entry_weights.
+static func pool_draw_weights(entries: Array, played: Dictionary) -> Array:
+	var base: Array = pool_entry_weights(entries)
+	var filtered: Array = []
+	var any_unplayed: bool = false
+	for i in entries.size():
+		var vp: String = str((entries[i] as Dictionary).get("video_path", ""))
+		if vp != "" and played.has(vp):
+			filtered.append(0)
+		else:
+			filtered.append(int(base[i]))
+			any_unplayed = true
+	return filtered if any_unplayed else base
+
+
+# Every animated image source the graph references, deduped. `animated_exts` is passed in (the
+# caller owns the "what can ffmpeg bake" question — see MediaPoolService.ANIMATED_EXTENSIONS) so
+# this stays pure data.
+#
+# The builder blocks a save when any of these exist and ffmpeg can't run: an animated image MUST be
+# converted (Godot has no GIF decoder), and unlike video transcoding that isn't optional — an
+# unbaked GIF ships as a blank image.
+static func graph_animated_image_sources(graph: Dictionary, animated_exts: Array) -> Array:
+	var out: Dictionary = {}
+	for id: String in graph.get("nodes", {}):
+		var n: Dictionary = graph["nodes"][id]
+		var d: Dictionary = n.get("data", {})
+		match str(n.get("type", "")):
+			"round":
+				_note_animated(out, str(d.get("boss_image", "")), animated_exts)
+				for pe: Variant in d.get("pool_entries", []):
+					_note_animated(
+						out, str((pe as Dictionary).get("boss_image", "")), animated_exts
+					)
+			"storyboard":
+				_note_animated(out, str(d.get("image", "")), animated_exts)
+				for line: Variant in d.get("lines", []):
+					_note_animated(out, str((line as Dictionary).get("image", "")), animated_exts)
+			"fork":
+				for e: Variant in n.get("out", []):
+					_note_animated(out, str((e as Dictionary).get("image_path", "")), animated_exts)
+	return out.keys()
+
+
+static func _note_animated(out: Dictionary, path: String, animated_exts: Array) -> void:
+	if path != "" and path.get_extension().to_lower() in animated_exts:
+		out[path] = true
+
+
+# ── Journey identity ─────────────────────────────────────────────────────────
+
+# Minimum FHJ version required to safely open a journey written by this build. Stamped as
+# "MinVersion"; JourneySelect warns when the running app is older. A MAINTAINED FLOOR, not the
+# live app version — bump it only when a save introduces a feature/format an older app can't
+# read, so a plain re-save doesn't inflate the requirement.
+const JOURNEY_MIN_APP_VERSION: String = "0.6.0"
+
+
+# A stable, globally-unique id for a journey, minted ONCE and preserved across every later save
+# (see stamp_journey_identity). Journeys travel between users, so this is 128 bits of randomness
+# rather than anything machine- or counter-derived — two authors must never mint the same id.
+# Prefixed like node ids ("n_…") so it reads unambiguously in journey.json.
+#
+# This exists so other content can refer to a journey durably: Name and FolderName are both
+# user-renameable, so neither can anchor anything.
+static func new_journey_id() -> String:
+	return "j_%08x%08x%08x%08x" % [randi(), randi(), randi(), randi()]
+
+
+# Stamps journey-level identity + version fields onto a journey.json meta dict, in place.
+#
+# Every writer of a permanent journey routes through here (the builder's save and the
+# randomizer's keep) so the two can't drift — the randomizer previously wrote journeys with no
+# version stamps at all because it builds its own meta block.
+#
+# `existing_id` carries the id forward: it MUST be stable for the life of the journey, so it is
+# minted only when absent. Renaming a journey keeps its id (same journey); a fresh save mints a
+# new one.
+static func stamp_journey_identity(meta: Dictionary, existing_id: String = "") -> void:
+	var id: String = existing_id.strip_edges()
+	if id == "":
+		id = new_journey_id()
+	meta["JourneyId"] = id
+	# The exact build that wrote the file (informational) + the floor needed to open it.
+	meta["CreatedWith"] = str(ProjectSettings.get_setting("application/config/version", ""))
+	meta["MinVersion"] = JOURNEY_MIN_APP_VERSION
+
+
 # ── Item templates ───────────────────────────────────────────────────────────
 
 
@@ -837,6 +915,357 @@ static func new_node_id() -> String:
 	return "n_%08x%08x" % [randi(), randi()]
 
 
+# ── Custom journey items ─────────────────────────────────────────────────────
+# Author-defined, journey-scoped items: a name + description, and either an effect BUNDLE (a
+# "modifier" that, when used, applies its tuned effects for the duration) or a "key" (owned for fork
+# gating, never manually used). Stored in the journey meta; loaded into InventoryService each run.
+# Effects are resolved {kind, params} dicts — the same shape built-in items use — so the C# runtime
+# consumes them directly. Ids are minted once and preserved so award/shop/gate references survive edits.
+const ITEM_CATEGORIES: Array = ["modifier", "key"]
+const ITEM_DEFAULT_DURATION_MS: int = 30000
+
+
+static func new_item_id() -> String:
+	return "itm_%08x%08x" % [randi(), randi()]
+
+
+# Runtime (snake-case) shape → journey.json (PascalCase envelope; effect param dicts stay lowercase).
+static func coerce_journey_item(item: Dictionary) -> Dictionary:
+	var category: String = str(item.get("category", "modifier"))
+	if not ITEM_CATEGORIES.has(category):
+		category = "modifier"
+	var out: Dictionary = {
+		"Id": str(item.get("id", "")),
+		"Name": str(item.get("name", "")),
+		"Description": str(item.get("description", "")),
+		"Category": category,
+		"Price": maxi(0, int(item.get("price", 0))),
+	}
+	# Optional icon (pooled path written by the save; the author's source path in the editor model).
+	if str(item.get("image", "")) != "":
+		out["Image"] = str(item.get("image", ""))
+	if category == "key":
+		return out
+	out["DurationMs"] = maxi(0, int(item.get("duration_ms", ITEM_DEFAULT_DURATION_MS)))
+	var effects_out: Array = []
+	for e: Variant in item.get("effects", []):
+		if e is Dictionary:
+			effects_out.append((e as Dictionary).duplicate(true))
+	out["Effects"] = effects_out
+	return out
+
+
+static func coerce_journey_items(items: Array) -> Array:
+	var out: Array = []
+	for it: Variant in items:
+		if it is Dictionary:
+			out.append(coerce_journey_item(it))
+	return out
+
+
+# journey.json (PascalCase) → runtime (snake-case). A "key" gets kind:"key" so InventoryService
+# refuses manual use and fork gating works by id; a "modifier" carries its effects bundle.
+static func parse_journey_item(raw: Dictionary) -> Dictionary:
+	var category: String = str(raw.get("Category", "modifier"))
+	if not ITEM_CATEGORIES.has(category):
+		category = "modifier"
+	# Heal a missing/blank id on read. An empty id is always broken — InventoryService.LoadJourneyItems
+	# skips it and no fork can gate on "" — so minting one here (durable on the next save) can only fix
+	# a broken item, never break a valid reference. Guards against legacy / mid-development id-less items.
+	var id: String = str(raw.get("Id", "")).strip_edges()
+	if id == "":
+		id = new_item_id()
+	var item: Dictionary = {
+		"id": id,
+		"name": str(raw.get("Name", "")),
+		"description": str(raw.get("Description", "")),
+		"category": category,
+		"price": int(raw.get("Price", 0)),
+	}
+	if str(raw.get("Image", "")) != "":
+		item["image"] = str(raw.get("Image", ""))
+	if category == "key":
+		item["kind"] = "key"
+		return item
+	item["duration_ms"] = int(raw.get("DurationMs", ITEM_DEFAULT_DURATION_MS))
+	var effects: Array = []
+	for e: Variant in raw.get("Effects", []):
+		if e is Dictionary:
+			effects.append((e as Dictionary).duplicate(true))
+	item["effects"] = effects
+	return item
+
+
+static func parse_journey_items(raw: Array) -> Array:
+	var out: Array = []
+	for r: Variant in raw:
+		if r is Dictionary:
+			out.append(parse_journey_item(r))
+	return out
+
+
+# ── Characters (the storyboard cast) ────────────────────────────────────────
+# Journey-level cast, each carrying its OWN portraits (expressions) and placements (position/size boxes
+# tuned to that character's art). A storyboard line's `stage` is a LIST of {character, portrait,
+# placement} — position and expression chosen independently. Durable `chr_…` / `por_…` ids (blank-id
+# heal on read). Portraits pool like any in-game image; placements are pure fraction boxes.
+
+# Seed ids for the three positions every character starts with (draggable/tunable afterward).
+const CHARACTER_SIDES: Array = ["left", "center", "right"]
+
+# Code defaults for the three seeded positions {id: box}. Screen-space fractions; a portrait aspect-fits
+# the box. New characters copy these into their own Placements; also the fallback for a stale reference.
+const PLACEMENT_BUILTINS: Dictionary = {
+	"left": {"name": "Left", "x": 0.0, "y": 0.10, "w": 0.40, "h": 0.76},
+	"center": {"name": "Center", "x": 0.30, "y": 0.10, "w": 0.40, "h": 0.76},
+	"right": {"name": "Right", "x": 0.60, "y": 0.10, "w": 0.40, "h": 0.76},
+}
+const PLACEMENT_MIN_SIZE: float = 0.05  # a box can't be smaller than this fraction, so it stays grabbable
+
+
+static func new_character_id() -> String:
+	return "chr_%08x%08x" % [randi(), randi()]
+
+
+static func new_portrait_id() -> String:
+	return "por_%08x%08x" % [randi(), randi()]
+
+
+static func new_placement_id() -> String:
+	return "plc_%08x%08x" % [randi(), randi()]
+
+
+# The three positions a fresh character starts with (copied from the built-in boxes, then tunable).
+static func default_character_placements() -> Array:
+	var out: Array = []
+	for bid: String in CHARACTER_SIDES:
+		var d: Dictionary = PLACEMENT_BUILTINS[bid]
+		out.append(
+			{"id": bid, "name": str(d["name"]), "x": d["x"], "y": d["y"], "w": d["w"], "h": d["h"]}
+		)
+	return out
+
+
+# ── Character coerce/parse (runtime snake ⇄ journey.json PascalCase) ─────────
+
+
+static func coerce_journey_character(c: Dictionary) -> Dictionary:
+	return {
+		"Id": str(c.get("id", "")),
+		"Name": str(c.get("name", "")),
+		"Portraits": coerce_portraits(c.get("portraits", [])),
+		"Placements": coerce_journey_placements(c.get("placements", [])),
+	}
+
+
+static func coerce_journey_characters(list: Array) -> Array:
+	var out: Array = []
+	for c: Variant in list:
+		if c is Dictionary:
+			out.append(coerce_journey_character(c))
+	return out
+
+
+static func parse_journey_character(raw: Dictionary) -> Dictionary:
+	var id: String = str(raw.get("Id", "")).strip_edges()
+	if id == "":
+		id = new_character_id()  # heal a blank id so the character is still referenceable
+	var placements: Array = parse_journey_placements(raw.get("Placements", []))
+	if placements.is_empty():
+		placements = default_character_placements()  # self-heal: always give a character L/C/R to start
+	return {
+		"id": id,
+		"name": str(raw.get("Name", "")),
+		"portraits": parse_portraits(raw.get("Portraits", [])),
+		"placements": placements,
+	}
+
+
+static func parse_journey_characters(raw: Array) -> Array:
+	var out: Array = []
+	for r: Variant in raw:
+		if r is Dictionary:
+			out.append(parse_journey_character(r))
+	return out
+
+
+# ── Portraits (a character's expressions; first = default) ──────────────────
+
+
+static func coerce_portraits(list: Array) -> Array:
+	var out: Array = []
+	for p: Variant in list:
+		if p is Dictionary:
+			(
+				out
+				. append(
+					{
+						"Id": str((p as Dictionary).get("id", "")),
+						"Name": str((p as Dictionary).get("name", "")),
+						"Path": str((p as Dictionary).get("path", "")),
+					}
+				)
+			)
+	return out
+
+
+static func parse_portraits(raw: Array) -> Array:
+	var out: Array = []
+	for p: Variant in raw:
+		if p is Dictionary:
+			var pid: String = str((p as Dictionary).get("Id", "")).strip_edges()
+			if pid == "":
+				pid = new_portrait_id()
+			(
+				out
+				. append(
+					{
+						"id": pid,
+						"name": str((p as Dictionary).get("Name", "")),
+						"path": str((p as Dictionary).get("Path", "")),
+					}
+				)
+			)
+	return out
+
+
+# Path of a character's portrait by id; falls back to the FIRST portrait (the default), or "" if none.
+static func character_portrait_path(character: Dictionary, portrait_id: String) -> String:
+	var portraits: Array = character.get("portraits", [])
+	if portraits.is_empty():
+		return ""
+	for p: Variant in portraits:
+		if p is Dictionary and str((p as Dictionary).get("id", "")) == portrait_id:
+			return str((p as Dictionary).get("path", ""))
+	return str((portraits[0] as Dictionary).get("path", ""))
+
+
+# The character's default (first) portrait / placement id, for the speaker chip's implicit staging.
+static func character_default_portrait(character: Dictionary) -> String:
+	var portraits: Array = character.get("portraits", [])
+	return str((portraits[0] as Dictionary).get("id", "")) if not portraits.is_empty() else ""
+
+
+static func character_default_placement(character: Dictionary) -> String:
+	var placements: Array = character.get("placements", [])
+	return str((placements[0] as Dictionary).get("id", "")) if not placements.is_empty() else ""
+
+
+# ── Placements (a character's position/size boxes) ──────────────────────────
+
+
+static func coerce_journey_placement(p: Dictionary) -> Dictionary:
+	return {
+		"Id": str(p.get("id", "")),
+		"Name": str(p.get("name", "")),
+		"X": clampf(float(p.get("x", 0.0)), 0.0, 1.0),
+		"Y": clampf(float(p.get("y", 0.0)), 0.0, 1.0),
+		"W": clampf(float(p.get("w", 0.4)), PLACEMENT_MIN_SIZE, 1.0),
+		"H": clampf(float(p.get("h", 0.76)), PLACEMENT_MIN_SIZE, 1.0),
+	}
+
+
+static func coerce_journey_placements(list: Array) -> Array:
+	var out: Array = []
+	for p: Variant in list:
+		if p is Dictionary:
+			out.append(coerce_journey_placement(p))
+	return out
+
+
+static func parse_journey_placement(raw: Dictionary) -> Dictionary:
+	var id: String = str(raw.get("Id", "")).strip_edges()
+	if id == "":
+		id = new_placement_id()
+	return {
+		"id": id,
+		"name": str(raw.get("Name", "")),
+		"x": clampf(float(raw.get("X", 0.0)), 0.0, 1.0),
+		"y": clampf(float(raw.get("Y", 0.0)), 0.0, 1.0),
+		"w": clampf(float(raw.get("W", 0.4)), PLACEMENT_MIN_SIZE, 1.0),
+		"h": clampf(float(raw.get("H", 0.76)), PLACEMENT_MIN_SIZE, 1.0),
+	}
+
+
+static func parse_journey_placements(raw: Array) -> Array:
+	var out: Array = []
+	for r: Variant in raw:
+		if r is Dictionary:
+			out.append(parse_journey_placement(r))
+	return out
+
+
+# Resolves a placement id to its box {x, y, w, h} within a character's OWN placements. Falls back to the
+# character's first placement, then the code center default, so a portrait is never lost to a stale id.
+static func resolve_placement(id: String, placements: Array) -> Dictionary:
+	for p: Variant in placements:
+		if p is Dictionary and str((p as Dictionary).get("id", "")) == id:
+			var d: Dictionary = p
+			return {
+				"x": float(d.get("x", 0.0)),
+				"y": float(d.get("y", 0.0)),
+				"w": float(d.get("w", 0.4)),
+				"h": float(d.get("h", 0.76)),
+			}
+	if not placements.is_empty():
+		var f: Dictionary = placements[0]
+		return {
+			"x": float(f.get("x", 0.0)),
+			"y": float(f.get("y", 0.0)),
+			"w": float(f.get("w", 0.4)),
+			"h": float(f.get("h", 0.76)),
+		}
+	var b: Dictionary = PLACEMENT_BUILTINS["center"]
+	return {"x": b["x"], "y": b["y"], "w": b["w"], "h": b["h"]}
+
+
+# ── Stage (a line's list of on-stage characters) ────────────────────────────
+# A LIST of {character, portrait?, placement?}. portrait/placement omitted → the character's default
+# (first) of each. Entries with no character are dropped; ids are NOT validated here (a stale id just
+# renders nothing at runtime, never a crash).
+static func clean_stage(v: Variant) -> Array:
+	var out: Array = []
+	if not (v is Array):
+		return out
+	for e: Variant in v:
+		if not (e is Dictionary):
+			continue
+		var ch: String = str((e as Dictionary).get("character", "")).strip_edges()
+		if ch == "":
+			continue
+		var entry: Dictionary = {"character": ch}
+		var por: String = str((e as Dictionary).get("portrait", "")).strip_edges()
+		var plc: String = str((e as Dictionary).get("placement", "")).strip_edges()
+		if por != "":
+			entry["portrait"] = por
+		if plc != "":
+			entry["placement"] = plc
+		out.append(entry)
+	return out
+
+
+# Non-destructive staging for the speaker quick-pick: appends {character, placement, portrait} to the
+# stage ONLY IF that character isn't already on it — never moves or re-expresses an already-staged
+# character, so explicit STAGE edits always win. Returns a fresh list only when it actually adds
+# someone (callers detect a change by size). `placement`/`portrait` are the character's defaults.
+static func stage_with_speaker(
+	stage: Array, character_id: String, placement: String, portrait: String
+) -> Array:
+	if character_id == "":
+		return stage
+	for e: Variant in stage:
+		if e is Dictionary and str((e as Dictionary).get("character", "")) == character_id:
+			return stage  # already on stage — leave it alone
+	var out: Array = stage.duplicate(true)
+	var entry: Dictionary = {"character": character_id}
+	if placement != "":
+		entry["placement"] = placement
+	if portrait != "":
+		entry["portrait"] = portrait
+	out.append(entry)
+	return out
+
+
 # Normalizes a flag list (from a comma-separated field or a saved array) to a deduped, trimmed,
 # non-empty string array. Shared by a node's "sets flags" and a fork choice's "sets flags".
 static func clean_flag_list(v: Variant) -> Array:
@@ -847,6 +1276,47 @@ static func clean_flag_list(v: Variant) -> Array:
 		if s != "" and not (s in out):
 			out.append(s)
 	return out
+
+
+# The numeric analogue of clean_flag_list: normalizes a {name: delta} map (from disk or the editor)
+# to {String: int}, dropping blank names and zero deltas (a +0 counter change is a no-op, so it
+# stays out of journey.json). GameState.ApplyCounters reads the result as set_counters.
+static func clean_counter_deltas(v: Variant) -> Dictionary:
+	var out: Dictionary = {}
+	if not (v is Dictionary):
+		return out
+	for k: Variant in v as Dictionary:
+		var name: String = str(k).strip_edges()
+		var delta: int = int((v as Dictionary)[k])
+		if name != "" and delta != 0:
+			out[name] = delta
+	return out
+
+
+# Parses the authoring text field ("belt:1, arousal:2, stress:-1") into a {name: delta} map. Each
+# comma-separated token is "name:delta"; a bare "name" defaults to +1 (the "notch on the belt"
+# case). Round-trips with counter_deltas_to_text.
+static func parse_counter_deltas(text: String) -> Dictionary:
+	var out: Dictionary = {}
+	for token: String in text.split(",", false):
+		var parts: PackedStringArray = token.split(":")
+		var name: String = parts[0].strip_edges()
+		if name == "":
+			continue
+		var delta: int = 1
+		if parts.size() > 1 and parts[1].strip_edges() != "":
+			delta = int(parts[1].strip_edges())
+		if delta != 0:
+			out[name] = delta
+	return out
+
+
+# Renders a {name: delta} map back to the "belt:1, arousal:2, stress:-1" field text.
+static func counter_deltas_to_text(deltas: Dictionary) -> String:
+	var parts: PackedStringArray = []
+	for name: Variant in deltas:
+		parts.append("%s:%d" % [str(name), int(deltas[name])])
+	return ", ".join(parts)
 
 
 # ── Shop offer ───────────────────────────────────────────────────────────────
@@ -866,7 +1336,12 @@ static func resolve_shop_offer(
 		return shop_fixed_ids(shop_data, all_ids)
 
 	var guaranteed: Array = shop_guaranteed_ids(shop_data, all_ids)
-	var rest: Array = all_ids.filter(func(id: String) -> bool: return not (id in guaranteed))
+	# `excluded` bars items from the RANDOM draw only — a guaranteed item is explicit intent and
+	# still appears, so ticking one in both lists isn't a contradiction the roll has to resolve.
+	var excluded: Array = shop_data.get("excluded", [])
+	var rest: Array = all_ids.filter(
+		func(id: String) -> bool: return not (id in guaranteed) and not (id in excluded)
+	)
 	if rng != null:
 		# Fisher-Yates with the injected rng (Array.shuffle only uses the global one).
 		for i: int in range(rest.size() - 1, 0, -1):
@@ -891,12 +1366,18 @@ static func shop_guaranteed_ids(shop_data: Dictionary, all_ids: Array) -> Array:
 	return all_ids.filter(func(id: String) -> bool: return id in g)
 
 
-# The item ids a shop MIGHT offer: the fixed lineup, or (pool mode) the whole
-# registry — pool draws fill from every non-guaranteed item.
+# The item ids a shop MIGHT offer: the fixed lineup, or (pool mode) everything the draw can
+# reach. Excluded items are unreachable, so they're dropped — the auditor models item ownership
+# from this, and counting a barred item as obtainable would wrongly clear a fork that requires it.
+# A guaranteed item survives exclusion (see resolve_shop_offer).
 static func shop_possible_ids(shop_data: Dictionary, all_ids: Array) -> Array:
 	if str(shop_data.get("mode", "pool")) == "fixed":
 		return shop_fixed_ids(shop_data, all_ids)
-	return all_ids.duplicate()
+	var excluded: Array = shop_data.get("excluded", [])
+	var guaranteed: Array = shop_guaranteed_ids(shop_data, all_ids)
+	return all_ids.filter(
+		func(id: String) -> bool: return (id in guaranteed) or not (id in excluded)
+	)
 
 
 # The authored fixed lineup filtered to ids that still exist, in registry order.
@@ -919,11 +1400,31 @@ static func new_item(type: String) -> Dictionary:
 				"coins": 0,
 				"award_item": "",
 				"axis_scripts": {},
-				"restim_axis_scripts": empty_restim_axis_scripts(),
+				"estim_scripts": {},
 				"node_id": new_node_id()
 			}
 		"shop":
 			return {"type": "shop", "title": "", "node_id": new_node_id()}
+		"checkpoint":
+			# A save point between rounds — no media, no gameplay. `name` labels its banner.
+			return {"type": "checkpoint", "name": "", "node_id": new_node_id()}
+		"loop_start":
+			# The top marker of a Loop pair — a no-media passthrough that names where the replayed stretch
+			# begins. Its paired Loop End jumps back here (loop_end.loop_to = this node's id).
+			return {"type": "loop_start", "node_id": new_node_id()}
+		"loop_end":
+			# The bottom marker of a Loop pair. A control node that replays the body between its paired
+			# Loop Start (loop_to → … → here) until an exit condition holds. loop_combine: "any" (OR) |
+			# "all" (AND). loop_conditions: [{kind, …}] where kind ∈ counter/flag/repeats/item. Its single
+			# out-edge is the EXIT; loop_to is the special back-target (kept out of the DAG so analysis
+			# stays acyclic) and is auto-set to the paired Loop Start at creation.
+			return {
+				"type": "loop_end",
+				"node_id": new_node_id(),
+				"loop_to": "",
+				"loop_combine": "any",
+				"loop_conditions": [],
+			}
 		"storyboard":
 			# coins / item: optional reward granted when the storyboard is finished.
 			return {
@@ -938,6 +1439,7 @@ static func new_item(type: String) -> Dictionary:
 			# resolution: "choice" | "random" | "conditional" | "sacrifice"
 			# cond_metric (conditional only): "score" | "coins" | "item"
 			# default_path (conditional only): index taken when no rule matches
+			# timeout_path (choice/sacrifice): auto-advance fallback; -1 = random affordable
 			# Per-path config (only the field(s) for the active resolution are used):
 			#   weight (random) · threshold (conditional score/coins) ·
 			#   required_item (conditional item check, OR sacrifice — consumed) ·
@@ -950,6 +1452,7 @@ static func new_item(type: String) -> Dictionary:
 				"resolution": "choice",
 				"cond_metric": "score",
 				"default_path": 0,
+				"timeout_path": -1,
 				"paths":
 				[
 					{
@@ -973,29 +1476,6 @@ static func new_item(type: String) -> Dictionary:
 						"cost": 0
 					},
 				]
-			}
-		"cooldown":
-			# Calendar lockout node — stamps cooldown_until and Force Save & Quits.
-			# Prefer this over round.cooldown_days for new content.
-			return {
-				"type": "cooldown",
-				"name": "",
-				"days": 1,
-				"message": "",
-				"node_id": new_node_id()
-			}
-		"cutscene":
-			# Watch-then-advance video (EP / Fate / Credits / unlock clips). No funscript.
-			return {
-				"type": "cutscene",
-				"name": "",
-				"video_path": "",
-				"items_blocked": true,
-				"length_ms": 0,
-				"award_item": "",
-				"coins": 0,
-				"is_checkpoint": false,
-				"node_id": new_node_id()
 			}
 	return {"type": type}
 
@@ -1043,11 +1523,10 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 			"name": r.get("name", ""),
 			"funscript_path": r.get("funscript_path", ""),
 			"axis_scripts": r.get("axis_scripts", {}),
-			"restim_axis_scripts": duplicate_restim_axis_scripts(r),
 			"vib_scripts": r.get("vib_scripts", {}),
+			"estim_scripts": r.get("estim_scripts", {}),
 			"is_checkpoint": bool(r.get("is_checkpoint", false)),
-			"cooldown_days": int(r.get("cooldown_days", 0)),
-			"items_blocked": bool(r.get("items_blocked", false)),
+			"is_warmup": bool(r.get("is_warmup", false)),
 			"boss_image": r.get("boss_image", ""),
 			"boss_tagline": r.get("boss_tagline", ""),
 			"boss_modifiers": r.get("boss_modifiers", []),
@@ -1127,11 +1606,20 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 		"cover_path": cover_path,
 		"tags": journey.get("tags", []),
 		"map_enabled": bool(journey.get("map_enabled", true)),
+		"show_fork_counts": bool(journey.get("show_fork_counts", true)),
+		"show_loops_on_map": bool(journey.get("show_loops_on_map", false)),
+		"map_backdrops": journey.get("map_backdrops", []),
 		"map_fog": bool(journey.get("map_fog", false)),
 		"map_fog_reveal": int(journey.get("map_fog_reveal", 1)),
-		"unlock_pay_per_use": bool(journey.get("unlock_pay_per_use", false)),
+		"shown_counters": journey.get("shown_counters", []),
+		"auto_advance_enabled": bool(journey.get("auto_advance_enabled", false)),
+		"auto_advance_storyboard_secs": int(journey.get("auto_advance_storyboard_secs", 20)),
+		"auto_advance_fork_secs": int(journey.get("auto_advance_fork_secs", 45)),
+		"allow_finish": bool(journey.get("allow_finish", false)),
+		"finish_node": str(journey.get("finish_node", "")),
 		"redirects": journey.get("redirects", {}),
 		"items": items,
+		"characters": journey.get("characters", []),
 	}
 
 
@@ -1173,6 +1661,7 @@ static func _build_fork_item(f: Dictionary) -> Dictionary:
 		"resolution": str(f.get("resolution", "choice")),
 		"cond_metric": str(f.get("cond_metric", "score")),
 		"default_path": int(f.get("default_path", 0)),
+		"timeout_path": int(f.get("timeout_path", -1)),
 		"paths": paths_out,
 		"node_id": f.get("node_id", ""),
 	}
@@ -1188,11 +1677,10 @@ static func _build_path_items(p: Dictionary) -> Array:
 			"name": pr.get("name", ""),
 			"funscript_path": pr.get("funscript_path", ""),
 			"axis_scripts": pr.get("axis_scripts", {}),
-			"restim_axis_scripts": duplicate_restim_axis_scripts(pr),
 			"vib_scripts": pr.get("vib_scripts", {}),
+			"estim_scripts": pr.get("estim_scripts", {}),
 			"is_checkpoint": bool(pr.get("is_checkpoint", false)),
-			"cooldown_days": int(pr.get("cooldown_days", 0)),
-			"items_blocked": bool(pr.get("items_blocked", false)),
+			"is_warmup": bool(pr.get("is_warmup", false)),
 			"boss_image": pr.get("boss_image", ""),
 			"boss_tagline": pr.get("boss_tagline", ""),
 			"boss_modifiers": pr.get("boss_modifiers", []),
@@ -1371,33 +1859,11 @@ static func find_video_in_round(folder: String) -> String:
 
 
 # ── Shared content pool ──────────────────────────────────────────────────────
-# External (outside-journey) imports still pool once under content/m_<fingerprint>.<ext>.
-# Assets that already live inside the journey folder keep their relative paths on
-# save (named folders / original filenames) — no re-hash. The media/ folder is
-# separate and holds journey images.
-
-
-# If `src` resolves to a file under `journey_abs`, return the journey-root-relative
-# path (forward slashes). Otherwise return "". Used so save can keep named-folder
-# layouts instead of re-pooling into content/m_*.
-static func rel_under_journey(src: String, journey_abs: String) -> String:
-	if src == "" or journey_abs == "":
-		return ""
-	var root: String = ProjectSettings.globalize_path(journey_abs).replace("\\", "/").rstrip("/")
-	var abs: String = ProjectSettings.globalize_path(src).replace("\\", "/")
-	if not FileAccess.file_exists(abs):
-		var joined: String = root + "/" + src.replace("\\", "/").lstrip("/")
-		if FileAccess.file_exists(joined):
-			abs = joined
-		else:
-			return ""
-	var root_l: String = root.to_lower()
-	var abs_l: String = abs.to_lower()
-	if abs_l == root_l:
-		return ""
-	if not abs_l.begins_with(root_l + "/"):
-		return ""
-	return abs.substr(root.length() + 1)
+# Per-round playback assets (video / funscript / axis / vib / boss image) are
+# stored once under content/m_<fingerprint>.<ext> and referenced by explicit
+# paths, so an asset reused across rounds (e.g. a clip used by a Normal round and
+# a Cursed round in a fork) lives on disk and in the shared zip exactly once.
+# (The media/ folder is separate — it holds journey images.)
 
 
 # Source identity for pool dedup: globalized path + byte size + mtime, hashed to
@@ -1405,10 +1871,18 @@ static func rel_under_journey(src: String, journey_abs: String) -> String:
 # multi-GB videos every save. Two rounds reusing the same source file produce the
 # same fingerprint (so they pool to one file); editing the source (new size or
 # mtime) yields a new fingerprint, so a re-save picks up the changed bytes.
-# A pending trim joins the identity (two rounds trimming one source identically
-# still pool to one file; different trims get distinct files). Untrimmed keeps
-# the exact legacy identity string, so existing pooled rels stay stable.
-static func media_fingerprint(src: String, trim_start_ms: int = 0, trim_end_ms: int = 0) -> String:
+# The round's SEGMENTS (see segments_identity) join the identity, because they change the
+# baked output bytes: two rounds cutting one source identically still pool to one file, while
+# different cuts get distinct files. The full-clip and single-window forms reproduce the legacy
+# identity strings EXACTLY, so every pooled rel that exists today stays stable across the
+# upgrade — without that, the first 0.6.2 save of any trimmed journey would re-bake every clip.
+#
+# `variant` does the same job for any other transform that changes the OUTPUT bytes while the
+# source is unchanged — currently the animated-image bake, whose size cap differs per surface. One
+# GIF used as a boss image (760x480) and a storyboard background (1920x1080) must NOT pool to one
+# file; with the same cap on two rounds, it still does. Empty variant = the legacy identity, so
+# every existing pooled rel stays stable.
+static func media_fingerprint(src: String, segments: Array = [], variant: String = "") -> String:
 	var abs: String = ProjectSettings.globalize_path(src)
 	var size: int = 0
 	var f: FileAccess = FileAccess.open(abs, FileAccess.READ)
@@ -1417,8 +1891,11 @@ static func media_fingerprint(src: String, trim_start_ms: int = 0, trim_end_ms: 
 		f.close()
 	var mtime: int = FileAccess.get_modified_time(abs)
 	var identity: String = "%s|%d|%d" % [abs, size, mtime]
-	if trim_start_ms > 0 or trim_end_ms > 0:
-		identity += "|trim:%d-%d" % [trim_start_ms, trim_end_ms]
+	var seg_id: String = segments_identity(segments)
+	if seg_id != "":
+		identity += "|" + seg_id
+	if variant != "":
+		identity += "|" + variant
 	return identity.sha256_text().substr(0, 16)
 
 
@@ -1426,8 +1903,70 @@ static func media_fingerprint(src: String, trim_start_ms: int = 0, trim_end_ms: 
 # playback content (video / funscript / axis / vib / boss image) lives under
 # content/, kept separate from media/ which holds journey IMAGES (cover,
 # storyboard art, fork-path art).
-static func pooled_media_rel(fingerprint: String, ext: String) -> String:
-	return "content/m_%s.%s" % [fingerprint, ext]
+static func pooled_media_rel(fingerprint: String, ext: String, source: String = "") -> String:
+	# A readable source-name prefix keeps content/ browsable ("clip__<fp>.mp4") while the fingerprint
+	# still drives dedup + collision-safety. Same fingerprint ⇒ same source ⇒ same prefix, so dedup is
+	# unaffected. Source-less callers fall back to the legacy "m_<fp>" spelling.
+	if source == "":
+		return "content/m_%s.%s" % [fingerprint, ext]
+	return "content/%s__%s.%s" % [_pooled_prefix(source), fingerprint, ext]
+
+
+# A filesystem-safe, length-bounded stem derived from a source filename, for the readable pool prefix.
+# Drops all extensions, recovers the stem of an ALREADY-pooled file (so re-saving doesn't grow the name
+# `clip__fp__fp2…`), sanitizes to [A-Za-z0-9_-] with single-underscore runs, and caps the length.
+static func _pooled_prefix(source: String) -> String:
+	var base: String = source.get_file()
+	var dot: int = base.find(".")
+	if dot > 0:
+		base = base.substr(0, dot)
+	base = _strip_pool_suffix(base)
+	base = RegEx.create_from_string("[^A-Za-z0-9_-]+").sub(base, "_", true)
+	base = RegEx.create_from_string("_+").sub(base, "_", true)  # keep "__" as the separator, not in the stem
+	base = base.lstrip("_").rstrip("_")
+	if base.length() > 40:
+		base = base.substr(0, 40).rstrip("_")
+	return base if base != "" else "media"
+
+
+# True iff `path` names a file this journey pooled into content/ (either the readable `<name>__<fp>`
+# or legacy `m_<fp>` spelling). Drives hardlink reuse on re-save. Splits on "/" rather than using
+# get_base_dir(), which returns "" for a single-component relative path like "content/x.mp4".
+static func is_pooled_content_path(path: String) -> bool:
+	var parts: PackedStringArray = path.split("/")
+	if parts.size() < 2 or parts[parts.size() - 2] != "content":
+		return false
+	var stem: String = parts[parts.size() - 1]
+	var dot: int = stem.find(".")
+	if dot > 0:
+		stem = stem.substr(0, dot)  # part before the first extension (handles "…​.pitch.funscript")
+	if stem.begins_with("m_") and is_hex16(stem.substr(2)):
+		return true
+	var us: int = stem.rfind("__")
+	return us >= 0 and is_hex16(stem.substr(us + 2))
+
+
+# True iff `s` is exactly a 16-char lowercase/uppercase hex string — the shape of a pooled fingerprint.
+# (Not String.is_valid_hex_number: that range-parses as an int, so it rejects 16-hex values > int64.)
+static func is_hex16(s: String) -> bool:
+	if s.length() != 16:
+		return false
+	for i: int in 16:
+		var c: int = s.unicode_at(i)
+		if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102) or (c >= 65 and c <= 70)):
+			return false
+	return true
+
+
+# Recovers the readable stem of a pooled filename: strips a trailing "__<16 hex>" (new form) and treats
+# the legacy "m_<16 hex>" as nameless (its original filename wasn't preserved).
+static func _strip_pool_suffix(base: String) -> String:
+	if base.begins_with("m_") and is_hex16(base.substr(2)):
+		return ""
+	var us: int = base.rfind("__")
+	if us >= 0 and is_hex16(base.substr(us + 2)):
+		return base.substr(0, us)
+	return base
 
 
 # Pure dedup planner (the testable core of the save-time pooling). `sources` is
@@ -1439,7 +1978,9 @@ static func plan_media_pool(sources: Array) -> Array:
 	var out: Array = []
 	var seen: Dictionary = {}
 	for s: Dictionary in sources:
-		var rel: String = pooled_media_rel(s.get("fingerprint", ""), s.get("ext", ""))
+		var rel: String = pooled_media_rel(
+			s.get("fingerprint", ""), s.get("ext", ""), str(s.get("src", ""))
+		)
 		var is_copy: bool = not seen.has(rel)
 		seen[rel] = true
 		out.append({"rel": rel, "copy": is_copy})
@@ -1609,22 +2150,181 @@ static func _pos_at(a: Vector2, b: Vector2, t: float) -> float:
 	return roundf(lerpf(a.y, b.y, (t - a.x) / (b.x - a.x)))
 
 
-# Trims a parsed funscript JSON dict: actions replaced by the trimmed/rebased
-# set (as {at, pos} ints), every other metadata key preserved. Used by the
-# save bake for the main funscript and each axis/vib sibling.
-static func trim_funscript_json(fs: Dictionary, in_ms: int, out_ms: int) -> Dictionary:
+# ── Section looping (legacy — migration only) ──────────────────────────────
+# Section looping used to be its own pair of windows (trim + an inner loop window ×N). It is
+# now expressed as repeated SEGMENTS, so nothing below is part of the live save path: these
+# two survive purely so normalize_segments can recognise a round authored before segments
+# existed and expand it into the equivalent segment list. Don't build on them.
+
+# (The old LOOP_MAX_COUNT ceiling is gone with the spinbox that enforced it — segments have no
+# repeat cap. A long bake is the author's call and their time; it's async and cancellable.)
+
+
+# True when the legacy loop params describe a real repeat (≥2 passes over a non-empty window
+# that sits within the trim). Anything else was never a loop, so it migrates as a plain trim.
+static func has_section_loop(
+	trim_in: int, trim_out: int, loop_in: int, loop_out: int, count: int
+) -> bool:
+	if count < 2 or loop_out <= loop_in:
+		return false
+	var t_out: int = trim_out if trim_out > 0 else (1 << 62)
+	return loop_in >= trim_in and loop_out <= t_out
+
+
+# Appends `seg` (points rebased to 0) shifted by `offset` ms. Collapses a seam duplicate — the
+# boundary anchor trim_action_points leaves at the end of one segment and the start of the next
+# share a timestamp — keeping the later position so the joins stay clean.
+static func _append_shifted_points(out: Array, seg: Array, offset: int) -> void:
+	for p: Vector2 in seg:
+		var at: int = int(p.x) + offset
+		if not out.is_empty() and int((out[-1] as Vector2).x) == at:
+			out[-1] = Vector2(at, p.y)
+			continue
+		out.append(Vector2(at, p.y))
+
+
+# ── Segments (the EDL) ──────────────────────────────────────────────────────
+# A round's video is an ordered list of SOURCE windows: [{in_ms, out_ms}, …], played back to
+# back and concatenated at save. The runtime still sees one plain clip.
+#
+# One list subsumes trim AND section looping: a trim is one segment, a loop is the same window
+# listed N times, a cut is what survives, a rearrangement is list order. No `repeat` field — a
+# repeat IS a duplicated row, which is what makes duplicate, reorder and loop one operation.
+#
+# Windows may overlap and may run out of order. `out_ms <= 0` means "to the end": a pure
+# function can't probe the file, so that's the only open-ended form. Empty list = full clip.
+
+
+# Canonical segment list for a round's editor `data`, migrating the legacy trim/section-loop
+# fields when `segments` isn't present. One-way and idempotent, so load → save → load is
+# stable. The legacy shapes map exactly onto their replacements, so a migrated round bakes to
+# the same bytes it did before.
+static func normalize_segments(data: Dictionary) -> Array:
+	if data.has("segments"):
+		return coerce_segments(data.get("segments", []))
+
+	var trim_in: int = int(data.get("trim_start_ms", 0))
+	var trim_out: int = int(data.get("trim_end_ms", 0))
+	var loop_in: int = int(data.get("loop_in_ms", 0))
+	var loop_out: int = int(data.get("loop_out_ms", 0))
+	var count: int = int(data.get("loop_count", 0))
+
+	if has_section_loop(trim_in, trim_out, loop_in, loop_out, count):
+		var segs: Array = []
+		if loop_in > trim_in:
+			segs.append({"in_ms": trim_in, "out_ms": loop_in})
+		for _k: int in count:
+			segs.append({"in_ms": loop_in, "out_ms": loop_out})
+		# trim_out == 0 legitimately means "to the end", so the finale is only empty when a
+		# real trim_out sits at the loop's out point.
+		if trim_out <= 0 or trim_out > loop_out:
+			segs.append({"in_ms": loop_out, "out_ms": trim_out})
+		return segs
+
+	if trim_in > 0 or trim_out > 0:
+		return [{"in_ms": trim_in, "out_ms": trim_out}]
+	return []
+
+
+# Coerces a raw segments array (JSON loads every number as float — the "coins lesson") and
+# drops entries that can't describe a window: negative starts, or a closed window that ends
+# at or before it begins. An open end (out_ms <= 0) is always kept.
+static func coerce_segments(raw: Variant) -> Array:
+	var out: Array = []
+	if not (raw is Array):
+		return out
+	for s: Variant in raw:
+		if not (s is Dictionary):
+			continue
+		var a: int = maxi(0, int((s as Dictionary).get("in_ms", 0)))
+		var b: int = int((s as Dictionary).get("out_ms", 0))
+		if b > 0 and b <= a:
+			continue
+		out.append({"in_ms": a, "out_ms": maxi(0, b)})
+	return out
+
+
+# Total baked length of a segment list, in ms. `source_len_ms` resolves open-ended segments
+# (out_ms <= 0); pass the probed source duration. An empty list is the whole source.
+static func segments_total_ms(segments: Array, source_len_ms: int) -> int:
+	if segments.is_empty():
+		return maxi(0, source_len_ms)
+	var total: int = 0
+	for seg: Dictionary in segments:
+		var end_ms: int = int(seg.get("out_ms", 0))
+		if end_ms <= 0:
+			end_ms = source_len_ms
+		total += maxi(0, end_ms - int(seg.get("in_ms", 0)))
+	return total
+
+
+# Bakes the action list for a segment list: each window cut and rebased by trim_action_points
+# (keeping its interpolated boundary anchors), then laid end to end. Returns points rebased to
+# 0; an empty list returns `points` untouched.
+#
+# `source_len_ms` resolves open ends, falling back to the last action's timestamp — right for a
+# funscript running to the end of its clip, harmless otherwise (a trailing gap has no actions).
+static func build_edl_action_points(
+	points: Array, segments: Array, source_len_ms: int = 0
+) -> Array:
+	if segments.is_empty():
+		return points
+	var src_end: int = source_len_ms
+	if src_end <= 0 and not points.is_empty():
+		src_end = int((points[-1] as Vector2).x)
+
+	var out: Array = []
+	var at: int = 0  # running offset into the baked timeline
+	for seg: Dictionary in segments:
+		var start_ms: int = int(seg.get("in_ms", 0))
+		var out_ms: int = int(seg.get("out_ms", 0))
+		_append_shifted_points(out, trim_action_points(points, start_ms, out_ms), at)
+		at += maxi(0, (out_ms if out_ms > 0 else src_end) - start_ms)
+	return out
+
+
+# Replaces a parsed funscript's `actions` with the baked EDL set (as {at, pos} ints),
+# preserving every other metadata key. The one funscript rewriter for the save bake — main
+# funscript and axis/vib siblings alike. An empty segment list returns it unchanged.
+static func edl_funscript_json(
+	fs: Dictionary, segments: Array, source_len_ms: int = 0
+) -> Dictionary:
+	if segments.is_empty():
+		return fs.duplicate(true)
 	var points: Array = []
 	for a in fs.get("actions", []):
 		if a is Dictionary:
 			points.append(Vector2(float(a.get("at", 0)), float(a.get("pos", 0))))
 	points.sort_custom(func(p: Vector2, q: Vector2) -> bool: return p.x < q.x)
-	var trimmed: Array = trim_action_points(points, in_ms, out_ms)
+	var built: Array = build_edl_action_points(points, segments, source_len_ms)
 	var out: Dictionary = fs.duplicate(true)
 	var actions: Array = []
-	for p: Vector2 in trimmed:
+	for p: Vector2 in built:
 		actions.append({"at": int(p.x), "pos": int(p.y)})
 	out["actions"] = actions
 	return out
+
+
+# Fingerprint identity suffix for a segment list (see media_fingerprint).
+#
+# The pooled filename derives from this, so changing the SPELLING re-bakes every affected clip.
+# Two forms are byte-identical to what shipped before segments existed, on purpose: an empty
+# list → "", one segment → "trim:a-b". Anything a trim couldn't express gets "edl:".
+static func segments_identity(segments: Array) -> String:
+	if segments.is_empty():
+		return ""
+	if segments.size() == 1:
+		var only: Dictionary = segments[0]
+		var a: int = int(only.get("in_ms", 0))
+		var b: int = int(only.get("out_ms", 0))
+		# One window spanning the whole source IS the full clip — same bytes, same identity.
+		if a <= 0 and b <= 0:
+			return ""
+		return "trim:%d-%d" % [a, b]
+	var parts: PackedStringArray = []
+	for s: Dictionary in segments:
+		parts.append("%d-%d" % [int(s.get("in_ms", 0)), int(s.get("out_ms", 0))])
+	return "edl:" + ",".join(parts)
 
 
 static func read_funscript_stats(path: String) -> Dictionary:

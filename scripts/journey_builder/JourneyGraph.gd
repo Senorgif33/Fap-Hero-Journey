@@ -8,9 +8,9 @@ extends RefCounted
 #   { "start": <id>, "nodes": { <id>: Node, ... } }
 #
 #   Node = {
-#     "type": "round" | "shop" | "storyboard" | "fork" | "cooldown" | "cutscene",
-#     "data": Dictionary,   # item payload — the round/shop/storyboard/cooldown/cutscene
-#                           #   fields, or for a fork: title/description/resolution/…
+#     "type": "round" | "shop" | "storyboard" | "fork",
+#     "data": Dictionary,   # item payload — the round/shop/storyboard fields, or for
+#                           #   a fork: title/description/resolution/cond_metric/default_path
 #     "out":  Array,        # outgoing edges; 0 = an end, 1 = linear, N = fork choices
 #   }
 #   Edge = { "to": <id>, ...fork-choice config: name/description/image_path/
@@ -49,7 +49,9 @@ static func build_graph(journey: Dictionary) -> Dictionary:
 		counter,
 		0
 	)
-	return {"start": start, "nodes": nodes}
+	var graph: Dictionary = {"start": start, "nodes": nodes}
+	_migrate_checkpoint_flags(graph)
+	return graph
 
 
 # Builds a chain of nodes for one sequence level (the top-level journey or one fork
@@ -146,6 +148,7 @@ static func _build_fork(
 			"resolution": str(fork.get("resolution", "choice")),
 			"cond_metric": str(fork.get("cond_metric", "score")),
 			"default_path": int(fork.get("default_path", 0)),
+			"timeout_path": int(fork.get("timeout_path", -1)),
 			# Kept so the runtime journey-map marker can key a fork node by after_order
 			# (the map still renders the legacy nested model in Phase 2; the graph map in
 			# Phase 3 re-keys by node id and this can go).
@@ -211,71 +214,23 @@ static func is_end(graph: Dictionary, id: String) -> bool:
 	return id == "" or out_edges(graph, id).is_empty()
 
 
-# The set (Dictionary-as-set) of node ids reachable from `from_id` (or journey start) following
-# out-edges only. Used by Builder connect to reject true DAG cycles. Does not follow
-# release_jump_to — those are intentional play-time loops back into EP islands.
-static func out_reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary:
-	var seen: Dictionary = {}
-	var stack: Array = [from_id if from_id != "" else str(graph.get("start", ""))]
-	while not stack.is_empty():
-		var id: String = str(stack.pop_back())
-		if id == "" or seen.has(id):
-			continue
-		seen[id] = true
-		for e: Dictionary in out_edges(graph, id):
-			stack.append(str(e.get("to", "")))
-	return seen
-
-
-# True when wiring (or keeping) out-edge source→target would close a *disallowed* cycle.
-# Hub-style loops are allowed when a fork sits on the cycle (either endpoint is a fork, or
-# some path target→…→source visits a fork — e.g. freeplay 006→006_5→hub→006). Pure
-# round↔round (and other non-fork) cycles stay blocked. release_jump_to is irrelevant —
-# only out-edges. Self-links: disallowed for non-forks (Builder also rejects source==target).
-static func would_create_disallowed_cycle(
-	graph: Dictionary, source: String, target: String
-) -> bool:
-	var nodes: Dictionary = graph.get("nodes", {})
-	if source == "" or target == "" or not nodes.has(source) or not nodes.has(target):
-		return false
-	# No out-cycle unless target can already reach source (always true for source==target).
-	if source != target and not out_reachable_ids(graph, target).has(source):
-		return false
-	if is_fork(graph, source) or is_fork(graph, target):
-		return false
-	# Round→round (etc.) inside a hub loop: allow if a return path visits a fork.
-	if _path_visits_fork(graph, target, source):
-		return false
-	return true
-
-
-# True if some simple out-path from `from_id` to `to_id` visits at least one fork node.
-static func _path_visits_fork(graph: Dictionary, from_id: String, to_id: String) -> bool:
-	return _path_visits_fork_dfs(graph, from_id, to_id, {}, false)
-
-
-static func _path_visits_fork_dfs(
-	graph: Dictionary, id: String, to_id: String, seen: Dictionary, saw_fork: bool
-) -> bool:
-	var saw: bool = saw_fork or is_fork(graph, id)
-	if id == to_id:
-		return saw
-	seen[id] = true
-	for e: Dictionary in out_edges(graph, id):
-		var nxt: String = str(e.get("to", ""))
-		if nxt == "" or not (graph.get("nodes", {}) as Dictionary).has(nxt) or seen.has(nxt):
-			continue
-		if _path_visits_fork_dfs(graph, nxt, to_id, seen, saw):
-			seen.erase(id)
-			return true
-	seen.erase(id)
-	return false
+# node_id -> its 1-based ordinal WITHIN ITS TYPE, in the nodes dict's insertion order. So the "N" in a
+# save error's "Storyboard N" / "Round N" / "Fork N" is the same "N" shown on that node in the graph.
+# Takes the raw nodes dict (not a graph) so both the builder validator and GraphView can call it.
+static func type_ordinals(nodes: Dictionary) -> Dictionary:
+	var counts: Dictionary = {}
+	var out: Dictionary = {}
+	for id: String in nodes:
+		var t: String = str((nodes[id] as Dictionary).get("type", ""))
+		counts[t] = int(counts.get(t, 0)) + 1
+		out[id] = int(counts[t])
+	return out
 
 
 # The set (Dictionary-as-set) of node ids reachable from the journey start, following out-edges
-# and release_jump_to targets on rounds (fail/EP side-paths are not wired as out-edges — counting
-# them here keeps EP islands from looking like orphans). DAG → terminates; `seen` also backstops a
-# malformed cycle. Feeds the builder's live "unreachable" warning.
+# (post-redirect, when apply_redirects has run). Any node NOT in this set is orphaned — a redirect
+# skipped past it and nothing else leads there. DAG → terminates; `seen` also backstops a malformed
+# cycle. Feeds the builder's live "unreachable" warning.
 static func reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary:
 	var seen: Dictionary = {}
 	var stack: Array = [from_id if from_id != "" else str(graph.get("start", ""))]
@@ -286,11 +241,6 @@ static func reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary
 		seen[id] = true
 		for e: Dictionary in out_edges(graph, id):
 			stack.append(str(e.get("to", "")))
-		# Release / EP jumps are runtime edges, not graph outs — still reachable in play.
-		var data: Dictionary = (node(graph, id) as Dictionary).get("data", {})
-		var jump: String = str(data.get("release_jump_to", "")).strip_edges()
-		if jump != "":
-			stack.append(jump)
 	return seen
 
 
@@ -312,18 +262,50 @@ static func apply_redirects(graph: Dictionary, redirects: Dictionary) -> void:
 		n["out"] = [] if to_id == "" else [{"to": to_id}]
 
 
+# Rewrites `graph` in place to drop every Loop marker (loop_start / loop_end), splicing each one's single
+# out-edge through so the surviving flow stays continuous — the player map hides loops unless the journey
+# opts in. Every edge pointing at a marker is re-pointed to the first non-marker it reaches (an empty
+# target becomes an ending). The End's loop_to back-jump is data, not an edge, so it vanishes with the node.
+static func strip_loop_markers(graph: Dictionary) -> void:
+	var nodes: Dictionary = graph.get("nodes", {})
+	var redirect: Dictionary = {}  # marker id -> its single out target ("" = ends)
+	for id: String in nodes:
+		var t: String = str((nodes[id] as Dictionary).get("type", ""))
+		if t == "loop_start" or t == "loop_end":
+			var out: Array = (nodes[id] as Dictionary).get("out", [])
+			redirect[id] = str((out[0] as Dictionary).get("to", "")) if not out.is_empty() else ""
+	if redirect.is_empty():
+		return
+	for id: String in redirect:
+		nodes.erase(id)
+	for id: String in nodes:
+		for e: Dictionary in (nodes[id] as Dictionary).get("out", []):
+			e["to"] = _skip_markers(str(e.get("to", "")), redirect)
+	graph["start"] = _skip_markers(str(graph.get("start", "")), redirect)
+
+
+# Follows a chain of removed markers to the first surviving node id (or "" when it runs off the end).
+# The guard is defensive — out-edges form a DAG, so a marker chain can't actually cycle.
+static func _skip_markers(to: String, redirect: Dictionary) -> String:
+	var guard: int = 0
+	while redirect.has(to) and guard < 10000:
+		to = str(redirect[to])
+		guard += 1
+	return to
+
+
 # ── Validation (free-form authoring) ─────────────────────────────────────────
 
 
 # Checks a graph for the invariants the runtime assumes: a real start, every edge resolving to a
-# node, no *disallowed* out-edge cycles (hub loops via forks are allowed; round↔round softlocks
-# are not), and which nodes are reachable. Returns a list of issues [{kind, id, to?}] — pure
-# (no UI strings), so it's unit-tested and the builder formats its own user-facing messages. Kinds:
+# node, acyclicity (the runtime walks the DAG and would loop forever on a back-edge), and which
+# nodes are reachable. Returns a list of issues [{kind, id, to?}] — pure (no UI strings), so it's
+# unit-tested and the builder formats its own user-facing messages. Kinds:
 #   "no_start"    — start is empty or not a node (graph non-empty)
 #   "dangling"    — node `id` has an out-edge whose target `to` is not a node
-#   "cycle"       — node `id` is involved in a disallowed (non-fork-hub) out-edge cycle
+#   "cycle"       — node `id` is closed onto by a back-edge (it participates in a loop)
 #   "unreachable" — node `id` can't be reached from start (it would never play)
-static func validate_graph(graph: Dictionary) -> Array:
+static func validate_graph(graph: Dictionary, finish_id: String = "") -> Array:
 	var issues: Array = []
 	var nodes: Dictionary = graph.get("nodes", {})
 	if nodes.is_empty():
@@ -338,31 +320,45 @@ static func validate_graph(graph: Dictionary) -> Array:
 			var to: String = str(e.get("to", ""))
 			if to != "" and not nodes.has(to):
 				issues.append({"kind": "dangling", "id": id, "to": to})
-	# Disallowed cycles only (fork-hub loops are intentional freeplay / menu back-edges).
-	for id: String in _disallowed_cycle_nodes(graph):
+	# Cycles (DFS three-colouring; report each node a back-edge closes onto).
+	for id: String in _find_cycle_nodes(graph):
 		issues.append({"kind": "cycle", "id": id})
 	# Unreachable nodes (only meaningful with a valid start).
 	if start_ok:
 		var reach: Dictionary = reachable_ids(graph, start)
+		# The designated finish/aftercare node lives off the main graph — reachable only via the FINISH
+		# button — so treat it (and anything it leads to) as reachable rather than flagging an island.
+		if finish_id != "" and nodes.has(finish_id):
+			for id: String in reachable_ids(graph, finish_id):
+				reach[id] = true
 		for id: String in nodes:
 			if not reach.has(id):
 				issues.append({"kind": "unreachable", "id": id})
 	return issues
 
 
-# Nodes that participate in a disallowed out-edge cycle (see would_create_disallowed_cycle).
-static func _disallowed_cycle_nodes(graph: Dictionary) -> Dictionary:
+# The set of node ids that a back-edge closes onto — i.e. nodes that participate in a cycle.
+# Standard DFS three-colouring (gray = on the current DFS stack). Empty for a DAG.
+static func _find_cycle_nodes(graph: Dictionary) -> Dictionary:
+	var color: Dictionary = {}  # id -> 1 gray (on stack) · 2 black (finished)
 	var found: Dictionary = {}
-	var nodes: Dictionary = graph.get("nodes", {})
-	for id: String in nodes:
-		for e: Dictionary in out_edges(graph, id):
-			var to: String = str(e.get("to", ""))
-			if to == "" or not nodes.has(to):
-				continue
-			if would_create_disallowed_cycle(graph, id, to):
-				found[id] = true
-				found[to] = true
+	for id: String in graph.get("nodes", {}):
+		if not color.has(id):
+			_cycle_dfs(graph, id, color, found)
 	return found
+
+
+static func _cycle_dfs(graph: Dictionary, id: String, color: Dictionary, found: Dictionary) -> void:
+	color[id] = 1
+	for e: Dictionary in out_edges(graph, id):
+		var to: String = str(e.get("to", ""))
+		if to == "" or not (graph.get("nodes", {}) as Dictionary).has(to):
+			continue
+		if color.get(to, 0) == 1:
+			found[to] = true  # back-edge onto a node still on the stack → cycle
+		elif not color.has(to):
+			_cycle_dfs(graph, to, color, found)
+	color[id] = 2
 
 
 # Longest count of `round` nodes along any path from `from_id` to an end (inclusive of
@@ -386,6 +382,34 @@ static func _longest_round_path(
 	var best_rest: int = 0
 	for e: Dictionary in out_edges(graph, from_id):
 		best_rest = maxi(best_rest, _longest_round_path(graph, str(e.get("to", "")), memo, seen))
+	seen.erase(from_id)
+	var total: int = here + best_rest
+	memo[from_id] = total
+	return total
+
+
+# Max number of nodes from the `targets` set ({id: true}) on any single path from `from_id` to a leaf.
+# Same memoised DFS as longest_round_path (a fork counts only its worst branch, since one run takes
+# one branch). Used to flag a no-repeat pool used more times on a run-path than it has clips. `seen`
+# guards a malformed cyclic input.
+static func max_nodes_on_path(graph: Dictionary, from_id: String, targets: Dictionary) -> int:
+	return _max_nodes_on_path(graph, from_id, targets, {}, {})
+
+
+static func _max_nodes_on_path(
+	graph: Dictionary, from_id: String, targets: Dictionary, memo: Dictionary, seen: Dictionary
+) -> int:
+	if from_id == "" or seen.has(from_id):
+		return 0
+	if memo.has(from_id):
+		return memo[from_id]
+	seen[from_id] = true
+	var here: int = 1 if targets.has(from_id) else 0
+	var best_rest: int = 0
+	for e: Dictionary in out_edges(graph, from_id):
+		best_rest = maxi(
+			best_rest, _max_nodes_on_path(graph, str(e.get("to", "")), targets, memo, seen)
+		)
 	seen.erase(from_id)
 	var total: int = here + best_rest
 	memo[from_id] = total
@@ -443,7 +467,55 @@ static func from_json(data: Dictionary) -> Dictionary:
 			if p.size() >= 2:
 				node["pos"] = Vector2(float(p[0]), float(p[1]))
 		nodes[str(raw.get("id", ""))] = node
-	return {"start": str(data.get("Start", "")), "nodes": nodes}
+	var graph: Dictionary = {"start": str(data.get("Start", "")), "nodes": nodes}
+	_migrate_checkpoint_flags(graph)
+	return graph
+
+
+# Converts the RETIRED per-round `is_checkpoint` flag into standalone checkpoint nodes. Runs on
+# every load (from_json + build_graph), so it covers both the builder and the runtime with one
+# implementation, and it's idempotent — a journey with no flagged rounds is untouched.
+#
+# For each flagged round R: mint a checkpoint node C, reroute every edge that pointed AT R so it
+# points at C instead, then wire C → R. The player now hits the save banner (C) immediately
+# before the round (R), preserving the old "save at the start of this round" semantics. If R was
+# the start node, C becomes the new start. Handles fork rejoins and multiple inbound edges
+# uniformly, because it rewires by target id.
+static func _migrate_checkpoint_flags(graph: Dictionary) -> void:
+	var nodes: Dictionary = graph.get("nodes", {})
+	# Snapshot the flagged round ids first — the loop below grows `nodes`.
+	var flagged: Array = []
+	for id: String in nodes:
+		var n: Dictionary = nodes[id]
+		var data: Dictionary = n.get("data", {})
+		if str(n.get("type", "")) == "round" and bool(data.get("is_checkpoint", false)):
+			flagged.append(id)
+
+	for round_id: String in flagged:
+		var round_node: Dictionary = nodes[round_id]
+		# DETERMINISTIC id (derived from the round it guards), NOT a random one: this migration re-runs on
+		# every load of a not-yet-re-saved legacy journey, so a random id would differ each time — and a
+		# Save & Quit made at the checkpoint would never match on resume (current_node not in _nodes →
+		# LoadFromSave resets to the journey start, losing the player's place). "cp_" + round_id is stable
+		# and can't collide with author ids (which are "n_<hex>").
+		var cp_id: String = "cp_" + round_id
+		# Reroute inbound edges (from any node) BEFORE adding C → R, so the new edge isn't caught.
+		for other_id: String in nodes:
+			for e: Dictionary in (nodes[other_id] as Dictionary).get("out", []):
+				if str(e.get("to", "")) == round_id:
+					e["to"] = cp_id
+		var cp_node: Dictionary = {
+			"type": "checkpoint",
+			"data": {"name": ""},
+			"out": [{"to": round_id}],
+		}
+		# Place C up-and-left of R so it reads as the step before it; the author can re-arrange.
+		if round_node.has("pos"):
+			cp_node["pos"] = (round_node["pos"] as Vector2) + Vector2(-40.0, -150.0)
+		nodes[cp_id] = cp_node
+		if str(graph.get("start", "")) == round_id:
+			graph["start"] = cp_id
+		(round_node.get("data", {}) as Dictionary).erase("is_checkpoint")
 
 
 # True when a parsed journey.json is already the graph format (vs. the legacy tree).
@@ -460,21 +532,21 @@ static func resolve_paths(graph: Dictionary, base: String) -> void:
 		match n.get("type", ""):
 			"round":
 				_resolve_round_paths(n.get("data", {}), base)
-			"cutscene":
-				var cd: Dictionary = n.get("data", {})
-				cd["video_path"] = _abs(str(cd.get("video_path", "")), base)
 			"storyboard":
 				_resolve_storyboard_paths(n.get("data", {}), base)
 			"fork":
 				for e: Dictionary in n.get("out", []):
 					e["image_path"] = _abs(str(e.get("image_path", "")), base)
+				var fd: Dictionary = n.get("data", {})
+				if fd.has("audio"):
+					fd["audio"] = _abs(str(fd.get("audio", "")), base)
 
 
 static func _resolve_round_paths(d: Dictionary, base: String) -> void:
 	d["funscript_path"] = _abs(str(d.get("funscript_path", "")), base)
 	d["video_path"] = _abs(str(d.get("video_path", "")), base)
 	d["boss_image"] = _abs(str(d.get("boss_image", "")), base)
-	_resolve_restim_axis_scripts(d, base)
+	_resolve_channels(d.get("axis_scripts", {}), base)
 	_resolve_channels(d.get("vib_scripts", {}), base)
 	# Pool round: each encounter entry carries its own media set — resolve them too (incl. a
 	# boss entry's intro image).
@@ -482,24 +554,8 @@ static func _resolve_round_paths(d: Dictionary, base: String) -> void:
 		entry["funscript_path"] = _abs(str(entry.get("funscript_path", "")), base)
 		entry["video_path"] = _abs(str(entry.get("video_path", "")), base)
 		entry["boss_image"] = _abs(str(entry.get("boss_image", "")), base)
-		_resolve_restim_axis_scripts(entry, base)
+		_resolve_channels(entry.get("axis_scripts", {}), base)
 		_resolve_channels(entry.get("vib_scripts", {}), base)
-
-
-static func _resolve_restim_axis_scripts(d: Dictionary, base: String) -> void:
-	# Resolve flat axis_scripts first so coerce can merge absolute paths into shared.
-	_resolve_channels(d.get("axis_scripts", {}), base)
-	var raw_ras: Variant = d.get("restim_axis_scripts", {})
-	if raw_ras is Dictionary:
-		for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-			var slot_map: Variant = (raw_ras as Dictionary).get(slot, {})
-			if slot_map is Dictionary:
-				_resolve_channels(slot_map as Dictionary, base)
-	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(d)
-	d["restim_axis_scripts"] = ras
-	# Keep flat axis_scripts aligned with shared when it was empty / legacy-only.
-	if (d.get("axis_scripts", {}) as Dictionary).is_empty():
-		d["axis_scripts"] = (ras["shared"] as Dictionary).duplicate(true)
 
 
 # Resolves every value of a {channel: rel} media map to absolute, in place.
@@ -510,8 +566,12 @@ static func _resolve_channels(channels: Dictionary, base: String) -> void:
 
 static func _resolve_storyboard_paths(d: Dictionary, base: String) -> void:
 	d["image"] = _abs(str(d.get("image", "")), base)
+	if d.has("bgm"):
+		d["bgm"] = _abs(str(d.get("bgm", "")), base)
 	for line: Dictionary in d.get("lines", []):
 		line["image"] = _abs(str(line.get("image", "")), base)
+		if line.has("audio"):
+			line["audio"] = _abs(str(line.get("audio", "")), base)
 
 
 # Prepends the journey base to a non-empty relative path; "" stays "".

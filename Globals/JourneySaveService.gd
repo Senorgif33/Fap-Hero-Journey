@@ -26,11 +26,9 @@ extends Node
 #     "coins":            int        — CoinService balance
 #     "score":            int        — ScoreService cumulative score
 #     "total_actions":    int        — for end-screen stat
-#     "inventory":        Array      — owned utility charges (active effects NOT saved)
-#     "unlocked":         Array      — unlocked modifier ids (pay-per-use; optional on old saves)
+#     "inventory":        Array      — owned items (active effects NOT saved)
 #     "round_names":      Array      — round-name log for the end screen
 #     "route_trail":      Array      — visited node ids for the end-screen recap
-#     "cooldown_until":   int        — unix seconds; Resume blocked until this time (0 = none)
 #   }
 #
 # C# callers reach this via the autoload node:
@@ -38,13 +36,19 @@ extends Node
 # ---------------------------------------------------------------------------
 
 const SAVES_DIR: String = "user://journey_saves"
+# Part-1 → Part-2 carryover (feature #5): a completed BASE run's end-state, kept so an installed rendition
+# (sequel) can resume from its attach point with the coins / score / items / flags / counters intact. Keyed
+# by the base's JourneyId (stable across reinstalls, unlike the folder name), NOT consumed on read the way a
+# resume save is — a base completion can seed several renditions and be replayed.
+const CARRYOVER_DIR: String = "user://journey_carryover"
 const SCHEMA_VERSION: int = 1
 
 
 func _ready() -> void:
-	# Lazily create the saves directory so the first SaveCurrent doesn't fail.
-	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(SAVES_DIR)):
-		DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(SAVES_DIR))
+	# Lazily create the storage directories so the first write doesn't fail.
+	for d: String in [SAVES_DIR, CARRYOVER_DIR]:
+		if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(d)):
+			DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(d))
 
 
 # Returns the absolute path where a journey's save file would live. Used both
@@ -152,80 +156,88 @@ func get_save_timestamp(journey_folder_name: String) -> String:
 	return data.get("saved_at", "") as String
 
 
-# ── Calendar cooldowns ────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Part-1 → Part-2 carryover  (feature #5)
+#
+# Same opaque-payload I/O as the resume save above, but keyed by a base journey's
+# JourneyId and stored separately. A resume save is per-run and consumed on load;
+# a carryover is a base COMPLETION snapshot that persists — one base completion can
+# seed multiple installed renditions, and replaying Part 1 overwrites it (latest run).
+# Callers add the same run-state fields plus `reached_node` (the ending the player
+# finished on, used to match the rendition's anchor).
+# ---------------------------------------------------------------------------
 
 
-# Unix-seconds unlock time stamped on the save, or 0 if none / no save.
-func get_cooldown_until(journey_folder_name: String) -> int:
-	var data: Dictionary = read_save(journey_folder_name)
-	return int(data.get("cooldown_until", 0))
+func _carryover_path_for(base_id: String) -> String:
+	return CARRYOVER_DIR + "/" + JourneyData.sanitize_folder_name(base_id) + ".json"
 
 
-# True when a save exists and its cooldown_until is still in the future.
-# Honours SettingsService.ignore_journey_cooldowns (dev override).
-func is_cooldown_active(journey_folder_name: String) -> bool:
-	if SettingsService.get_ignore_journey_cooldowns():
+# True when a non-empty Part-1 carryover exists for this base JourneyId.
+func has_carryover(base_id: String) -> bool:
+	if base_id.is_empty():
 		return false
-	var until: int = get_cooldown_until(journey_folder_name)
-	if until <= 0:
+	var path: String = _carryover_path_for(base_id)
+	if not FileAccess.file_exists(path):
 		return false
-	return Time.get_unix_time_from_system() < until
-
-
-# Seconds remaining until unlock (0 if unlocked / no cooldown).
-func get_cooldown_remaining_sec(journey_folder_name: String) -> int:
-	var until: int = get_cooldown_until(journey_folder_name)
-	if until <= 0:
-		return 0
-	return maxi(0, until - int(Time.get_unix_time_from_system()))
-
-
-# Human-readable remaining lockout, e.g. "2d 5h" / "3h 12m" / "45s".
-func format_cooldown_remaining(journey_folder_name: String) -> String:
-	var sec: int = get_cooldown_remaining_sec(journey_folder_name)
-	if sec <= 0:
-		return ""
-	var days: int = int(sec / 86400)
-	var hours: int = int((sec % 86400) / 3600)
-	var mins: int = int((sec % 3600) / 60)
-	var secs: int = sec % 60
-	if days > 0:
-		return "%dd %dh" % [days, hours]
-	if hours > 0:
-		return "%dh %dm" % [hours, mins]
-	if mins > 0:
-		return "%dm %ds" % [mins, secs]
-	return "%ds" % secs
-
-
-# Stamp cooldown_until = now + days*86400 on an existing save (or no-op if missing).
-# Used when writing a Force Save & Quit from a cooldown round.
-func stamp_cooldown_days(journey_folder_name: String, days: int) -> int:
-	if days <= 0:
-		return 0
-	return int(Time.get_unix_time_from_system()) + days * 86400
-
-
-# Reduce cooldown_until on disk by hours. Returns true if a save was updated.
-# Used from Journey Select (or mid-run) by shave_cooldown utilities.
-func shave_cooldown_hours(journey_folder_name: String, hours: int) -> bool:
-	if hours <= 0 or journey_folder_name.is_empty():
+	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
+	if f == null:
 		return false
-	var data: Dictionary = read_save(journey_folder_name)
-	if data.is_empty():
-		return false
-	var until: int = int(data.get("cooldown_until", 0))
-	if until <= 0:
-		return false
-	data["cooldown_until"] = maxi(0, until - hours * 3600)
-	# Preserve inventory etc. — write_save re-stamps version/saved_at/folder.
-	return write_save(journey_folder_name, data)
+	var length: int = f.get_length()
+	f.close()
+	return length > 0
 
 
-# Rewrite save inventory after consuming a cooldown-shave item at Journey Select.
-func write_save_inventory(journey_folder_name: String, inventory: Array) -> bool:
-	var data: Dictionary = read_save(journey_folder_name)
-	if data.is_empty():
+# Reads and parses the carryover for a base JourneyId. {} on absence / malformed / version mismatch.
+func read_carryover(base_id: String) -> Dictionary:
+	if not has_carryover(base_id):
+		return {}
+	var path: String = _carryover_path_for(base_id)
+	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		printerr("JourneySaveService: cannot open %s for read" % path)
+		return {}
+	var text: String = f.get_as_text()
+	f.close()
+	var parser: JSON = JSON.new()
+	if parser.parse(text) != OK or not (parser.data is Dictionary):
+		printerr("JourneySaveService: carryover JSON parse failed for %s" % path)
+		return {}
+	var data: Dictionary = parser.data
+	if int(data.get("version", 0)) != SCHEMA_VERSION:
+		printerr("JourneySaveService: unsupported carryover version in %s" % path)
+		return {}
+	return data
+
+
+# Writes (overwrites) the Part-1 carryover for a base JourneyId. Caller supplies the run-state payload plus
+# `reached_node`; this stamps version / saved_at / base_id. Returns true on success.
+func write_carryover(base_id: String, payload: Dictionary) -> bool:
+	if base_id.is_empty():
+		printerr("JourneySaveService: cannot write carryover with empty base id")
 		return false
-	data["inventory"] = inventory
-	return write_save(journey_folder_name, data)
+	var dir_abs: String = ProjectSettings.globalize_path(CARRYOVER_DIR)
+	if not DirAccess.dir_exists_absolute(dir_abs):
+		DirAccess.make_dir_recursive_absolute(dir_abs)
+
+	var record: Dictionary = payload.duplicate()
+	record["version"] = SCHEMA_VERSION
+	record["saved_at"] = Time.get_datetime_string_from_system()
+	record["base_id"] = base_id
+
+	var path: String = _carryover_path_for(base_id)
+	var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		printerr("JourneySaveService: cannot open %s for write" % path)
+		return false
+	f.store_string(JSON.stringify(record, "\t"))
+	f.close()
+	return true
+
+
+# Removes the carryover for a base JourneyId. Idempotent.
+func delete_carryover(base_id: String) -> void:
+	if base_id.is_empty():
+		return
+	var path: String = _carryover_path_for(base_id)
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))

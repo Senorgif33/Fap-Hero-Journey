@@ -119,13 +119,20 @@ var _max_speed_slider: HSlider = null
 var _max_speed_value_lbl: Label = null
 var _hud_delay_slider: HSlider = null
 var _hud_delay_value_lbl: Label = null
+var _sensory_slider: HSlider = null
+var _sensory_value_lbl: Label = null
 var _ui_scale_slider: HSlider = null
 var _ui_scale_value_lbl: Label = null
 var _beat_bar_toggle: Button = null
+var _beat_shape_dd: OptionButton = null
+var _round_timer_toggle: Button = null
+var _builder_bg_toggle: Button = null
+var _story_text_slider: HSlider = null
+var _story_text_value_lbl: Label = null
+var _tooltip_text_slider: HSlider = null
+var _tooltip_text_value_lbl: Label = null
 var _handy_status_lbl: Label = null
 var _update_check_toggle: Button = null
-var _ignore_cooldowns_toggle: Button = null
-var _dev_cheats_toggle: Button = null
 var _ui_sound_toggle: Button = null
 var _ui_sound_slider: HSlider = null
 var _ui_sound_value_lbl: Label = null
@@ -146,20 +153,66 @@ var _filler_section: VBoxContainer = null
 var _routing_section: VBoxContainer = null
 var _routing_cards_vbox: VBoxContainer = null
 var _handy_section: VBoxContainer = null  # The Handy (WiFi) connection block — lives on the CONNECTION tab
-var _restim_section: VBoxContainer = null  # Restim / FOC websocket — CONNECTION tab
-# Per-slot UI widgets keyed by "a" / "b".
-var _restim_label_edit: Dictionary = {}
-var _restim_url_edit: Dictionary = {}
-var _restim_status_lbl: Dictionary = {}
-var _restim_connect_btn: Dictionary = {}
-var _restim_auto_toggle: Dictionary = {}
 var _stroker_summary_lbl: Label = null
 var _serial_delay_slider: HSlider = null
 var _serial_delay_lbl: Label = null
+var _serial_interp_slider: HSlider = null
+var _serial_interp_lbl: Label = null
 var _intiface_delay_slider: HSlider = null
 var _intiface_delay_lbl: Label = null
 var _transcode_section: VBoxContainer = null
 var _credits_section: VBoxContainer = null
+
+# restim (e-stim), split across two tabs: the connection block (server/path/
+# auto-connect) sits on CONNECTION next to the other transports, while the
+# per-axis levels are device tuning and live on DEVICE beside the T-code ranges.
+var _restim_section: VBoxContainer = null
+var _restim_axes_section: VBoxContainer = null
+var _restim_server_input: LineEdit = null
+var _restim_path_input: LineEdit = null
+var _restim_auto_toggle: Button = null
+var _restim_connect_btn: Button = null
+var _restim_status_lbl: Label = null
+var _restim_axis_sliders: Dictionary = {}  # axis id → HSlider
+var _restim_axis_value_lbls: Dictionary = {}  # axis id → value Label
+
+# The 18 "E-Stim Full" axes, grouped for the UI. [axis id, friendly label].
+# Motion axes (L0/L1/C0/P0/V1/V2) note their driving funscript; those sliders are the
+# fallback used only when the round has no such script.
+const RESTIM_AXIS_GROUPS: Array = [
+	["MASTER", [["V0", "Volume"]]],
+	["POSITION", [["L0", "Alpha ← stroke"], ["L1", "Beta ← surge"]]],
+	["CARRIER", [["C0", "Carrier freq ← twist"]]],
+	[
+		"PULSE",
+		[
+			["P0", "Pulse freq ← pitch"],
+			["P1", "Pulse width"],
+			["P2", "Pulse interval random"],
+			["P3", "Pulse rise time"],
+		]
+	],
+	[
+		"VIBRATION 1",
+		[
+			["V1", "Vib1 freq ← sway"],
+			["V2", "Vib1 strength ← roll"],
+			["V3", "Vib1 random"],
+			["V6", "Vib1 L/R bias"],
+			["V7", "Vib1 up/down bias"],
+		]
+	],
+	[
+		"VIBRATION 2",
+		[
+			["V4", "Vib2 freq"],
+			["V5", "Vib2 strength"],
+			["W1", "Vib2 random"],
+			["V8", "Vib2 L/R bias"],
+			["V9", "Vib2 up/down bias"],
+		]
+	],
+]
 
 
 func _ready() -> void:
@@ -398,6 +451,41 @@ func _apply_layout() -> void:
 			_save_settings()
 	)
 
+	# ── Sensory Strength row (code-generated, appended to DisplaySection) ────
+	# Scales every visual/audio round effect. Softens rather than disables — which effects a
+	# round uses stays the author's call; this is how strongly they land.
+	var sensory_row: HBoxContainer = HBoxContainer.new()
+	sensory_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(sensory_row)
+
+	var sensory_lbl: Label = Label.new()
+	sensory_lbl.text = "SENSORY STRENGTH"
+	sensory_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(sensory_lbl, UITheme.WHITE_SOFT, 14, false)
+	sensory_row.add_child(sensory_lbl)
+
+	_sensory_slider = HSlider.new()
+	_sensory_slider.min_value = 0.1
+	_sensory_slider.max_value = 1.0
+	_sensory_slider.step = 0.05
+	_sensory_slider.value = 0.50
+	_sensory_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_sensory_slider.custom_minimum_size = Vector2(SLIDER_MIN_W, 0)
+	_style_slider(_sensory_slider)
+	sensory_row.add_child(_sensory_slider)
+
+	_sensory_value_lbl = Label.new()
+	_sensory_value_lbl.text = "50%"
+	_sensory_value_lbl.custom_minimum_size = Vector2(VALUE_LABEL_W, 0)
+	_style_label(_sensory_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
+	sensory_row.add_child(_sensory_value_lbl)
+
+	_sensory_slider.value_changed.connect(
+		func(v: float) -> void:
+			_sensory_value_lbl.text = "%d%%" % roundi(v * 100.0)
+			_save_settings()
+	)
+
 	# ── UI Scale row (code-generated, appended to DisplaySection) ────────────
 	# Scales all GUI via Window.content_scale_factor — for high-DPI / 4K displays
 	# where the native 1080p layout looks small. Applied live as the slider moves.
@@ -437,6 +525,85 @@ func _apply_layout() -> void:
 			_save_settings()
 	)
 
+	# ── Readability rows ────────────────────────────────────────────────────
+	# Text-only scales, distinct from UI SCALE above (which resizes layout too).
+	var story_row: HBoxContainer = HBoxContainer.new()
+	story_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(story_row)
+
+	var story_lbl: Label = Label.new()
+	story_lbl.text = "STORY TEXT"
+	story_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(story_lbl, UITheme.WHITE_SOFT, 14, false)
+	story_row.add_child(story_lbl)
+
+	_story_text_slider = HSlider.new()
+	_story_text_slider.min_value = 1.0
+	_story_text_slider.max_value = 2.0
+	_story_text_slider.step = 0.05
+	_story_text_slider.value = 1.0
+	_story_text_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_story_text_slider.custom_minimum_size = Vector2(SLIDER_MIN_W, 0)
+	_style_slider(_story_text_slider)
+	story_row.add_child(_story_text_slider)
+
+	_story_text_value_lbl = Label.new()
+	_story_text_value_lbl.text = "100%"
+	_story_text_value_lbl.custom_minimum_size = Vector2(VALUE_LABEL_W, 0)
+	_style_label(_story_text_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
+	story_row.add_child(_story_text_value_lbl)
+
+	_story_text_slider.value_changed.connect(
+		func(v: float) -> void:
+			_story_text_value_lbl.text = "%d%%" % roundi(v * 100.0)
+			_save_settings()
+	)
+
+	var story_hint: Label = Label.new()
+	story_hint.text = "Enlarges fork, boss-intro and storyboard text only — the HUD and buttons keep their size. Applies to the next screen that opens."
+	story_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(story_hint, UITheme.SEPARATOR, 11, false)
+	display_section.add_child(story_hint)
+
+	var tip_row: HBoxContainer = HBoxContainer.new()
+	tip_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(tip_row)
+
+	var tip_lbl: Label = Label.new()
+	tip_lbl.text = "TOOLTIP TEXT"
+	tip_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(tip_lbl, UITheme.WHITE_SOFT, 14, false)
+	tip_row.add_child(tip_lbl)
+
+	_tooltip_text_slider = HSlider.new()
+	_tooltip_text_slider.min_value = 1.0
+	_tooltip_text_slider.max_value = 2.0
+	_tooltip_text_slider.step = 0.05
+	_tooltip_text_slider.value = 1.0
+	_tooltip_text_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tooltip_text_slider.custom_minimum_size = Vector2(SLIDER_MIN_W, 0)
+	_style_slider(_tooltip_text_slider)
+	tip_row.add_child(_tooltip_text_slider)
+
+	_tooltip_text_value_lbl = Label.new()
+	_tooltip_text_value_lbl.text = "100%"
+	_tooltip_text_value_lbl.custom_minimum_size = Vector2(VALUE_LABEL_W, 0)
+	_style_label(_tooltip_text_value_lbl, UITheme.PURPLE_BRIGHT, 14, false)
+	tip_row.add_child(_tooltip_text_value_lbl)
+
+	_tooltip_text_slider.value_changed.connect(
+		func(v: float) -> void:
+			_tooltip_text_value_lbl.text = "%d%%" % roundi(v * 100.0)
+			_save_settings()
+			UITheme.apply_tooltip_scale()  # live: the next hover shows the new size
+	)
+
+	var tip_hint: Label = Label.new()
+	tip_hint.text = "Enlarges every tooltip, including the journey builder's."
+	tip_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(tip_hint, UITheme.SEPARATOR, 11, false)
+	display_section.add_child(tip_hint)
+
 	var ui_scale_hint: Label = Label.new()
 	ui_scale_hint.text = "Scales the entire interface. Raise it if menus look small on a high-resolution or 4K display."
 	ui_scale_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -465,11 +632,77 @@ func _apply_layout() -> void:
 			_save_settings()
 	)
 
+	# Marker shape. Order matches BeatBar.SHAPES so the index maps straight to the id.
+	_beat_shape_dd = OptionButton.new()
+	_beat_shape_dd.add_item("♥ Heart")
+	_beat_shape_dd.add_item("● Orb")
+	_beat_shape_dd.add_item("◆ Diamond")
+	_beat_shape_dd.add_item("★ Star")
+	UITheme.style_option_button(_beat_shape_dd)
+	beat_row.add_child(_beat_shape_dd)
+	_beat_shape_dd.item_selected.connect(func(_i: int) -> void: _save_settings())
+
 	var beat_hint: Label = Label.new()
-	beat_hint.text = "Shows upcoming stroke beats as orbs scrolling toward a hit-line during play."
+	beat_hint.text = "Shows upcoming stroke beats scrolling toward a hit-line during play. Pick the marker shape on the right."
 	beat_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(beat_hint, UITheme.SEPARATOR, 11, false)
 	display_section.add_child(beat_hint)
+
+	# ── Round Timer row ─────────────────────────────────────────────────────
+	var timer_row: HBoxContainer = HBoxContainer.new()
+	timer_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(timer_row)
+
+	var timer_lbl: Label = Label.new()
+	timer_lbl.text = "ROUND TIMER"
+	timer_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(timer_lbl, UITheme.WHITE_SOFT, 14, false)
+	timer_row.add_child(timer_lbl)
+
+	_round_timer_toggle = Button.new()
+	_round_timer_toggle.toggle_mode = true
+	_round_timer_toggle.focus_mode = Control.FOCUS_NONE
+	_style_toggle(_round_timer_toggle, false)
+	timer_row.add_child(_round_timer_toggle)
+	_round_timer_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_round_timer_toggle, pressed)
+			_save_settings()
+	)
+
+	var timer_hint: Label = Label.new()
+	timer_hint.text = "Shows the time left in the current round on the HUD. Hidden along with the rest of the HUD by effects that conceal it."
+	timer_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(timer_hint, UITheme.SEPARATOR, 11, false)
+	display_section.add_child(timer_hint)
+
+	# ── Animated builder background row ──────────────────────────────────────
+	var bldbg_row: HBoxContainer = HBoxContainer.new()
+	bldbg_row.add_theme_constant_override("separation", 16)
+	display_section.add_child(bldbg_row)
+
+	var bldbg_lbl: Label = Label.new()
+	bldbg_lbl.text = "ANIMATED BUILDER BACKGROUND"
+	bldbg_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_label(bldbg_lbl, UITheme.WHITE_SOFT, 14, false)
+	bldbg_row.add_child(bldbg_lbl)
+
+	_builder_bg_toggle = Button.new()
+	_builder_bg_toggle.toggle_mode = true
+	_builder_bg_toggle.focus_mode = Control.FOCUS_NONE
+	_style_toggle(_builder_bg_toggle, true)
+	bldbg_row.add_child(_builder_bg_toggle)
+	_builder_bg_toggle.toggled.connect(
+		func(pressed: bool) -> void:
+			_style_toggle(_builder_bg_toggle, pressed)
+			_save_settings()
+	)
+
+	var bldbg_hint: Label = Label.new()
+	bldbg_hint.text = "Animated orbs behind the journey builder canvas. Turn off for a plain black background (less motion, lighter on the GPU). Applies next time the builder opens."
+	bldbg_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(bldbg_hint, UITheme.SEPARATOR, 11, false)
+	display_section.add_child(bldbg_hint)
 
 	# ── Update Check row (code-generated, appended to DisplaySection) ─────────
 	var upd_row: HBoxContainer = HBoxContainer.new()
@@ -499,66 +732,6 @@ func _apply_layout() -> void:
 	_style_label(upd_hint, UITheme.SEPARATOR, 11, false)
 	display_section.add_child(upd_hint)
 
-	# ── Ignore journey cooldowns (dev / QA) ───────────────────────────────────
-	var cd_row: HBoxContainer = HBoxContainer.new()
-	cd_row.add_theme_constant_override("separation", 16)
-	display_section.add_child(cd_row)
-
-	var cd_lbl: Label = Label.new()
-	cd_lbl.text = "IGNORE JOURNEY COOLDOWNS"
-	cd_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_label(cd_lbl, UITheme.WHITE_SOFT, 14, false)
-	cd_row.add_child(cd_lbl)
-
-	_ignore_cooldowns_toggle = Button.new()
-	_ignore_cooldowns_toggle.toggle_mode = true
-	_ignore_cooldowns_toggle.focus_mode = Control.FOCUS_NONE
-	_style_toggle(_ignore_cooldowns_toggle, false)
-	cd_row.add_child(_ignore_cooldowns_toggle)
-	_ignore_cooldowns_toggle.toggled.connect(
-		func(pressed: bool) -> void:
-			_style_toggle(_ignore_cooldowns_toggle, pressed)
-			_save_settings()
-	)
-
-	var cd_hint: Label = Label.new()
-	cd_hint.text = "Dev/QA: Resume ignores calendar lockouts. Also unlocks Continue on cooldown Force-Quit banners."
-	cd_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_style_label(cd_hint, UITheme.SEPARATOR, 11, false)
-	display_section.add_child(cd_hint)
-
-	# ── Dev cheats (in-run hotkeys) ───────────────────────────────────────────
-	var cheat_row: HBoxContainer = HBoxContainer.new()
-	cheat_row.add_theme_constant_override("separation", 16)
-	display_section.add_child(cheat_row)
-
-	var cheat_lbl: Label = Label.new()
-	cheat_lbl.text = "DEV CHEATS (IN-RUN)"
-	cheat_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_label(cheat_lbl, UITheme.WHITE_SOFT, 14, false)
-	cheat_row.add_child(cheat_lbl)
-
-	_dev_cheats_toggle = Button.new()
-	_dev_cheats_toggle.toggle_mode = true
-	_dev_cheats_toggle.focus_mode = Control.FOCUS_NONE
-	_style_toggle(_dev_cheats_toggle, false)
-	cheat_row.add_child(_dev_cheats_toggle)
-	_dev_cheats_toggle.toggled.connect(
-		func(pressed: bool) -> void:
-			_style_toggle(_dev_cheats_toggle, pressed)
-			_save_settings()
-	)
-
-	var cheat_hint: Label = Label.new()
-	cheat_hint.text = (
-		"While playing: → complete round (clean, awards coins) or skip cutscene. "
-		+ "↑ skip node / cutscene (no coins). Cooldown banners get Continue. "
-		+ "Arrows still nudge stroke range when Quick Settings (S) is open. Leave OFF for normal play."
-	)
-	cheat_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_style_label(cheat_hint, UITheme.SEPARATOR, 11, false)
-	display_section.add_child(cheat_hint)
-
 	for label_path in [
 		"ContentPanel/ContentScroll/MarginWrapper/ContentVBox/OutputSection/OutputModeRow/OutputModeLabel",
 		"ContentPanel/ContentScroll/MarginWrapper/ContentVBox/DisplaySection/FullscreenRow/FsLabel",
@@ -581,7 +754,7 @@ func _apply_layout() -> void:
 	_range_section = range_section
 
 	var range_header: Label = Label.new()
-	range_header.text = "DEVICE RANGE"
+	range_header.text = "T-CODE DEVICE"
 	_style_label(range_header, UITheme.PURPLE_BRIGHT, 13, true)
 	range_section.add_child(range_header)
 
@@ -871,6 +1044,7 @@ func _apply_layout() -> void:
 	_build_routing_section()
 	_build_handy_section()
 	_build_restim_section()
+	_build_restim_axes_section()
 
 	var filler_header: Label = Label.new()
 	filler_header.text = "STORYBOARD FILLER"
@@ -1090,7 +1264,7 @@ func _on_tab_changed(idx: int) -> void:
 			_restim_section,
 		],
 		# DEVICE
-		[_range_section, _filler_section],
+		[_range_section, _restim_axes_section, _filler_section],
 		# ABOUT
 		[_credits_section],
 	]
@@ -1412,6 +1586,11 @@ func _load_settings() -> void:
 		_hud_delay_slider.value = hud_delay
 		_hud_delay_value_lbl.text = "%.1fs" % hud_delay
 
+	var sensory: float = SettingsService.get_sensory_strength()
+	if _sensory_slider != null:
+		_sensory_slider.set_value_no_signal(sensory)
+		_sensory_value_lbl.text = "%d%%" % roundi(sensory * 100.0)
+
 	var ui_scale: float = SettingsService.get_ui_scale()
 	if _ui_scale_slider != null:
 		_ui_scale_slider.set_value_no_signal(ui_scale)
@@ -1422,20 +1601,34 @@ func _load_settings() -> void:
 		_beat_bar_toggle.button_pressed = beat_on
 		_style_toggle(_beat_bar_toggle, beat_on)
 
+	if _beat_shape_dd != null:
+		var shape_i: int = BeatBar.SHAPES.find(SettingsService.get_beat_bar_shape())
+		_beat_shape_dd.selected = shape_i if shape_i >= 0 else 0
+
+	if _story_text_slider != null:
+		var story_scale: float = SettingsService.get_story_text_scale()
+		_story_text_slider.set_value_no_signal(story_scale)
+		_story_text_value_lbl.text = "%d%%" % roundi(story_scale * 100.0)
+
+	if _tooltip_text_slider != null:
+		var tip_scale: float = SettingsService.get_tooltip_text_scale()
+		_tooltip_text_slider.set_value_no_signal(tip_scale)
+		_tooltip_text_value_lbl.text = "%d%%" % roundi(tip_scale * 100.0)
+
+	if _round_timer_toggle != null:
+		var timer_on: bool = SettingsService.get_round_timer_enabled()
+		_round_timer_toggle.button_pressed = timer_on
+		_style_toggle(_round_timer_toggle, timer_on)
+
+	if _builder_bg_toggle != null:
+		var bldbg_on: bool = SettingsService.get_builder_animated_bg_enabled()
+		_builder_bg_toggle.button_pressed = bldbg_on
+		_style_toggle(_builder_bg_toggle, bldbg_on)
+
 	if _update_check_toggle != null:
 		var upd_on: bool = SettingsService.get_update_check_enabled()
 		_update_check_toggle.button_pressed = upd_on
 		_style_toggle(_update_check_toggle, upd_on)
-
-	if _ignore_cooldowns_toggle != null:
-		var cd_on: bool = SettingsService.get_ignore_journey_cooldowns()
-		_ignore_cooldowns_toggle.button_pressed = cd_on
-		_style_toggle(_ignore_cooldowns_toggle, cd_on)
-
-	if _dev_cheats_toggle != null:
-		var cheats_on: bool = SettingsService.get_dev_cheats_enabled()
-		_dev_cheats_toggle.button_pressed = cheats_on
-		_style_toggle(_dev_cheats_toggle, cheats_on)
 
 	if _ui_sound_toggle != null:
 		var ui_snd_on: bool = SettingsService.get_ui_sound_enabled()
@@ -1527,20 +1720,31 @@ func _save_settings() -> void:
 	if _hud_delay_slider != null:
 		SettingsService.set_hud_hide_delay(_hud_delay_slider.value)
 
+	if _sensory_slider != null:
+		SettingsService.set_sensory_strength(_sensory_slider.value)
+
 	if _ui_scale_slider != null:
 		SettingsService.set_ui_scale(_ui_scale_slider.value)
 
 	if _beat_bar_toggle != null:
 		SettingsService.set_beat_bar_enabled(_beat_bar_toggle.button_pressed)
 
+	if _beat_shape_dd != null:
+		SettingsService.set_beat_bar_shape(BeatBar.SHAPES[_beat_shape_dd.selected])
+
+	if _round_timer_toggle != null:
+		SettingsService.set_round_timer_enabled(_round_timer_toggle.button_pressed)
+
+	if _builder_bg_toggle != null:
+		SettingsService.set_builder_animated_bg_enabled(_builder_bg_toggle.button_pressed)
+
+	if _story_text_slider != null:
+		SettingsService.set_story_text_scale(_story_text_slider.value)
+	if _tooltip_text_slider != null:
+		SettingsService.set_tooltip_text_scale(_tooltip_text_slider.value)
+
 	if _update_check_toggle != null:
 		SettingsService.set_update_check_enabled(_update_check_toggle.button_pressed)
-
-	if _ignore_cooldowns_toggle != null:
-		SettingsService.set_ignore_journey_cooldowns(_ignore_cooldowns_toggle.button_pressed)
-
-	if _dev_cheats_toggle != null:
-		SettingsService.set_dev_cheats_enabled(_dev_cheats_toggle.button_pressed)
 
 	if _ui_sound_toggle != null:
 		SettingsService.set_ui_sound_enabled(_ui_sound_toggle.button_pressed)
@@ -2172,12 +2376,43 @@ func _build_routing_section() -> void:
 	_style_label(_stroker_summary_lbl, UITheme.CYAN, 12, false)
 	section.add_child(_stroker_summary_lbl)
 
-	var d_intiface: Dictionary = _add_delay_row(section, "Intiface delay")
+	var d_intiface: Dictionary = _add_delay_row(
+		section,
+		"Intiface delay",
+		(
+			"Timing offset for Buttplug / Intiface devices, in milliseconds. Positive = the device "
+			+ "fires later, negative = earlier. Adjust until the device lines up with the video. "
+			+ "Can also be nudged live during play."
+		)
+	)
 	_intiface_delay_slider = d_intiface["slider"]
 	_intiface_delay_lbl = d_intiface["value"]
-	var d_serial: Dictionary = _add_delay_row(section, "Serial delay")
+	var d_serial: Dictionary = _add_delay_row(
+		section,
+		"Serial delay",
+		(
+			"Timing offset for the serial (T-code) stroker, in milliseconds. Positive = the device "
+			+ "fires later, negative = earlier. Adjust until the stroker lines up with the video. "
+			+ "Can also be nudged live during play."
+		)
+	)
 	_serial_delay_slider = d_serial["slider"]
 	_serial_delay_lbl = d_serial["value"]
+
+	# Serial stroke smoothing (the T-code interp interval factor) — a per-device/firmware tuning for
+	# the OSR/SR6 stream. Same row shape as the delays, but a ×factor rather than milliseconds.
+	var d_interp: Dictionary = _add_factor_row(
+		section,
+		"Serial smoothing",
+		(
+			"How smoothly motion is streamed to a T-code stroker (OSR2 / SR6). Higher = smoother, "
+			+ "more fluid strokes; lower = snappier but can look steppy on fast sections. The best "
+			+ "value depends on your device — raise it if the motion looks choppy, lower it if it "
+			+ "feels laggy or soft."
+		)
+	)
+	_serial_interp_slider = d_interp["slider"]
+	_serial_interp_lbl = d_interp["value"]
 
 	_routing_cards_vbox = VBoxContainer.new()
 	_routing_cards_vbox.add_theme_constant_override("separation", 8)
@@ -2194,8 +2429,11 @@ func _build_routing_section() -> void:
 	_intiface_delay_lbl.text = "%d ms" % SettingsService.get_intiface_delay_ms()
 	_serial_delay_slider.value = SettingsService.get_serial_delay_ms()
 	_serial_delay_lbl.text = "%d ms" % SettingsService.get_serial_delay_ms()
+	_serial_interp_slider.value = SettingsService.get_serial_interp_factor()
+	_serial_interp_lbl.text = "%.1f×" % SettingsService.get_serial_interp_factor()
 	_intiface_delay_slider.value_changed.connect(_on_intiface_delay_changed)
 	_serial_delay_slider.value_changed.connect(_on_serial_delay_changed)
+	_serial_interp_slider.value_changed.connect(_on_serial_interp_changed)
 	_refresh_routing_cards()
 
 
@@ -2238,11 +2476,16 @@ func _build_handy_section() -> void:
 	key_row.add_child(key_edit)
 
 	_handy_status_lbl = Label.new()
-	_handy_status_lbl.text = (
-		"Not checked" if SettingsService.get_handy_connection_key() != "" else "No key set"
-	)
-	_style_label(_handy_status_lbl, UITheme.PURPLE_MID, 11, true)
+	_style_label(_handy_status_lbl, UITheme.PURPLE_MID, 11, true)  # size + uppercase; colour set per state
 	key_row.add_child(_handy_status_lbl)
+	# Reflect the LIVE connection state (the service holds it across rounds) instead of always starting at
+	# "Not checked" — reopening Options mid-session now shows you're still connected.
+	_refresh_handy_status()
+	# Keep it live while Options is open (connection_changed fires on connect / test / round start). The node
+	# frees on close, so Godot drops this connection automatically; the guard avoids a double-connect on a
+	# tab rebuild.
+	if not HandyService.connection_changed.is_connected(_on_handy_connection_changed):
+		HandyService.connection_changed.connect(_on_handy_connection_changed)
 
 	var connect_btn: Button = UITheme.make_icon_btn("⟳ CONNECT", false, UITheme.CYAN)
 	connect_btn.tooltip_text = "Save the key and check the device through Handy's servers"
@@ -2252,9 +2495,27 @@ func _build_handy_section() -> void:
 			SettingsService.set_handy_connection_key(key_edit.text)
 			SettingsService.save()
 			_refresh_routing_cards()  # the routing card appears once a key exists
-			_handy_status_lbl.text = "Checking…"
+			_set_handy_status("Checking…", UITheme.PURPLE_MID)
 			var ok: bool = await HandyService.connect_and_sync()
-			_handy_status_lbl.text = "✔ Connected" if ok else "✕ Not reachable"
+			_refresh_handy_status() if ok else _set_handy_status("✕ Not reachable", UITheme.DANGER)
+	)
+
+	# Fires a quick stroke so you can physically confirm the device is reachable (a cloud "connected" alone
+	# tells you nothing reached the hardware).
+	var test_btn: Button = UITheme.make_icon_btn("↕ TEST", false, UITheme.PURPLE_BRIGHT)
+	test_btn.tooltip_text = "Send a short stroke to confirm the device responds"
+	key_row.add_child(test_btn)
+	test_btn.pressed.connect(
+		func() -> void:
+			if not HandyService.is_connected_ok():
+				_set_handy_status("Connect first", UITheme.PURPLE_MID)
+				return
+			_set_handy_status("Testing…", UITheme.PURPLE_MID)
+			var ok: bool = await HandyService.test_stroke()
+			if ok:
+				_set_handy_status("● Stroke sent", UITheme.SUCCESS)
+			else:
+				_set_handy_status("✕ Test failed", UITheme.DANGER)
 	)
 
 	var d_handy: Dictionary = _add_delay_row(section, "Handy delay")
@@ -2282,6 +2543,11 @@ func _build_handy_section() -> void:
 	section.add_child(disclosure)
 
 
+# ---------------------------------------------------------------------------
+# restim (e-stim) section — network T-code over WebSocket
+# ---------------------------------------------------------------------------
+
+
 func _build_restim_section() -> void:
 	var section: VBoxContainer = VBoxContainer.new()
 	section.add_theme_constant_override("separation", 10)
@@ -2289,7 +2555,7 @@ func _build_restim_section() -> void:
 	_restim_section = section
 
 	var header: Label = Label.new()
-	header.text = "RESTIM / FOC-STIM (T-CODE WEBSOCKET)"
+	header.text = "RESTIM (E-STIM)"
 	_style_label(header, UITheme.PURPLE_BRIGHT, 13, true)
 	section.add_child(header)
 
@@ -2297,159 +2563,104 @@ func _build_restim_section() -> void:
 	divider.add_theme_stylebox_override("separator", _make_separator_style())
 	section.add_child(divider)
 
-	for slot: String in RestimService.SLOTS:
-		_build_restim_slot_card(section, slot)
-
-	var label_hint: Label = Label.new()
-	label_hint.text = (
-		"Filename tags use the slot label slug (e.g. label \"Prostate\" ↔ *.alpha-prostate.funscript)."
-		+ " Plain kit suffixes (.alpha, .e1, …) go to slot A; pulse_* scripts are shared."
-	)
-	label_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_style_label(label_hint, UITheme.SEPARATOR, 11, false)
-	section.add_child(label_hint)
-
-	RestimService.Connected.connect(_on_restim_slot_connected)
-	RestimService.Disconnected.connect(_on_restim_slot_disconnected)
-	RestimService.ErrorOccurred.connect(_on_restim_slot_error)
-	for slot: String in RestimService.SLOTS:
-		_sync_restim_slot_state(slot)
-
-
-func _build_restim_slot_card(parent: VBoxContainer, slot: String) -> void:
-	var card: VBoxContainer = VBoxContainer.new()
-	card.add_theme_constant_override("separation", 8)
-	parent.add_child(card)
-
-	var title_row: HBoxContainer = HBoxContainer.new()
-	title_row.add_theme_constant_override("separation", 12)
-	card.add_child(title_row)
-
-	var slot_lbl: Label = Label.new()
-	slot_lbl.text = "SLOT %s" % slot.to_upper()
-	slot_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
-	_style_label(slot_lbl, UITheme.CYAN, 13, true)
-	title_row.add_child(slot_lbl)
-
-	var label_edit: LineEdit = LineEdit.new()
-	label_edit.placeholder_text = "Label (e.g. Prostate)"
-	label_edit.text = SettingsService.get_restim_label(slot)
-	label_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UITheme.style_line_edit(label_edit)
-	title_row.add_child(label_edit)
-	_restim_label_edit[slot] = label_edit
-	var captured_slot: String = slot
-	label_edit.text_changed.connect(
-		func(t: String) -> void:
-			SettingsService.set_restim_label(captured_slot, t)
-			SettingsService.save()
-	)
-
-	var url_row: HBoxContainer = HBoxContainer.new()
-	url_row.add_theme_constant_override("separation", 16)
-	card.add_child(url_row)
-
-	var url_lbl: Label = Label.new()
-	url_lbl.text = "WS URL"
-	url_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
-	_style_label(url_lbl, UITheme.WHITE_SOFT, 14, false)
-	url_row.add_child(url_lbl)
-
-	var url_edit: LineEdit = LineEdit.new()
-	url_edit.placeholder_text = (
-		"ws://127.0.0.1:12346/tcode" if slot == "a" else "ws://127.0.0.1:12347/tcode"
-	)
-	url_edit.text = SettingsService.get_restim_url(slot)
-	url_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UITheme.style_line_edit(url_edit)
-	url_row.add_child(url_edit)
-	_restim_url_edit[slot] = url_edit
-
-	var status_lbl: Label = Label.new()
-	status_lbl.text = "● DISCONNECTED"
-	_style_label(status_lbl, UITheme.ERROR, 13, false)
-	url_row.add_child(status_lbl)
-	_restim_status_lbl[slot] = status_lbl
-
-	var connect_btn: Button = Button.new()
-	connect_btn.focus_mode = Control.FOCUS_NONE
-	_style_button(connect_btn, UITheme.PURPLE_BRIGHT)
-	connect_btn.text = "> CONNECT"
-	url_row.add_child(connect_btn)
-	_restim_connect_btn[slot] = connect_btn
-	connect_btn.pressed.connect(func() -> void: _on_restim_connect_pressed(captured_slot))
+	# Address is two fields (server + path) so the endpoint path can't be missed.
+	_restim_server_input = _add_restim_text_row(section, "Server", "ws://127.0.0.1:12346")
+	_restim_path_input = _add_restim_text_row(section, "Path", "/tcode")
 
 	var auto_row: HBoxContainer = HBoxContainer.new()
 	auto_row.add_theme_constant_override("separation", 16)
-	card.add_child(auto_row)
+	section.add_child(auto_row)
 	var auto_lbl: Label = Label.new()
-	auto_lbl.text = "Auto-connect"
+	auto_lbl.text = "Auto-connect on launch"
 	auto_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
 	_style_label(auto_lbl, UITheme.WHITE_SOFT, 14, false)
 	auto_row.add_child(auto_lbl)
-	var auto_toggle: Button = Button.new()
-	auto_toggle.toggle_mode = true
-	auto_toggle.focus_mode = Control.FOCUS_NONE
-	auto_toggle.button_pressed = SettingsService.get_restim_auto_connect(slot)
-	_style_toggle(auto_toggle, auto_toggle.button_pressed)
-	auto_row.add_child(auto_toggle)
-	_restim_auto_toggle[slot] = auto_toggle
-	auto_toggle.toggled.connect(
-		func(pressed: bool) -> void:
-			_style_toggle(auto_toggle, pressed)
-			SettingsService.set_restim_auto_connect(captured_slot, pressed)
+	_restim_auto_toggle = Button.new()
+	_restim_auto_toggle.toggle_mode = true
+	_restim_auto_toggle.focus_mode = Control.FOCUS_NONE
+	auto_row.add_child(_restim_auto_toggle)
+
+	var conn_row: HBoxContainer = HBoxContainer.new()
+	conn_row.add_theme_constant_override("separation", 16)
+	section.add_child(conn_row)
+	_restim_connect_btn = Button.new()
+	_restim_connect_btn.text = "> CONNECT"
+	_restim_connect_btn.focus_mode = Control.FOCUS_NONE
+	_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
+	conn_row.add_child(_restim_connect_btn)
+	_restim_status_lbl = Label.new()
+	_style_label(_restim_status_lbl, UITheme.SEPARATOR, 12, true)
+	conn_row.add_child(_restim_status_lbl)
+
+	var hint: Label = Label.new()
+	hint.text = "Streams the round's funscripts to restim as E-Stim Full T-code over WebSocket. Connecting turns the serial device off. Per-axis levels (Volume, Alpha/Beta, Carrier, Pulse, Vibration) live under E-STIM DEVICE on the Device tab."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(hint, UITheme.SEPARATOR, 11, false)
+	section.add_child(hint)
+
+	# Seed controls BEFORE connecting handlers so setup doesn't fire saves.
+	_restim_server_input.text = SettingsService.get_restim_server()
+	_restim_path_input.text = SettingsService.get_restim_path()
+	var auto_on: bool = SettingsService.get_restim_auto_connect()
+	_restim_auto_toggle.button_pressed = auto_on
+	_style_toggle(_restim_auto_toggle, auto_on)
+
+	_restim_server_input.text_changed.connect(
+		func(t: String) -> void:
+			SettingsService.set_restim_server(t)
 			SettingsService.save()
 	)
+	_restim_path_input.text_changed.connect(
+		func(t: String) -> void:
+			SettingsService.set_restim_path(t)
+			SettingsService.save()
+	)
+	_restim_auto_toggle.toggled.connect(_on_restim_auto_toggled)
+	_restim_connect_btn.pressed.connect(_on_restim_connect_pressed)
+
+	RestimService.connect("Connected", _on_restim_connected)
+	RestimService.connect("Disconnected", _on_restim_disconnected)
+	RestimService.connect("ErrorOccurred", _on_restim_error)
+
+	_sync_restim_state()
 
 
-func _on_restim_slot_connected(slot: String) -> void:
-	_sync_restim_slot_state(slot)
+# Per-axis e-stim levels. Deliberately on the DEVICE tab rather than CONNECTION:
+# these are ongoing output tuning (the same kind of thing as the T-code ranges
+# above them), not part of getting connected. Each row seeds and saves itself.
+func _build_restim_axes_section() -> void:
+	var section: VBoxContainer = VBoxContainer.new()
+	section.add_theme_constant_override("separation", 10)
+	_content_vbox.add_child(section)
+	_restim_axes_section = section
+
+	var header: Label = Label.new()
+	header.text = "E-STIM DEVICE"
+	_style_label(header, UITheme.PURPLE_BRIGHT, 13, true)
+	section.add_child(header)
+
+	var divider: HSeparator = HSeparator.new()
+	divider.add_theme_stylebox_override("separator", _make_separator_style())
+	section.add_child(divider)
+
+	var hint: Label = Label.new()
+	hint.text = "Motion axes (Alpha/Beta/Carrier/Pulse-freq/Vib1) follow their funscripts when a round provides them; these sliders set every other axis. Raise Volume — at 0 restim is silent. Changes apply live to a connected session."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(hint, UITheme.SEPARATOR, 11, false)
+	section.add_child(hint)
+
+	for group: Array in RESTIM_AXIS_GROUPS:
+		var group_lbl: Label = Label.new()
+		group_lbl.text = str(group[0])
+		_style_label(group_lbl, UITheme.CYAN, 11, true)
+		section.add_child(group_lbl)
+		for entry: Array in group[1]:
+			_add_restim_axis_row(section, str(entry[0]), str(entry[1]))
 
 
-func _on_restim_slot_disconnected(slot: String) -> void:
-	_sync_restim_slot_state(slot)
-
-
-func _on_restim_slot_error(slot: String, msg: String) -> void:
-	var lbl: Label = _restim_status_lbl.get(slot) as Label
-	if lbl == null:
-		return
-	lbl.text = "✕ %s" % msg
-	lbl.add_theme_color_override("font_color", UITheme.ERROR)
-
-
-func _sync_restim_slot_state(slot: String) -> void:
-	var status_lbl: Label = _restim_status_lbl.get(slot) as Label
-	var connect_btn: Button = _restim_connect_btn.get(slot) as Button
-	if status_lbl == null or connect_btn == null:
-		return
-	if RestimService.IsConnected(slot):
-		status_lbl.text = "● CONNECTED"
-		status_lbl.add_theme_color_override("font_color", UITheme.OK)
-		_style_button(connect_btn, UITheme.MAGENTA)
-		connect_btn.text = "> DISCONNECT"
-	else:
-		status_lbl.text = "● DISCONNECTED"
-		status_lbl.add_theme_color_override("font_color", UITheme.ERROR)
-		_style_button(connect_btn, UITheme.PURPLE_BRIGHT)
-		connect_btn.text = "> CONNECT"
-
-
-func _on_restim_connect_pressed(slot: String) -> void:
-	if RestimService.IsConnected(slot):
-		RestimService.Disconnect(slot)
-		return
-	var url_edit: LineEdit = _restim_url_edit.get(slot) as LineEdit
-	var url: String = url_edit.text if url_edit != null else ""
-	SettingsService.set_restim_url(slot, url)
-	var label_edit: LineEdit = _restim_label_edit.get(slot) as LineEdit
-	if label_edit != null:
-		SettingsService.set_restim_label(slot, label_edit.text)
-	SettingsService.save()
-	RestimService.Connect(slot, url)
-
-
-func _add_delay_row(parent: VBoxContainer, label_text: String) -> Dictionary:
+func _add_restim_text_row(
+	parent: VBoxContainer, label_text: String, placeholder: String
+) -> LineEdit:
 	var row: HBoxContainer = HBoxContainer.new()
 	row.add_theme_constant_override("separation", 16)
 	parent.add_child(row)
@@ -2460,16 +2671,203 @@ func _add_delay_row(parent: VBoxContainer, label_text: String) -> Dictionary:
 	_style_label(lbl, UITheme.WHITE_SOFT, 14, false)
 	row.add_child(lbl)
 
+	var edit: LineEdit = LineEdit.new()
+	edit.placeholder_text = placeholder
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_line_edit(edit)
+	row.add_child(edit)
+	return edit
+
+
+func _add_restim_axis_row(parent: VBoxContainer, axis: String, label_text: String) -> void:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(lbl, UITheme.WHITE_SOFT, 13, false)
+	row.add_child(lbl)
+
+	var slider: HSlider = HSlider.new()
+	slider.min_value = 0
+	slider.max_value = 100
+	slider.step = 1
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_slider(slider)
+	row.add_child(slider)
+
+	var value_lbl: Label = Label.new()
+	value_lbl.custom_minimum_size = Vector2(VALUE_LABEL_W, 0)
+	_style_label(value_lbl, UITheme.PURPLE_MID, 11, true)
+	row.add_child(value_lbl)
+
+	var initial: int = SettingsService.get_restim_axis(axis)
+	slider.value = initial
+	value_lbl.text = "%d%%" % initial
+
+	slider.value_changed.connect(
+		func(v: float) -> void:
+			var iv: int = roundi(v)
+			value_lbl.text = "%d%%" % iv
+			SettingsService.set_restim_axis(axis, iv)
+			SettingsService.save()
+			FunscriptPlayer.SetRestimAxisValue(axis, iv)
+	)
+
+	_restim_axis_sliders[axis] = slider
+	_restim_axis_value_lbls[axis] = value_lbl
+
+
+func _on_restim_auto_toggled(pressed: bool) -> void:
+	_style_toggle(_restim_auto_toggle, pressed)
+	SettingsService.set_restim_auto_connect(pressed)
+	SettingsService.save()
+
+
+func _on_restim_connect_pressed() -> void:
+	if RestimService.RestimConnected:
+		RestimService.Disconnect()
+		return
+
+	var server: String = _restim_server_input.text.strip_edges()
+	if server.is_empty():
+		_set_restim_status("● NO SERVER", UITheme.ERROR)
+		return
+	var path: String = _restim_path_input.text.strip_edges()
+	var addr: String = server.trim_suffix("/")
+	if not path.is_empty():
+		if not path.begins_with("/"):
+			path = "/" + path
+		addr += path
+
+	_set_restim_status("● CONNECTING…", UITheme.PURPLE_MID)
+	_restim_connect_btn.disabled = true
+	RestimService.Connect(addr)
+
+
+func _on_restim_connected() -> void:
+	_restim_connect_btn.disabled = false
+	_set_restim_status("● CONNECTED", UITheme.OK)
+	_style_button(_restim_connect_btn, UITheme.MAGENTA)
+	_restim_connect_btn.text = "> DISCONNECT"
+	FunscriptPlayer.SendRestimManualState()
+	# restim turns the serial device off on connect — refresh the serial UI to match.
+	_sync_serial_state()
+
+
+func _on_restim_disconnected() -> void:
+	_restim_connect_btn.disabled = false
+	_set_restim_status("● DISCONNECTED", UITheme.ERROR)
+	_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
+	_restim_connect_btn.text = "> CONNECT"
+
+
+func _on_restim_error(message: String) -> void:
+	_restim_connect_btn.disabled = false
+	_set_restim_status("● ERROR: " + message.left(60).to_upper(), UITheme.ERROR)
+
+
+func _set_restim_status(text: String, color: Color) -> void:
+	_restim_status_lbl.text = text
+	_restim_status_lbl.add_theme_color_override("font_color", color)
+
+
+func _sync_restim_state() -> void:
+	if RestimService.RestimConnected:
+		_set_restim_status("● CONNECTED", UITheme.OK)
+		_style_button(_restim_connect_btn, UITheme.MAGENTA)
+		_restim_connect_btn.text = "> DISCONNECT"
+	else:
+		_set_restim_status("● DISCONNECTED", UITheme.ERROR)
+		_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
+		_restim_connect_btn.text = "> CONNECT"
+
+
+# Sets the Handy status line's text + colour together (green ● for good, red ✕ for bad, neutral purple for
+# pending). Central point so every state stays consistent.
+func _set_handy_status(text: String, color: Color) -> void:
+	if is_instance_valid(_handy_status_lbl):
+		_handy_status_lbl.text = text
+		_handy_status_lbl.add_theme_color_override("font_color", color)
+
+
+# Paints the status line from the LIVE state: no key → prompt; connected → green ● Connected; else unverified.
+func _refresh_handy_status() -> void:
+	if SettingsService.get_handy_connection_key() == "":
+		_set_handy_status("No key set", UITheme.PURPLE_MID)
+	elif HandyService.is_connected_ok():
+		_set_handy_status("● Connected", UITheme.SUCCESS)
+	else:
+		_set_handy_status("Not checked", UITheme.PURPLE_MID)
+
+
+# Keeps the Options status label in step with the live connection (connect / test / round-start all flip it).
+func _on_handy_connection_changed(connected: bool) -> void:
+	if connected:
+		_refresh_handy_status()
+	else:
+		_set_handy_status("✕ Not reachable", UITheme.DANGER)
+
+
+func _add_delay_row(parent: VBoxContainer, label_text: String, tip: String = "") -> Dictionary:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	if tip != "":
+		lbl.tooltip_text = UITheme.wrap_tip(tip)
+	lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(lbl, UITheme.WHITE_SOFT, 14, false)
+	row.add_child(lbl)
+
 	var slider: HSlider = HSlider.new()
 	slider.min_value = -2000
 	slider.max_value = 2000
 	slider.step = 10
+	if tip != "":
+		slider.tooltip_text = UITheme.wrap_tip(tip)  # on the slider too — a Label often won't show a tooltip
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_style_slider(slider)
 	row.add_child(slider)
 
 	var value_lbl: Label = Label.new()
 	value_lbl.text = "0 ms"
+	value_lbl.custom_minimum_size = Vector2(60, 0)
+	_style_label(value_lbl, UITheme.PURPLE_MID, 11, true)
+	row.add_child(value_lbl)
+
+	return {"slider": slider, "value": value_lbl}
+
+
+# A labelled 1.0–4.0 ×factor slider row (mirrors _add_delay_row's shape). Returns {slider, value};
+# the caller seeds the value, formats the label, and wires value_changed.
+func _add_factor_row(parent: VBoxContainer, label_text: String, tip: String) -> Dictionary:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	lbl.tooltip_text = UITheme.wrap_tip(tip)
+	lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(lbl, UITheme.WHITE_SOFT, 14, false)
+	row.add_child(lbl)
+
+	var slider: HSlider = HSlider.new()
+	slider.min_value = 1.0
+	slider.max_value = 4.0
+	slider.step = 0.1
+	slider.tooltip_text = UITheme.wrap_tip(tip)  # on the slider too — a Label often won't show a tooltip
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_slider(slider)
+	row.add_child(slider)
+
+	var value_lbl: Label = Label.new()
+	value_lbl.text = "1.0×"
 	value_lbl.custom_minimum_size = Vector2(60, 0)
 	_style_label(value_lbl, UITheme.PURPLE_MID, 11, true)
 	row.add_child(value_lbl)
@@ -2487,18 +2885,6 @@ func _refresh_routing_cards() -> void:
 	# Serial (T-code) — a single-device stroker option, always offered.
 	var serial_body: VBoxContainer = _make_routing_card("SERIAL (T-CODE)", UITheme.AMBER)
 	_add_stroker_row(serial_body, DeviceRouting.SERIAL_TARGET, "Linear (T-code stroke)")
-
-	# Restim — FOC / e-stim via Restim's websocket T-code server (dual-slot kits).
-	var restim_body: VBoxContainer = _make_routing_card("RESTIM (FOC / E-STIM)", UITheme.CYAN)
-	_add_stroker_row(restim_body, DeviceRouting.RESTIM_TARGET, "T-code → Restim WS A+B")
-	var restim_note: Label = Label.new()
-	restim_note.text = (
-		"Both connected Restim slots receive their slot kits; shared axes (e.g. pulse_*) "
-		+ "go to both. Author kits under Extra Axes. Prefer this over Intiface for FOC."
-	)
-	restim_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_style_label(restim_note, UITheme.SEPARATOR, 10, false)
-	restim_body.add_child(restim_note)
 
 	# The Handy (direct WiFi) — offered once a connection key is configured in
 	# its section below. Stroke role only (single-axis device, cloud-synced).
@@ -2521,11 +2907,9 @@ func _refresh_routing_cards() -> void:
 	else:
 		for entry: Dictionary in catalog:
 			var dev_id: String = str(entry.get("id", ""))
-			var display_name: String = str(entry.get("name", dev_id))
-			var title: String = display_name.to_upper()
-			if "restim" in display_name.to_lower():
-				title = "%s  ·  E-STIM VIA RESTIM WSDM" % title
-			var body: VBoxContainer = _make_routing_card(title, UITheme.PURPLE_BRIGHT)
+			var body: VBoxContainer = _make_routing_card(
+				str(entry.get("name", dev_id)).to_upper(), UITheme.PURPLE_BRIGHT
+			)
 			if bool(entry.get("linear", false)):
 				_add_stroker_row(
 					body, DeviceRouting.make_actuator_id(dev_id, "linear", 0), "Linear"
@@ -2717,14 +3101,19 @@ func _on_serial_delay_changed(v: float) -> void:
 	FunscriptPlayer.SetSerialDelay(roundi(v))
 
 
+func _on_serial_interp_changed(v: float) -> void:
+	_serial_interp_lbl.text = "%.1f×" % v
+	SettingsService.set_serial_interp_factor(v)
+	SettingsService.save()
+	FunscriptPlayer.SetSerialInterpFactor(v)
+
+
 func _update_stroker_summary() -> void:
 	if _stroker_summary_lbl == null:
 		return
 	var target: String = SettingsService.get_stroke_target()
 	if target == DeviceRouting.SERIAL_TARGET:
 		_stroker_summary_lbl.text = "Stroker: Serial (T-code)"
-	elif target == DeviceRouting.RESTIM_TARGET:
-		_stroker_summary_lbl.text = "Stroker: Restim (FOC / e-stim)"
 	elif target == DeviceRouting.HANDY_TARGET:
 		_stroker_summary_lbl.text = "Stroker: The Handy (WiFi)"
 	elif target != "":

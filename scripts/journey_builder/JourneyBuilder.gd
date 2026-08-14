@@ -34,6 +34,8 @@ const CAUSE_BAD_NAME: String = "bad_name"
 const CAUSE_NAME_COLLISION: String = "name_collision"
 const CAUSE_MISSING_SOURCE: String = "missing_source"
 const CAUSE_NO_ROUNDS: String = "no_rounds"
+const CAUSE_STORYBOARD_EMPTY: String = "storyboard_empty"
+const CAUSE_ITEM_INVALID: String = "item_invalid"
 const CAUSE_FORK_UNDERFILLED: String = "fork_underfilled"
 const CAUSE_FFMPEG_MISSING: String = "ffmpeg_missing"
 const CAUSE_CANCELLED: String = "cancelled"
@@ -47,12 +49,8 @@ const CAUSE_NO_START: String = "no_start"
 const CAUSE_DANGLING_EDGE: String = "dangling_edge"
 const CAUSE_CYCLE: String = "cycle"
 const CAUSE_UNREACHABLE: String = "unreachable"
-
-# Minimum FHJ version required to safely open a journey saved by this build. Stamped into
-# journey.json as "MinVersion"; JourneySelect warns when the running app is older. This is a
-# MAINTAINED FLOOR, not the live app version — bump it only when a save introduces a
-# feature/format an older app can't handle (so a plain re-save doesn't inflate the requirement).
-const JOURNEY_MIN_APP_VERSION: String = "0.6.0"
+const CAUSE_LOOP_UNSATISFIABLE: String = "loop_unsatisfiable"
+const CAUSE_LOOP_UNPAIRED: String = "loop_unpaired"
 
 const GraphViewScene = preload("res://scenes/graph_view/GraphView.tscn")
 
@@ -70,20 +68,58 @@ const GraphViewScene = preload("res://scenes/graph_view/GraphView.tscn")
 
 static var edit_journey: Dictionary = {}
 
+# When set before opening the builder, it starts in RENDITION mode: it loads this base journey with its
+# nodes ghosted/read-only and a save produces an overlay delta rather than a journey (base untouched).
+static var rendition_parent: Dictionary = {}
+
+# Set ALONGSIDE rendition_parent to EDIT an existing rendition (its summary dict) rather than author a
+# fresh one — the builder re-injects its saved delta on top of the ghosted base and re-saves in place.
+static var edit_rendition: Dictionary = {}
+
+# Set ALONGSIDE edit_journey by "merge into base": after the builder loads the base, it injects this node
+# (with a real edge from its former anchor) so the author lands on the base with the node re-added, unsaved.
+# {node_id, node, anchor, edge}
+static var merge_inject: Dictionary = {}
+
+# Set ALONGSIDE rendition_parent to author an overlay over ANOTHER rendition (sibling-dependency), not the
+# base: the ghosted parent becomes base ⊕ the ancestor chain, and the new overlay targets `parent_id`.
+# {start, nodes, parent_id, parent_name}. Empty = overlay the base directly.
+static var rendition_over: Dictionary = {}
+
 const SIDE_PANEL_WIDTH: int = 480
 
 # Journey metadata: stored as member vars since the side-panel editor widgets
 # are created and destroyed dynamically when the user navigates the graph.
 var _journey_name: String = ""
+# The journey's stable id (JourneyData.stamp_journey_identity). Empty for a new journey - minted
+# on first save. Loaded from disk when editing, so a re-save or rename never re-mints it.
+var _journey_id: String = ""
 var _journey_author: String = ""
 var _journey_desc: String = ""
 var _journey_difficulty_idx: int = 0
 var _journey_tags: Array = []  # Array[String] of tag ids (see TagRegistry)
 var _journey_map_enabled: bool = true  # author allows the in-play journey map (off = enforce surprise)
+var _journey_show_fork_counts: bool = true  # show the "N ROUNDS" tag on fork choices (off = hide for mystery)
+var _journey_show_loops_on_map: bool = false  # show Loop markers on the player's map (off = hide, the default)
+# Map backdrops: a STACK of location images drawn behind the graph (editor + in-game map) so nodes align
+# to places. Each entry is {path, offset, scale, opacity}; offset/scale are canvas-local (node) space, so
+# the same values drive both views. `_map_backdrops` are THIS journey's own (editable) layers.
+var _map_backdrops: Array = []
+# When editing a rendition, the base's backdrops load here as LOCKED context (drawn beneath the editable
+# ones, never re-saved). Empty for a normal base journey.
+var _base_backdrops: Array = []
+var _backdrop_reposition_idx: int = -1  # editable-layer index currently in drag-to-move mode (-1 = none)
+var _backdrop_tex_cache: Dictionary = {}  # path -> ImageTexture, shared by the graph push + panel thumbs
 var _journey_map_fog: bool = false  # fog of war: reveal the map as the player discovers it (map must be enabled)
 var _journey_map_fog_reveal: int = 1  # fog reveal depth: ghost levels ahead of the trail (< 0 = whole structure)
-# Shop economy: false = classic buy-charge / free activate; true = unlock then pay-per-use.
-var _journey_unlock_pay_per_use: bool = false
+var _journey_auto_advance_enabled: bool = false  # countdown on storyboards / interactive forks (off = players self-pace)
+var _journey_auto_advance_storyboard_secs: int = 20  # per-line storyboard countdown when enabled
+var _journey_auto_advance_fork_secs: int = 45  # fork-decision countdown when enabled
+var _journey_shown_counters: Array = []  # Array[String] of counter names surfaced to the player (HUD + inventory)
+var _journey_allow_finish: bool = false  # author opt-in: the player "I came" / FINISH button ends the run early
+var _journey_finish_node: String = ""  # entry node of the off-graph aftercare sequence played on FINISH (round/storyboard; optional)
+var _journey_items: Array = []  # author-defined journey-scoped items (runtime snake-case dicts)
+var _journey_characters: Array = []  # storyboard cast (runtime dicts: id/name/portraits[]/placements[])
 
 # Folder the journey was loaded from when editing. If the journey is renamed,
 # the save writes a new folder; this lets us delete the stale original.
@@ -96,6 +132,16 @@ var _graph: Control = null  # GraphView instance, host inside _graph_host
 
 # The free-form GRAPH editor model (GRAPH_EDITOR_OVERHAUL.md) — the journey as nodes + edges.
 var _graph_model: Dictionary = {}  # {start, nodes:{id:{type,data,pos,out}}}
+
+# Rendition (overlay) authoring. True when editing an overlay of a base journey. `_rendition_parent_ids`
+# are the GHOSTED (read-only) base node ids; anything the author adds afterward is new/editable.
+var _rendition_mode: bool = false
+var _rendition_parent_id: String = ""  # the base's JourneyId → the overlay's ParentId
+var _rendition_parent_folder: String = ""
+var _rendition_parent_journey: Dictionary = {}  # the base's scanner dict — reloaded by "merge into base"
+var _rendition_parent_ids: Dictionary = {}  # base node id -> true
+var _rendition_slot_fills: Array = []  # [{node, field, channel, path}] — axis/vibe overlays on base rounds
+
 var _selected_graph_node_id: String = ""  # the lone selected node id, or "" when 0 or 2+ are selected
 var _selected_graph_node_ids: Array = []  # the full selection set (mirrors GraphView; drives group ops)
 var _connecting_from: String = ""  # source node while wiring an edge (click-to-connect), else ""
@@ -111,6 +157,7 @@ const UNDO_LIMIT: int = 50
 # selection is exclusive (nodes XOR a note). Nodes are deep [{id, node}] copies so paste can remap the
 # edges between them; a note is a plain comment dict. _paste_count cascades the offset on repeat paste.
 var _node_clipboard: Array = []
+var _clip_comments: Array = []  # sticky notes pinned to the copied nodes — travel with them on paste
 var _clip_comment: Dictionary = {}
 var _clip_kind: String = ""  # "" | "nodes" | "comment"
 var _paste_count: int = 0
@@ -154,6 +201,11 @@ var _transcode_plan: Dictionary = {}
 var _pooled_media: Dictionary = {}
 var _pooled_fs_stats: Dictionary = {}
 
+# Filenames of animated images clipped to MediaPoolService.ANIM_MAX_SECS during the current save.
+# Collected rather than raised: an over-long decoration is trimmed, not an error — but the author
+# is told, so a silently shortened image can't be mistaken for a bug.
+var _anim_truncated: Array = []
+
 # Count of player run-saves invalidated by this builder save (typically 0 or
 # 1, possibly 2 if both the renamed-from and renamed-to folders had saves).
 # Drives the contextual "Existing run reset" message in the success status
@@ -176,6 +228,8 @@ var _pending_test_location: Dictionary = {}
 var _test_seed_score: int = 0
 var _test_seed_coins: int = 0
 var _test_seed_flags: Array = []  # flag names to pre-set for a Test-From-Here run (exercise flag forks)
+var _test_seed_items: Array = []  # item ids to grant for a Test-From-Here run (exercise item forks / shops)
+var _test_seed_counters: Dictionary = {}  # counter name->value to pre-set (exercise counter forks)
 var _test_panel_expanded: bool = false  # side-panel "Test From Here" group open/closed, persisted across node selections (panel rebuilds)
 
 # Streaming-copy tuning. Chunks are read/written 1 MB at a time; the main thread
@@ -194,10 +248,20 @@ func _ready() -> void:
 	_setup_toolbar_buttons()
 	_connect_signals()
 	_setup_graph_view()
-	if not edit_journey.is_empty():
+	if not rendition_parent.is_empty():
+		_enter_rendition_mode(rendition_parent)
+		if not edit_rendition.is_empty():
+			_load_rendition_delta(edit_rendition)
+			edit_rendition = {}
+		rendition_parent = {}
+		rendition_over = {}
+	elif not edit_journey.is_empty():
 		_original_journey_folder = edit_journey.get("folder", "")
 		_load_graph(edit_journey)
 		edit_journey = {}
+		if not merge_inject.is_empty():
+			_apply_merge_inject(merge_inject)
+			merge_inject = {}
 	_side_renderer.show_journey_info_panel()
 	# Check for leftover staging folders from interrupted saves (crash, force-
 	# kill, power loss). They take disk space and the user has no way to know
@@ -212,6 +276,7 @@ func _setup_graph_view() -> void:
 	_graph = GraphViewScene.instantiate()
 	_graph.anchor_right = 1.0
 	_graph.anchor_bottom = 1.0
+	_graph.keyboard_pan_enabled = true  # arrows / WASD scroll the canvas (builder only)
 	_graph_host.add_child(_graph)
 	# Rendered from _graph_model, populated IN PLACE by _load_graph (existing journey) before this
 	# deferred call fires; empty for a new journey. Selection drives the side panel; a click while
@@ -226,7 +291,17 @@ func _setup_graph_view() -> void:
 	_graph.canvas_context_menu_requested.connect(_on_canvas_context_menu_requested)
 	_graph.node_context_menu_requested.connect(_on_node_context_menu_requested)
 	_graph.warning_provider = _compute_node_warnings  # GraphView pulls soft-validation badges each layout
+	_graph.finish_id_provider = func() -> String: return _journey_finish_node  # badges the FINISH node
+	# Drag-to-reposition a backdrop layer writes its new offset back (mapping the combined-stack index to
+	# this journey's editable list) so the placement persists.
+	_graph.backdrop_moved.connect(
+		func(idx: int, off: Vector2) -> void:
+			var ei: int = idx - _base_backdrops.size()
+			if ei >= 0 and ei < _map_backdrops.size():
+				(_map_backdrops[ei] as Dictionary)["offset"] = off
+	)
 	_graph.call_deferred("set_graph", _graph_model)
+	call_deferred("_push_backdrops")  # push any loaded backdrops once the graph exists
 
 
 # Rebuilds the graph view from _graph_model. Called after a structural change.
@@ -256,25 +331,76 @@ func _compute_node_warnings() -> Dictionary:
 			"fork":
 				_save_check_fork_graph(n, "Fork", issues)
 				_check_dead_flag_paths(n, known_flags, issues)
-			"cooldown":
-				_save_check_cooldown(n.get("data", {}), "Cooldown", issues)
-			"cutscene":
-				# Soft-only: missing video warns on the badge but does not block save.
-				_soft_check_cutscene(n.get("data", {}), issues)
 		if not issues.is_empty():
 			var details: Array = []
 			for it: Dictionary in issues:
 				details.append(str(it.get("detail", "Problem")))
 			warnings[id] = "\n".join(details)
 	# Structural (whole-graph) problems, attached to the offending node.
-	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model):
+	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model, _journey_finish_node):
 		var sid: String = str(gi.get("id", ""))
 		if sid == "" or not nodes.has(sid):
 			continue  # journey-level (e.g. no_start) — surfaced at save, not per node
 		var msg: String = _structural_warning_text(str(gi.get("kind", "")))
 		if msg != "":
 			warnings[sid] = (str(warnings[sid]) + "\n" + msg) if warnings.has(sid) else msg
+	_check_norepeat_pool_exhaustion(warnings)
 	return warnings
+
+
+# Advisory ⚠: flags no-repeat pool COPIES that are used more times on a single run-path than the pool
+# has distinct clips — past that, the run-wide dedup is exhausted and a clip repeats. Copies are pools
+# that share a clip set (so copy/paste groups them; editing one copy's clips de-groups it). Path-aware
+# (max_nodes_on_path) so copies on exclusive fork branches, which never co-occur in one run, don't
+# false-alarm. Doesn't block save — the runtime degrades gracefully to repeating.
+func _check_norepeat_pool_exhaustion(warnings: Dictionary) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var groups: Dictionary = {}  # clip-set signature -> {ids: Array[node_id], clips: int}
+	for id: String in nodes:
+		var n: Dictionary = nodes[id]
+		if str(n.get("type", "")) != "round":
+			continue
+		var data: Dictionary = n.get("data", {})
+		if str(data.get("round_type", "")) != "pool" or not bool(data.get("no_repeat", false)):
+			continue
+		var clips: Array = _distinct_pool_clip_paths(data.get("pool_entries", []))
+		var sig: String = "\n".join(clips)
+		if not groups.has(sig):
+			groups[sig] = {"ids": [], "clips": clips.size()}
+		(groups[sig]["ids"] as Array).append(id)
+	var start_id: String = str(_graph_model.get("start", ""))
+	for sig: String in groups:
+		var group: Dictionary = groups[sig]
+		var ids: Array = group["ids"]
+		var clip_count: int = int(group["clips"])
+		# One copy never exhausts (single draw); zero clips is a separate missing-source issue.
+		if ids.size() < 2 or clip_count <= 0:
+			continue
+		var targets: Dictionary = {}
+		for gid: String in ids:
+			targets[gid] = true
+		var on_path: int = JourneyGraph.max_nodes_on_path(_graph_model, start_id, targets)
+		if on_path <= clip_count:
+			continue
+		var msg: String = (
+			"No-repeat pool used %d× on one run but has only %d clip%s — some plays will repeat."
+			% [on_path, clip_count, "" if clip_count == 1 else "s"]
+		)
+		for gid: String in ids:
+			warnings[gid] = (str(warnings[gid]) + "\n" + msg) if warnings.has(gid) else msg
+
+
+# Sorted, distinct, non-empty video_paths of a pool's entries — its clip set, used to group copies
+# and to count the no-repeat clip budget (dedup is by video_path, so distinct paths = unique clips).
+func _distinct_pool_clip_paths(entries: Array) -> Array:
+	var seen: Dictionary = {}
+	for e: Variant in entries:
+		var vp: String = str((e as Dictionary).get("video_path", ""))
+		if vp != "":
+			seen[vp] = true
+	var paths: Array = seen.keys()
+	paths.sort()
+	return paths
 
 
 # Every flag name any node's data or fork choice sets in this journey (for dead-flag detection).
@@ -282,10 +408,15 @@ func _all_set_flags() -> Dictionary:
 	var flags: Dictionary = {}
 	for id: String in _graph_model.get("nodes", {}):
 		var n: Dictionary = _graph_model["nodes"][id]
-		for f: Variant in (n.get("data", {}) as Dictionary).get("set_flags", []):
+		var d: Dictionary = n.get("data", {})
+		for f: Variant in d.get("set_flags", []):
+			flags[str(f)] = true
+		for f: Variant in d.get("clear_flags", []):  # a cleared flag is part of the flag universe too
 			flags[str(f)] = true
 		for e: Dictionary in n.get("out", []):
 			for f2: Variant in e.get("set_flags", []):
+				flags[str(f2)] = true
+			for f2: Variant in e.get("clear_flags", []):
 				flags[str(f2)] = true
 	return flags
 
@@ -319,11 +450,11 @@ func _check_dead_flag_paths(node: Dictionary, known_flags: Dictionary, issues: A
 func _structural_warning_text(kind: String) -> String:
 	match kind:
 		"unreachable":
-			return "Unreachable via normal wires — if this is an EP/fail path, it needs release_jump from a main round (or a connect into the flow)."
+			return "Unreachable — nothing leads here, so this node would never play."
 		"dangling":
 			return "A connection points to a node that no longer exists."
 		"cycle":
-			return "Part of a disallowed loop — hub Back / return-to-fork is OK; round↔round cycles are not."
+			return "Part of a loop — a journey must flow forward (no cycles)."
 	return ""
 
 
@@ -346,6 +477,11 @@ func _apply_layout() -> void:
 	var animated_bg: Control = $AnimatedBackground
 	animated_bg.anchor_right = 1.0
 	animated_bg.anchor_bottom = 1.0
+	# Optional plain-black canvas: hide the animated layer (the black Background ColorRect shows through) and
+	# stop its per-frame processing — a hidden node still runs _process, so this makes "off" truly idle.
+	var bg_on: bool = SettingsService.get_builder_animated_bg_enabled()
+	animated_bg.visible = bg_on
+	animated_bg.set_process(bg_on)
 
 	_top_bar.anchor_right = 1.0
 	_top_bar.offset_left = 16
@@ -391,6 +527,7 @@ func _apply_theme() -> void:
 
 	UITheme.style_label(_title_lbl, UITheme.PURPLE_BRIGHT, 18, true)
 	_title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_title_lbl.clip_text = true  # never let the title (long in rendition mode) overflow into the buttons
 
 	UITheme.style_button(_back_btn, UITheme.MAGENTA)
 	UITheme.style_button(_save_btn, UITheme.PURPLE_BRIGHT)
@@ -398,6 +535,24 @@ func _apply_theme() -> void:
 
 	_status_lbl.add_theme_font_size_override("font_size", 13)
 	_status_lbl.visible = false
+	# The status toast FLOATS as a centered banner at the top of the GRAPH area (reparented into the graph
+	# host) rather than living in the top-bar HBox. That keeps it clear of the toolbar buttons AND confined
+	# to the canvas, so it never overlaps the side-panel editor on the right.
+	if _status_lbl.get_parent() != _graph_host:
+		_status_lbl.reparent(_graph_host)
+	_status_lbl.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	_status_lbl.offset_top = 8
+	_status_lbl.offset_bottom = 36
+	_status_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_status_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_status_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_status_lbl.z_index = 10
+	var toast_bg: StyleBoxFlat = StyleBoxFlat.new()
+	toast_bg.bg_color = Color(UITheme.PANEL_BG.r, UITheme.PANEL_BG.g, UITheme.PANEL_BG.b, 0.92)
+	toast_bg.border_color = UITheme.PURPLE_MID
+	toast_bg.set_border_width_all(1)
+	toast_bg.set_content_margin_all(6)
+	_status_lbl.add_theme_stylebox_override("normal", toast_bg)
 
 	# Side panel background
 	var sp_style: StyleBoxFlat = StyleBoxFlat.new()
@@ -426,7 +581,7 @@ func _setup_toolbar_buttons() -> void:
 	var fit_btn: Button = Button.new()
 	fit_btn.text = "⊡ FIT"
 	fit_btn.focus_mode = Control.FOCUS_NONE
-	fit_btn.tooltip_text = "Frame the whole journey in view"
+	fit_btn.tooltip_text = UITheme.wrap_tip("Frame the whole journey in view")
 	UITheme.style_button(fit_btn, UITheme.PURPLE_MID)
 	fit_btn.pressed.connect(
 		func() -> void:
@@ -439,7 +594,9 @@ func _setup_toolbar_buttons() -> void:
 	var arrange_btn: Button = Button.new()
 	arrange_btn.text = "⊞ ARRANGE"
 	arrange_btn.focus_mode = Control.FOCUS_NONE
-	arrange_btn.tooltip_text = "Auto-arrange the graph into tidy layers (Sugiyama). Undoable with Ctrl+Z."
+	arrange_btn.tooltip_text = UITheme.wrap_tip(
+		"Auto-arrange the graph into tidy layers (Sugiyama). Undoable with Ctrl+Z."
+	)
 	UITheme.style_button(arrange_btn, UITheme.PURPLE_MID)
 	arrange_btn.pressed.connect(_on_arrange_pressed)
 	_top_bar.add_child(arrange_btn)
@@ -448,7 +605,9 @@ func _setup_toolbar_buttons() -> void:
 	var img_btn: Button = Button.new()
 	img_btn.text = "📷 IMAGE"
 	img_btn.focus_mode = Control.FOCUS_NONE
-	img_btn.tooltip_text = "Export a high-res PNG of the whole journey layout (to share)"
+	img_btn.tooltip_text = UITheme.wrap_tip(
+		"Export a high-res PNG of the whole journey layout (to share)"
+	)
 	UITheme.style_button(img_btn, UITheme.PURPLE_MID)
 	img_btn.pressed.connect(_on_export_image_pressed)
 	_top_bar.add_child(img_btn)
@@ -457,9 +616,11 @@ func _setup_toolbar_buttons() -> void:
 	var audit_btn: Button = Button.new()
 	audit_btn.text = "⚖ AUDIT"
 	audit_btn.focus_mode = Control.FOCUS_NONE
-	audit_btn.tooltip_text = (
-		"Balance report: dead fork paths, unaffordable costs, unobtainable items,"
-		+ " unset flags, and rarely-visited content"
+	audit_btn.tooltip_text = UITheme.wrap_tip(
+		(
+			"Balance report: dead fork paths, unaffordable costs, unobtainable items,"
+			+ " unset flags, and rarely-visited content"
+		)
 	)
 	UITheme.style_button(audit_btn, UITheme.PURPLE_MID)
 	audit_btn.pressed.connect(_on_audit_pressed)
@@ -470,10 +631,12 @@ func _setup_toolbar_buttons() -> void:
 	_traffic_btn.text = "🔥 TRAFFIC"
 	_traffic_btn.toggle_mode = true
 	_traffic_btn.focus_mode = Control.FOCUS_NONE
-	_traffic_btn.tooltip_text = (
-		"Heatmap: tint the graph by how often simulated runs travel each path"
-		+ " (red/thick = extremely common, light green/thin = extremely rare)."
-		+ " Turns off on a structural edit."
+	_traffic_btn.tooltip_text = UITheme.wrap_tip(
+		(
+			"Heatmap: tint the graph by how often simulated runs travel each path"
+			+ " (red/thick = extremely common, light green/thin = extremely rare)."
+			+ " Turns off on a structural edit."
+		)
 	)
 	UITheme.style_button(_traffic_btn, UITheme.PURPLE_MID)
 	_traffic_btn.toggled.connect(_on_traffic_toggled)
@@ -530,7 +693,18 @@ func _on_arrange_pressed() -> void:
 			members.append((g.get("members", []) as Array).duplicate())
 		else:
 			members.append(_nodes_in_rect(g.get("rect", Rect2())))
+	# Snapshot node positions so pinned notes can follow their node through the relayout.
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var old_pos: Dictionary = {}
+	for id: String in nodes:
+		old_pos[id] = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
 	GraphLayout.auto_layout(_graph_model)
+	# Pinned notes travel with their node: shift each by the delta its node moved.
+	for c: Dictionary in _graph_model.get("comments", []):
+		var nid: String = str(c.get("node_id", ""))
+		if nid != "" and old_pos.has(nid) and nodes.has(nid):
+			var moved: Vector2 = (nodes[nid] as Dictionary).get("pos", Vector2.ZERO) - old_pos[nid]
+			c["pos"] = (c.get("pos", Vector2.ZERO) as Vector2) + moved
 	# Re-fit each (non-empty) frame around its members' new positions so nodes never end up outside it.
 	for gi: int in groups.size():
 		var ids: Array = members[gi]
@@ -576,7 +750,6 @@ func _run_audit() -> Dictionary:
 		items[item_id] = {
 			"price": int(item_data.get("price", 0)),
 			"kind": str(item_data.get("kind", "")),
-			"category": str(item_data.get("category", "modifier")),
 		}
 
 	var round_scores: Dictionary = {}
@@ -602,11 +775,10 @@ func _run_audit() -> Dictionary:
 		var fs_path: String = str(data.get("funscript_path", ""))
 		if fs_path != "" and FileAccess.file_exists(fs_path):
 			var actions: Array = JourneyData.read_funscript_actions(fs_path)
-			# A pending trim ships trimmed — score and time what will actually play.
-			var t_in: int = int(data.get("trim_start_ms", 0))
-			var t_out: int = int(data.get("trim_end_ms", 0))
-			if t_in > 0 or t_out > 0:
-				actions = JourneyData.trim_action_points(actions, t_in, t_out)
+			# Pending segments ship baked — score and time what will actually play.
+			actions = JourneyData.build_edl_action_points(
+				actions, JourneyData.normalize_segments(data)
+			)
 			round_scores[nid] = JourneyAudit.baseline_score(actions)
 			if not actions.is_empty():
 				round_lengths[nid] = int((actions[-1] as Vector2).x)
@@ -621,7 +793,6 @@ func _run_audit() -> Dictionary:
 				"round_lengths": round_lengths,
 				"round_score_bounds": round_score_bounds,
 				"round_length_bounds": round_length_bounds,
-				"unlock_pay_per_use": _journey_unlock_pay_per_use,
 			}
 		)
 	)
@@ -808,7 +979,7 @@ func _audit_finding_row(f: Dictionary, jump: Callable) -> Control:
 	# Whole-row click → jump to the node (labels ignore mouse, so the row gets it).
 	var node_id: String = str(f.get("node_id", ""))
 	row.mouse_filter = Control.MOUSE_FILTER_STOP
-	row.tooltip_text = "Click to locate this node on the canvas"
+	row.tooltip_text = UITheme.wrap_tip("Click to locate this node on the canvas")
 	row.gui_input.connect(
 		func(ev: InputEvent) -> void:
 			if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT and ev.pressed:
@@ -973,7 +1144,9 @@ func _audit_endings_bar(endings: Array) -> Control:
 		seg.add_theme_stylebox_override("panel", seg_style)
 		seg.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		seg.size_flags_stretch_ratio = maxf(0.02, float(e["pct"]))
-		seg.tooltip_text = "%s — %.1f%%" % [_audit_node_label(str(e["node_id"])), float(e["pct"])]
+		seg.tooltip_text = UITheme.wrap_tip(
+			"%s — %.1f%%" % [_audit_node_label(str(e["node_id"])), float(e["pct"])]
+		)
 		var lbl: Label = Label.new()
 		lbl.text = "%s  %.0f%%" % [_audit_node_label(str(e["node_id"])), float(e["pct"])]
 		lbl.clip_text = true
@@ -1004,7 +1177,7 @@ func _audit_checkpoint_bar(cp_bar: Dictionary) -> Control:
 		if i > 0:
 			var tick: Label = Label.new()
 			tick.text = "◆"
-			tick.tooltip_text = "Checkpoint"
+			tick.tooltip_text = UITheme.wrap_tip("Checkpoint")
 			UITheme.style_label(tick, UITheme.CYAN, 11, false)
 			bar.add_child(tick)
 		var seg: Dictionary = segments[i]
@@ -1021,7 +1194,9 @@ func _audit_checkpoint_bar(cp_bar: Dictionary) -> Control:
 		block.add_theme_stylebox_override("panel", seg_style)
 		block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		block.size_flags_stretch_ratio = maxf(0.02, float(ms))
-		block.tooltip_text = "%d rounds · %s" % [int(seg["rounds"]), _audit_mmss(ms)]
+		block.tooltip_text = UITheme.wrap_tip(
+			"%d rounds · %s" % [int(seg["rounds"]), _audit_mmss(ms)]
+		)
 		bar.add_child(block)
 	box.add_child(bar)
 	return box
@@ -1071,8 +1246,12 @@ func _show_canvas_context_menu(world_pos: Vector2) -> void:
 
 	# Add-node actions — each drops a fresh node centred on the click.
 	for spec: Array in [
-		["＋ ROUND", "round"], ["＋ SHOP", "shop"], ["＋ STORYBOARD", "storyboard"],
-		["＋ FORK", "fork"], ["＋ COOLDOWN", "cooldown"], ["＋ CUTSCENE", "cutscene"]
+		["＋ ROUND", "round"],
+		["＋ SHOP", "shop"],
+		["＋ STORYBOARD", "storyboard"],
+		["＋ FORK", "fork"],
+		["＋ CHECKPOINT", "checkpoint"],
+		["＋ LOOP", "loop"],
 	]:
 		var t: String = spec[1]
 		var node_b: Button = _ctx_menu_button(
@@ -1080,7 +1259,10 @@ func _show_canvas_context_menu(world_pos: Vector2) -> void:
 			UITheme.PURPLE_BRIGHT,
 			func() -> void:
 				popup.queue_free()
-				_create_graph_node(t, world_pos)
+				if t == "loop":
+					_create_loop_pair(world_pos)  # a linked Loop Start + Loop End
+				else:
+					_create_graph_node(t, world_pos)
 		)
 		vbox.add_child(node_b)
 
@@ -1159,6 +1341,41 @@ func _show_node_context_menu(node_id: String) -> void:
 	)
 	vbox.add_child(start_b)
 
+	# FINISH (aftercare-sequence entry) — only a round or storyboard can be the entry.
+	var node_type: String = str((_graph_model["nodes"][node_id] as Dictionary).get("type", ""))
+	if node_type == "round" or node_type == "storyboard":
+		var already_finish: bool = _journey_finish_node == node_id
+		var finish_b: Button = _ctx_menu_button(
+			"✓ FINISH NODE  (clear)" if already_finish else "🏁 SET AS FINISH",
+			UITheme.MAGENTA,
+			func() -> void:
+				popup.queue_free()
+				_toggle_node_as_finish(node_id)
+		)
+		vbox.add_child(finish_b)
+
+	# Extract → rendition (base journeys, non-start node); Merge → base (an overlay node in rendition mode).
+	if not _rendition_mode and not already_start:
+		var extract_b: Button = _ctx_menu_button(
+			"⑂ EXTRACT TO RENDITION",
+			UITheme.CYAN,
+			func() -> void:
+				popup.queue_free()
+				if not _selected_graph_node_ids.has(node_id):
+					_graph.select_graph_node(node_id)
+				_begin_extract_to_rendition()
+		)
+		vbox.add_child(extract_b)
+	elif _rendition_mode and not _rendition_parent_ids.has(node_id):
+		var merge_b: Button = _ctx_menu_button(
+			"⤺ MERGE INTO BASE",
+			UITheme.CYAN,
+			func() -> void:
+				popup.queue_free()
+				_begin_merge_to_base(node_id)
+		)
+		vbox.add_child(merge_b)
+
 	popup.reset_size()
 	popup.position = Vector2i(get_global_mouse_position())
 	popup.popup()
@@ -1173,6 +1390,24 @@ func _set_node_as_start(node_id: String) -> void:
 	_graph_model["start"] = node_id
 	_refresh_graph()
 	_show_status("Start set — the journey now begins at this node.", false)
+
+
+# Sets (or clears, if already set) `node_id` as the FINISH aftercare-sequence entry. Setting also flips
+# on the journey's "allow finish" so a right-click is all it takes for the button to appear. Not undoable
+# — it's a journey setting (like the map toggle / the finish dropdown), not a graph-structure change. The
+# refresh re-badges the node and re-evaluates reachability (the finish subtree is exempt from unreachable).
+func _toggle_node_as_finish(node_id: String) -> void:
+	if _journey_finish_node == node_id:
+		_journey_finish_node = ""
+		_refresh_graph()
+		_show_status("Finish node cleared.", false)
+	else:
+		_journey_finish_node = node_id
+		_journey_allow_finish = true
+		_refresh_graph()
+		_show_status(
+			"Finish set — the FINISH button plays the aftercare sequence from here.", false
+		)
 
 
 # One left-aligned, full-width button for the canvas context menu.
@@ -1239,6 +1474,17 @@ func _delete_comment(idx: int) -> void:
 	_selected_comment_idx = -1
 	_refresh_graph()
 	_side_renderer.show_journey_info_panel()
+
+
+# Unpin a note from its node — it stops following the node and stays where it is.
+func _unpin_comment(idx: int) -> void:
+	var comments: Array = _graph_model.get("comments", [])
+	if idx < 0 or idx >= comments.size():
+		return
+	_push_undo()
+	(comments[idx] as Dictionary).erase("node_id")
+	_refresh_graph()
+	_side_renderer.show_comment_editor(idx)  # re-render the editor (now with the pin hint)
 
 
 # ── Group frames ─────────────────────────────────────────────────────────────
@@ -1684,6 +1930,7 @@ func _save_capture_with_dialog(result: Dictionary) -> void:
 	dlg.use_native_dialog = true
 	dlg.add_filter("*." + ext, ext.to_upper() + " image")
 	dlg.current_file = "%s_layout.%s" % [base, ext]
+	SettingsService.remember_browse_dir(dlg)  # reopen where the last picker left off (keeps current_file)
 	add_child(dlg)
 	dlg.file_selected.connect(
 		func(path: String) -> void:
@@ -1758,15 +2005,13 @@ func _show_shortcuts_overlay() -> void:
 				["Ctrl + 2", "Add a shop"],
 				["Ctrl + 3", "Add a storyboard"],
 				["Ctrl + 4", "Add a fork"],
-				["Ctrl + 5", "Add a cooldown"],
-				["Ctrl + 6", "Add a cutscene"],
 			]
 		],
 		[
 			"RIGHT-CLICK",
 			[
 				["Right-click empty space", "Menu: add a node / note / group at the cursor"],
-				["Right-click a node", "Menu: set it as the journey's start"],
+				["Right-click a node", "Menu: set it as the journey's start / FINISH node"],
 			]
 		],
 		[
@@ -1785,7 +2030,7 @@ func _show_shortcuts_overlay() -> void:
 			[
 				[
 					"Drag a node's bottom handle → a node",
-					"Connect them (line turns red if it would softlock)"
+					"Connect them (line turns red if it would loop)"
 				],
 				["Select  →  🔗 Connect  →  click", "Same, button-driven (the accessible fallback)"],
 			]
@@ -1793,7 +2038,8 @@ func _show_shortcuts_overlay() -> void:
 		[
 			"NAVIGATE",
 			[
-				["Middle-drag", "Pan the graph"],
+				["Arrow keys / WASD", "Pan the graph"],
+				["Middle-drag  or  Space + drag", "Pan the graph"],
 				["Mouse wheel", "Zoom in / out"],
 				["⊡ Fit button", "Frame the whole journey"],
 			]
@@ -1887,20 +2133,13 @@ func _input(event: InputEvent) -> void:
 				if not _save_btn.disabled:
 					_on_save_pressed()
 				get_viewport().set_input_as_handled()
-			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6:
+			KEY_1, KEY_2, KEY_3, KEY_4:
 				# Quick-create a node by type, placed near the current selection. Stand down inside a
 				# text field (the author may be typing, and Ctrl+digit can be a native shortcut).
 				if _focus_is_text_field():
 					return
 				_create_graph_node(
-					{
-						KEY_1: "round",
-						KEY_2: "shop",
-						KEY_3: "storyboard",
-						KEY_4: "fork",
-						KEY_5: "cooldown",
-						KEY_6: "cutscene",
-					}[k.keycode]
+					{KEY_1: "round", KEY_2: "shop", KEY_3: "storyboard", KEY_4: "fork"}[k.keycode]
 				)
 				get_viewport().set_input_as_handled()
 			KEY_Z:
@@ -1954,6 +2193,9 @@ func _input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 			elif not _selected_graph_node_ids.is_empty():
 				_delete_selected_nodes()
+				get_viewport().set_input_as_handled()
+			elif not _graph.get_selected_comments().is_empty():
+				_delete_marquee_comments()  # a notes-only marquee selection
 				get_viewport().set_input_as_handled()
 		KEY_ESCAPE:
 			# Cancel an in-progress edge wire, else drop the node selection. Only consume the event
@@ -2010,48 +2252,6 @@ func _open_journey_folder() -> void:
 	OS.shell_open(media_abs if DirAccess.dir_exists_absolute(media_abs) else abs)
 
 
-# Backfills empty funscript / Restim kit / vib slots on every round (and pool
-# entry) from siblings next to each video path. Options slot labels drive tagged
-# routing. One undo step when anything changes.
-func _scan_attach_funscripts() -> void:
-	var labels: PackedStringArray = ImportScanner.current_restim_labels()
-	_push_undo()
-	var filled: int = 0
-	var nodes: Dictionary = _graph_model.get("nodes", {})
-	for nid: String in nodes:
-		var node: Dictionary = nodes[nid]
-		if str(node.get("type", "")) != "round":
-			continue
-		var data: Dictionary = node.get("data", {})
-		var video: String = str(data.get("video_path", ""))
-		if video != "":
-			if ImportScanner.autofill_round_siblings(data, video, labels[0], labels[1]):
-				filled += 1
-		var entries: Array = data.get("pool_entries", []) as Array
-		for entry_v: Variant in entries:
-			if not (entry_v is Dictionary):
-				continue
-			var entry: Dictionary = entry_v
-			var ev: String = str(entry.get("video_path", ""))
-			if ev == "":
-				continue
-			if ImportScanner.autofill_round_siblings(entry, ev, labels[0], labels[1]):
-				filled += 1
-	if filled <= 0:
-		if not _undo_stack.is_empty():
-			_undo_stack.pop_back()
-		_show_status("No new scripts found.", false)
-		return
-	_refresh_graph()
-	if _selected_graph_node_id != "":
-		_side_renderer.show_graph_node_editor(_selected_graph_node_id)
-	else:
-		_side_renderer.show_journey_info_panel()
-	_show_status(
-		"Attached scripts on %d round%s." % [filled, "" if filled == 1 else "s"], false
-	)
-
-
 # ── Bulk import (drop videos / a folder on the canvas → chained round nodes) ──
 
 const BULK_IMPORT_ROW: float = 140.0  # vertical spacing between imported round nodes
@@ -2087,6 +2287,12 @@ func _on_viewport_files_dropped(files: PackedStringArray) -> void:
 		_handle_side_panel_drop(files)
 		return
 
+	# A per-field DropZone under the cursor (e.g. a custom-item image zone in a modal over the canvas)
+	# owns the drop — it sets its own value, so the builder stays out of it rather than bulk-importing
+	# or hijacking the journey cover.
+	if _drop_zone_under_cursor():
+		return
+
 	# Canvas drop: bulk round import, else accept an image as the journey cover.
 	if not _bulk_import_graph_rounds(files):
 		for f: String in files:
@@ -2100,6 +2306,11 @@ func _on_viewport_files_dropped(files: PackedStringArray) -> void:
 # them into the node's funscript / axis / vib slots by suffix (the per-field DropZones only take one
 # file each). Otherwise, with nothing selected, accept a dropped image as the journey cover.
 func _handle_side_panel_drop(files: PackedStringArray) -> void:
+	# A ghosted base round is NEVER modified — its channel-overlay editor's own drop zone already routed
+	# this drop to slot-fills. Writing the scripts into the base node here would make its channels wrongly
+	# read as "in base" (and, worse, alter the locked base in memory).
+	if _rendition_parent_ids.has(_selected_graph_node_id):
+		return
 	var node: Dictionary = (_graph_model.get("nodes", {}) as Dictionary).get(
 		_selected_graph_node_id, {}
 	)
@@ -2110,41 +2321,52 @@ func _handle_side_panel_drop(files: PackedStringArray) -> void:
 				fs_files.append(f)
 		if fs_files.size() > 1:
 			var data: Dictionary = node.get("data", {})
-			JourneyData.ensure_restim_axis_scripts(data)
+			if not data.has("axis_scripts"):
+				data["axis_scripts"] = {}
 			if not data.has("vib_scripts"):
 				data["vib_scripts"] = {}
+			if not data.has("estim_scripts"):
+				data["estim_scripts"] = {}
 			for f: String in fs_files:
 				var vib_ch: String = ImportScanner.detect_vib_channel(f)
+				var estim_ax: String = ImportScanner.detect_estim_axis(f)
 				if vib_ch != "":
 					data["vib_scripts"][vib_ch] = f
+				elif estim_ax != "":
+					data["estim_scripts"][estim_ax] = f
 				else:
-					var slotted: Dictionary = ImportScanner.detect_funscript_slotted_axis(f)
-					if slotted.is_empty():
-						var stem_low: String = f.get_file().get_basename().to_lower()
-						if RestimAxisKit.has_kit_axis_tag(stem_low):
-							pass
-						else:
-							data["funscript_path"] = f
-							if str(data.get("name", "")).strip_edges() == "":
-								data["name"] = f.get_file().get_basename()
+					var axis: String = ImportScanner.detect_funscript_axis(f)
+					if axis == "L0":
+						data["funscript_path"] = f
+						if str(data.get("name", "")).strip_edges() == "":
+							data["name"] = f.get_file().get_basename()
 					else:
-						var slot: String = str(slotted["slot"])
-						var axis: String = str(slotted["axis"])
-						(data["restim_axis_scripts"][slot] as Dictionary)[axis] = f
-						if slot == "shared":
-							data["axis_scripts"][axis] = f
+						data["axis_scripts"][axis] = f
 			# Rebuild the canvas + side panel (deferred, so it lands after the per-field DropZones have
 			# also processed this same drop) to show the routed paths.
 			_graph.call_deferred("select_graph_node", _selected_graph_node_id)
 			return
 
-	# Nothing selected → a dropped image becomes the journey cover.
-	if _selected_graph_node_id == "":
+	# Nothing selected → a dropped image becomes the journey cover, unless a per-field DropZone under
+	# the cursor owns the drop (it sets its own value; don't also hijack the cover).
+	if _selected_graph_node_id == "" and not _drop_zone_under_cursor():
 		for f: String in files:
 			if f.get_extension().to_lower() in JourneyData.IMAGE_EXTENSIONS:
 				_cover_path = f
 				_update_cover_preview()
 				return
+
+
+# True when a visible per-field DropZone sits under the cursor. Those zones set their own value from
+# an OS file drop (DropZone._on_viewport_files_dropped), so the builder must not also treat the same
+# drop as a canvas / journey-cover action. Zones join the "file_drop_zone" group in DropZone._ready.
+func _drop_zone_under_cursor() -> bool:
+	var mouse: Vector2 = get_viewport().get_mouse_position()
+	for z: Node in get_tree().get_nodes_in_group("file_drop_zone"):
+		var ctrl: Control = z as Control
+		if ctrl != null and ctrl.is_visible_in_tree() and ctrl.get_global_rect().has_point(mouse):
+			return true
+	return false
 
 
 # Bulk-imports rounds from dropped files: ImportScanner groups them into round data (a video + its
@@ -2201,19 +2423,14 @@ func _bulk_import_graph_rounds(files: PackedStringArray) -> bool:
 	return true
 
 
-# Top-left for the imported round column: just right of the existing graph (so the chain doesn't
-# overlap), or the origin for an empty graph.
+# Top-left for the imported round column: near the CENTRE OF THE CURRENT VIEW, so a new import
+# lands where the author is looking instead of at the far edge of the whole graph (which meant
+# zooming out to find it every time). Offset up-left so the chain grows down into view. An empty
+# graph starts at the origin for a tidy first layout.
 func _bulk_import_origin() -> Vector2:
-	var nodes: Dictionary = _graph_model.get("nodes", {})
-	if nodes.is_empty():
+	if _graph_model.get("nodes", {}).is_empty():
 		return Vector2.ZERO
-	var max_x: float = -INF
-	var min_y: float = INF
-	for id: String in nodes:
-		var p: Vector2 = (nodes[id] as Dictionary).get("pos", Vector2.ZERO)
-		max_x = maxf(max_x, p.x)
-		min_y = minf(min_y, p.y)
-	return Vector2(max_x + BULK_IMPORT_COL_GAP, min_y)
+	return GraphLayout.snap(_graph.view_center_world() + Vector2(-160.0, -80.0))
 
 
 # ---------------------------------------------------------------------------
@@ -2227,6 +2444,7 @@ func _on_cover_pressed() -> void:
 	dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	dialog.filters = ["*.png,*.jpg,*.jpeg,*.webp ; Image Files"]
 	dialog.title = "Select Cover Image"
+	SettingsService.remember_browse_dir(dialog)  # reopen where the last picker left off
 	add_child(dialog)
 	dialog.popup_centered(Vector2i(900, 600))
 	dialog.file_selected.connect(
@@ -2236,6 +2454,96 @@ func _on_cover_pressed() -> void:
 			dialog.queue_free()
 	)
 	dialog.canceled.connect(func() -> void: dialog.queue_free())
+
+
+# Deep-copies a backdrop list, normalizing each entry to {path, offset:Vector2, scale, opacity} so the
+# editor can mutate it without aliasing the scanner's dict.
+func _dup_backdrops(src: Array) -> Array:
+	var out: Array = []
+	for e: Variant in src:
+		var d: Dictionary = e
+		(
+			out
+			. append(
+				{
+					"path": str(d.get("path", "")),
+					"offset": d.get("offset", Vector2.ZERO),
+					"scale": float(d.get("scale", 1.0)),
+					"opacity": float(d.get("opacity", 0.6)),
+					"rotation": float(d.get("rotation", 0.0)),
+				}
+			)
+		)
+	return out
+
+
+# Builds the combined backdrop stack — locked base context first (bottom), then this journey's own editable
+# layers on top — with textures loaded, and pushes it to the graph. Called on load and on any set change.
+func _push_backdrops() -> void:
+	if not is_instance_valid(_graph):
+		return
+	var combined: Array = []
+	for b: Dictionary in _base_backdrops:
+		combined.append(_backdrop_render_entry(b))
+	for b: Dictionary in _map_backdrops:
+		combined.append(_backdrop_render_entry(b))
+	_graph.set_backdrops(combined)
+
+
+# One {texture, offset, scale, opacity} render entry for a stored {path, …} backdrop (texture loaded).
+func _backdrop_render_entry(b: Dictionary) -> Dictionary:
+	return {
+		"texture": _backdrop_texture(str(b.get("path", ""))),
+		"offset": b.get("offset", Vector2.ZERO),
+		"scale": float(b.get("scale", 1.0)),
+		"opacity": float(b.get("opacity", 0.6)),
+		"rotation": float(b.get("rotation", 0.0)),
+	}
+
+
+# Loads (and caches by path) a backdrop image as a texture — shared by the graph render and the side-panel
+# thumbnails so a big image is decoded once. Returns null for a blank/unreadable path.
+func _backdrop_texture(path: String) -> Texture2D:
+	if path == "":
+		return null
+	if _backdrop_tex_cache.has(path):
+		return _backdrop_tex_cache[path]
+	var img: Image = JourneyData.load_image_smart(path)
+	if img == null:
+		return null
+	var tex: ImageTexture = ImageTexture.create_from_image(img)
+	_backdrop_tex_cache[path] = tex
+	return tex
+
+
+# Reorders an editable backdrop layer in the z-stack: swaps layer `i` with its neighbour `i + dir` (+1 =
+# toward the front / drawn later, -1 = toward the back). Clears any active reposition (indices shift) and
+# re-pushes so the draw order updates. The side panel rebuilds after to refresh the cards.
+func _move_backdrop(i: int, dir: int) -> void:
+	var j: int = i + dir
+	if i < 0 or i >= _map_backdrops.size() or j < 0 or j >= _map_backdrops.size():
+		return
+	var tmp: Variant = _map_backdrops[i]
+	_map_backdrops[i] = _map_backdrops[j]
+	_map_backdrops[j] = tmp
+	_backdrop_reposition_idx = -1
+	if is_instance_valid(_graph):
+		_graph.set_backdrop_reposition(-1)
+	_push_backdrops()
+
+
+# Live placement push for editable layer `i` (slider edits) — maps to its index in the combined stack
+# (base layers sit before it), reusing the loaded texture so a big image isn't reloaded each tick.
+func _push_backdrop_transform(i: int) -> void:
+	if is_instance_valid(_graph) and i >= 0 and i < _map_backdrops.size():
+		var b: Dictionary = _map_backdrops[i]
+		_graph.set_backdrop_transform(
+			_base_backdrops.size() + i,
+			b["offset"],
+			float(b["scale"]),
+			float(b["opacity"]),
+			float(b.get("rotation", 0.0))
+		)
 
 
 # Loads the cover image from _cover_path into _cover_texture. The journey-info
@@ -2264,14 +2572,36 @@ func _update_cover_preview() -> void:
 func _load_graph(journey: Dictionary) -> void:
 	var parsed: Dictionary = JourneyData.parse_journey(journey)
 	_journey_name = parsed["name"]
+	# Carry the existing id forward so saving an edited journey keeps its identity. Blank for a
+	# journey written before ids existed - it gets one on this save.
+	_journey_id = str(journey.get("journey_id", ""))
 	_journey_author = parsed["author"]
 	_journey_desc = parsed["description"]
 	_journey_difficulty_idx = parsed["difficulty_idx"]
 	_journey_tags = (parsed.get("tags", []) as Array).duplicate()
 	_journey_map_enabled = bool(parsed.get("map_enabled", true))
+	_journey_show_fork_counts = bool(parsed.get("show_fork_counts", true))
+	_journey_show_loops_on_map = bool(parsed.get("show_loops_on_map", false))
+	# Map backdrops: the scanner resolved each layer's image (media/<file>) + placement into map_backdrops.
+	_backdrop_tex_cache.clear()
+	_map_backdrops = _dup_backdrops(journey.get("map_backdrops", []))
+	_base_backdrops = []  # a base journey has no locked context; renditions set this in their start hook
+	_push_backdrops()  # no-op until the graph exists; _setup_graph_view re-pushes on first load
+	_journey_shown_counters = (parsed.get("shown_counters", []) as Array).duplicate()
+	# Custom journey items come from the scanner's resolved `items` on the raw journey dict —
+	# NOT from `parsed`, whose "items" key is JourneyData.parse_journey's NODE SEQUENCE (a name
+	# collision). Reading `parsed["items"]` here loaded the round/shop nodes as blank custom items.
+	_journey_items = (journey.get("items", []) as Array).duplicate(true)
+	# Cast roster — from the scanner's resolved `characters` (absolute portrait paths for display), same
+	# reasoning as items above (`parsed["characters"]` would be the raw pass-through, unresolved).
+	_journey_characters = (journey.get("characters", []) as Array).duplicate(true)
 	_journey_map_fog = bool(parsed.get("map_fog", false))
 	_journey_map_fog_reveal = int(parsed.get("map_fog_reveal", 1))
-	_journey_unlock_pay_per_use = bool(parsed.get("unlock_pay_per_use", false))
+	_journey_auto_advance_enabled = bool(parsed.get("auto_advance_enabled", false))
+	_journey_auto_advance_storyboard_secs = int(parsed.get("auto_advance_storyboard_secs", 20))
+	_journey_auto_advance_fork_secs = int(parsed.get("auto_advance_fork_secs", 45))
+	_journey_allow_finish = bool(parsed.get("allow_finish", false))
+	_journey_finish_node = str(parsed.get("finish_node", ""))
 	if (parsed["cover_path"] as String) != "":
 		_cover_path = parsed["cover_path"]
 		_update_cover_preview()
@@ -2288,6 +2618,121 @@ func _load_graph(journey: Dictionary) -> void:
 			(loaded["nodes"][id] as Dictionary)["pos"] = tree_pos[id]
 	_graph_model.clear()
 	_graph_model.merge(loaded, true)
+
+
+# Enters rendition (overlay) mode: loads the base graph with all of its nodes GHOSTED (read-only), then
+# resets the journey-level identity so the overlay is its own artifact (its own name/id/folder). A save
+# produces an overlay delta — not a re-save of the base — and the base's files are never touched.
+# `rendition_over` (set when overlaying ANOTHER rendition) swaps the ghosted graph for base ⊕ the ancestor
+# chain and re-targets the ParentId, enabling sibling-dependency stacks; empty = overlay the base directly.
+func _enter_rendition_mode(base: Dictionary) -> void:
+	_rendition_mode = true
+	_load_graph(base)  # base graph + meta (identity/graph overridden below as needed)
+	var parent_title: String = str(base.get("title", "the base"))
+	if not rendition_over.is_empty():
+		# Ghost the COMPOSED base ⊕ ancestor-chain graph, and target that ancestor rendition's id. Mutate
+		# _graph_model IN PLACE — the deferred set_graph already captured this dict's reference, so a
+		# reassignment here would leave the canvas rendering the pre-composed base.
+		_graph_model.clear()
+		_graph_model["start"] = str(rendition_over.get("start", ""))
+		_graph_model["nodes"] = (rendition_over.get("nodes", {}) as Dictionary).duplicate(true)
+		_rendition_parent_id = str(rendition_over.get("parent_id", ""))
+		parent_title = str(rendition_over.get("parent_name", parent_title))
+	else:
+		_rendition_parent_id = _journey_id  # the base's id becomes the overlay's ParentId
+	_rendition_parent_folder = str(base.get("folder", ""))
+	_rendition_parent_journey = base.duplicate(true)  # kept so "merge into base" can reload it
+	_rendition_parent_ids = {}
+	_rendition_slot_fills = []
+	for id: String in _graph_model.get("nodes", {}):
+		_rendition_parent_ids[id] = true
+	# The overlay is a NEW artifact — never adopt the base's identity, description, cover, or save location.
+	_journey_id = ""
+	_journey_name = ""
+	_journey_desc = ""
+	_cover_path = ""
+	# A rendition starts with NO editable backdrops of its own; the base's load as LOCKED context (drawn
+	# beneath, view-only, never re-saved). A rendition-on-rendition uses the composed ancestor chain's set.
+	_map_backdrops = []
+	var base_bd: Array = base.get("map_backdrops", [])
+	if not rendition_over.is_empty():
+		base_bd = rendition_over.get("map_backdrops", base_bd)
+	_base_backdrops = _dup_backdrops(base_bd)
+	_original_journey_folder = ""
+	_graph.set_ghost_nodes(_rendition_parent_ids)  # the deferred set_graph reads this
+	_push_backdrops()
+	_show_rendition_banner(parent_title)
+
+
+# Loads an existing rendition's delta ON TOP of the just-ghosted base (call right after
+# _enter_rendition_mode) so it can be edited and re-saved in place: injects its new nodes, rebuilds its
+# anchor edges (marked `_anchor` on the base nodes), repopulates its slot-fills, and adopts its identity
+# + folder so a save OVERWRITES it rather than minting a new overlay.
+func _load_rendition_delta(summary: Dictionary) -> void:
+	var folder: String = str(summary.get("folder", ""))
+	var delta: Dictionary = JourneyScanner.load_rendition_delta(folder)  # paths resolved to the rendition folder
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	# New overlay nodes (their canvas positions were saved in the Nodes block).
+	for id: String in delta.get("nodes", {}):
+		nodes[id] = delta["nodes"][id]
+	# Anchors → `_anchor`-marked edges on the ghosted base nodes (re-extracted on save). An ending-extend
+	# is appended; a fork open-slot fill (has `slot`) re-fills that exact base choice in place so it lines
+	# up with the still-blank slot loaded from the base.
+	for a: Dictionary in delta.get("anchors", []):
+		var anchor_id: String = str(a.get("anchor", ""))
+		if not nodes.has(anchor_id):
+			continue
+		var anchor_node: Dictionary = nodes[anchor_id]
+		if not anchor_node.has("out"):
+			anchor_node["out"] = []
+		var anchor_out: Array = anchor_node["out"]
+		var edge: Dictionary = (a.get("edge", {}) as Dictionary).duplicate(true)
+		edge["_anchor"] = true
+		if a.has("slot") and int(a["slot"]) < anchor_out.size():
+			var slot: int = int(a["slot"])
+			var choice: Dictionary = anchor_out[slot]  # the base's own blank choice — keep its label/art
+			choice["to"] = str(edge.get("to", ""))
+			choice["_anchor"] = true
+			choice["_slot"] = slot
+		else:
+			anchor_out.append(edge)
+	# Channel overlays — paths are absolute after the resolve; the dialog edits them, save re-pools them.
+	_rendition_slot_fills = (delta.get("slot_fills", []) as Array).duplicate(true)
+	# Adopt the rendition's own identity + folder so a re-save overwrites it in place.
+	_journey_id = str(summary.get("journey_id", ""))
+	_journey_name = str(summary.get("name", ""))
+	_journey_author = str(summary.get("author", ""))
+	_journey_desc = str(summary.get("description", ""))
+	_original_journey_folder = folder
+	# Load the rendition's own cover (if it has one) so a re-save preserves it.
+	var rc: String = str(summary.get("cover_path", ""))
+	if rc != "":
+		_cover_path = rc
+		_update_cover_preview()
+	# The rendition's OWN backdrop layers (base layers stay in _base_backdrops as locked context).
+	_map_backdrops = _dup_backdrops(delta.get("map_backdrops", []))
+	_push_backdrops()
+	_refresh_graph()
+
+
+# Marks rendition mode in the existing TopBar (rather than a floating banner, which overlapped the
+# toolbar): retints the title. Channel overlays are now added inline — click a ghosted base round to open
+# its channel-overlay editor and drop axis/vibe scripts — so there's no separate toolbar button.
+func _show_rendition_banner(base_title: String) -> void:
+	_title_lbl.text = "◆ RENDITION — overlaying %s   (dim = locked base)" % base_title
+	_title_lbl.add_theme_color_override("font_color", UITheme.CYAN)
+
+
+# Temporary guard while overlay authoring is built up in steps: block the normal save so it can never
+# re-write the base as a journey. Replaced by the real delta save in a later slice.
+func _show_rendition_save_todo() -> void:
+	var d: AcceptDialog = AcceptDialog.new()
+	d.title = "Rendition Saving — Coming Soon"
+	d.dialog_text = "Overlay authoring is being built in steps. Saving a rendition isn't wired up yet, so nothing was written — your base journey is untouched."
+	d.confirmed.connect(d.queue_free)
+	d.canceled.connect(d.queue_free)
+	add_child(d)
+	d.popup_centered()
 
 
 # Graph editor: the selection set changed (click / ctrl/shift-click / marquee / clear / programmatic).
@@ -2365,20 +2810,101 @@ func _create_graph_node(type: String, at_world: Variant = null) -> void:
 	_graph.select_graph_node(node_id)
 
 
-# Graph editor: delete a node and every edge pointing at it. Re-homes the start if needed.
+# Graph editor: drop a linked Loop pair — a Loop Start marker with a Loop End below it, pre-wired
+# start → end and with the End's back-jump (loop_to) auto-set to the Start (that pairing IS the loop, so
+# there's no "loop back to…" picker). The End seeds one "after 3 loops" exit so the loop is valid and
+# legible immediately; the author then inserts body nodes between the two markers.
+func _create_loop_pair(at_world: Variant = null) -> void:
+	_push_undo()
+	if not _graph_model.has("nodes"):
+		_graph_model["nodes"] = {}
+	var nodes: Dictionary = _graph_model["nodes"]
+
+	var start_tpl: Dictionary = JourneyData.new_item("loop_start")
+	var end_tpl: Dictionary = JourneyData.new_item("loop_end")
+	var start_id: String = str(start_tpl["node_id"])
+	var end_id: String = str(end_tpl["node_id"])
+
+	var start_data: Dictionary = start_tpl.duplicate(true)
+	start_data.erase("type")
+	start_data.erase("node_id")
+	var end_data: Dictionary = end_tpl.duplicate(true)
+	end_data.erase("type")
+	end_data.erase("node_id")
+	end_data["loop_to"] = start_id  # the pairing — the End replays back to this Start
+	end_data["loop_conditions"] = [{"kind": "repeats", "count": 3}]  # a valid, legible default exit
+
+	# Placement: Start at the click (or right of the selection), End one node-drop below it.
+	var start_pos: Vector2 = Vector2.ZERO
+	if at_world is Vector2:
+		start_pos = (
+			(at_world as Vector2) - Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT) * 0.5
+		)
+	elif _selected_graph_node_id != "" and nodes.has(_selected_graph_node_id):
+		start_pos = (
+			(nodes[_selected_graph_node_id] as Dictionary).get("pos", Vector2.ZERO)
+			+ Vector2(240.0, 0.0)
+		)
+	var end_pos: Vector2 = start_pos + Vector2(0.0, 200.0)
+
+	nodes[start_id] = {
+		"type": "loop_start",
+		"data": start_data,
+		"pos": GraphLayout.snap(start_pos),
+		"out": [{"to": end_id}],
+	}
+	nodes[end_id] = {
+		"type": "loop_end",
+		"data": end_data,
+		"pos": GraphLayout.snap(end_pos),
+		"out": [],
+	}
+	if str(_graph_model.get("start", "")) == "":
+		_graph_model["start"] = start_id
+	_graph.select_graph_node(end_id)  # open the End's editor — its exit rules live there
+
+
+# The other half of a Loop pair for a Loop Start / Loop End (or "" for any other node). Deleting one
+# marker takes its partner with it — a lone marker is invalid (a Start with no End, or an End with no
+# Start), so the two always live and die together.
+func _loop_pair_partner(node_id: String) -> String:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var node: Dictionary = nodes.get(node_id, {})
+	match str(node.get("type", "")):
+		"loop_end":
+			var start: String = str((node.get("data", {}) as Dictionary).get("loop_to", ""))
+			return start if nodes.has(start) else ""
+		"loop_start":
+			for nid: String in nodes:
+				var n: Dictionary = nodes[nid]
+				if (
+					str(n.get("type", "")) == "loop_end"
+					and str((n.get("data", {}) as Dictionary).get("loop_to", "")) == node_id
+				):
+					return str(nid)
+	return ""
+
+
+# Graph editor: delete a node and every edge pointing at it. Re-homes the start if needed. A Loop marker
+# takes its paired marker with it (a lone Loop Start / End is invalid).
 func _delete_graph_node(node_id: String) -> void:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
 	if not nodes.has(node_id):
 		return
 	_push_undo()
-	nodes.erase(node_id)
+	var doomed: Dictionary = {node_id: true}
+	var partner: String = _loop_pair_partner(node_id)
+	if partner != "":
+		doomed[partner] = true
+	for id: String in doomed:
+		nodes.erase(id)
 	for id: String in nodes:
 		var kept: Array = []
 		for e: Dictionary in (nodes[id] as Dictionary).get("out", []):
-			if str(e.get("to", "")) != node_id:
+			if not doomed.has(str(e.get("to", ""))):
 				kept.append(e)
 		(nodes[id] as Dictionary)["out"] = kept
-	if str(_graph_model.get("start", "")) == node_id:
+	if doomed.has(str(_graph_model.get("start", ""))):
 		_graph_model["start"] = (nodes.keys()[0] as String) if not nodes.is_empty() else ""
 	_deselect_node()
 
@@ -2396,7 +2922,16 @@ func _delete_selected_nodes() -> void:
 		return
 	_push_undo()
 	var nodes: Dictionary = _graph_model.get("nodes", {})
-	var doomed: Array = _selected_graph_node_ids.duplicate()
+	# Never delete a ghosted base node in rendition mode (they can't be selected either — belt-and-braces).
+	var doomed: Array = _selected_graph_node_ids.filter(
+		func(nid: String) -> bool: return not _rendition_parent_ids.has(nid)
+	)
+	# A Loop marker can't survive without its partner — pull the other half in too (dedup against the
+	# selection, e.g. when both halves were already marquee-selected).
+	for nid: String in doomed.duplicate():
+		var partner: String = _loop_pair_partner(nid)
+		if partner != "" and partner not in doomed:
+			doomed.append(partner)
 	for nid: String in doomed:
 		nodes.erase(nid)
 	# Strip every edge that pointed at a deleted node.
@@ -2408,7 +2943,35 @@ func _delete_selected_nodes() -> void:
 		(nodes[id] as Dictionary)["out"] = kept
 	if str(_graph_model.get("start", "")) in doomed:
 		_graph_model["start"] = (nodes.keys()[0] as String) if not nodes.is_empty() else ""
+	_remove_comments_by_index(_graph.get_selected_comments())  # marquee-selected notes go with the nodes
 	_deselect_node()
+
+
+# Removes the comments at the given indices (a marquee's multi-note delete). Rebuilds the array so shifting
+# indices can't corrupt the removal. No undo of its own — the caller already snapshotted.
+func _remove_comments_by_index(idxs: Array) -> void:
+	if idxs.is_empty():
+		return
+	var drop: Dictionary = {}
+	for i: Variant in idxs:
+		drop[int(i)] = true
+	var kept: Array = []
+	var comments: Array = _graph_model.get("comments", [])
+	for ci: int in comments.size():
+		if not drop.has(ci):
+			kept.append(comments[ci])
+	_graph_model["comments"] = kept
+
+
+# Delete the notes a marquee selected when the selection is notes-only (no nodes). One undo step.
+func _delete_marquee_comments() -> void:
+	var idxs: Array = _graph.get_selected_comments()
+	if idxs.is_empty():
+		return
+	_push_undo()
+	_remove_comments_by_index(idxs)
+	_graph.clear_selected_comments()
+	_refresh_graph()
 
 
 # ── Clipboard (copy / cut / paste / duplicate) ───────────────────────────────
@@ -2419,9 +2982,31 @@ func _snapshot_selection() -> Array:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
 	var entries: Array = []
 	for id: String in _selected_graph_node_ids:
-		if nodes.has(id):
+		# Never copy/duplicate a ghosted base node (a fork can now be selected to add overlay choices, but
+		# it's still the locked base — copying it would spawn a rogue clone in the overlay).
+		if nodes.has(id) and not _rendition_parent_ids.has(id):
 			entries.append({"id": id, "node": (nodes[id] as Dictionary).duplicate(true)})
 	return entries
+
+
+# Deep copies of every sticky note pinned to a node in the current selection — captured alongside the nodes
+# so copy/cut/paste/duplicate carries a pinned note with its node (paste remaps node_id, see _paste_nodes).
+func _snapshot_pinned_comments() -> Array:
+	var out: Array = []
+	for c: Dictionary in _graph_model.get("comments", []):
+		if _selected_graph_node_ids.has(str(c.get("node_id", ""))):
+			out.append((c as Dictionary).duplicate(true))
+	return out
+
+
+# Removes every note pinned to one of `node_ids` (used on CUT so the notes travel with the cut nodes rather
+# than dangling). No undo push of its own — the caller's node delete already snapshotted the notes.
+func _remove_pinned_comments(node_ids: Array) -> void:
+	var kept: Array = []
+	for c: Dictionary in _graph_model.get("comments", []):
+		if not node_ids.has(str(c.get("node_id", ""))):
+			kept.append(c)
+	_graph_model["comments"] = kept
 
 
 # Ctrl+C — copy the active selection (a note or the node[s]). Mirrors the Delete priority:
@@ -2437,6 +3022,7 @@ func _copy_selection() -> void:
 		_show_status("Copied note — Ctrl+V to paste.", false)
 	elif not _selected_graph_node_ids.is_empty():
 		_node_clipboard = _snapshot_selection()
+		_clip_comments = _snapshot_pinned_comments()
 		_clip_kind = "nodes"
 		_paste_count = 0
 		_show_status(
@@ -2459,68 +3045,110 @@ func _cut_selection() -> void:
 		_paste_count = 0
 		_delete_comment(_selected_comment_idx)
 	elif not _selected_graph_node_ids.is_empty():
+		var sel_ids: Array = _selected_graph_node_ids.duplicate()
 		_node_clipboard = _snapshot_selection()
+		_clip_comments = _snapshot_pinned_comments()
 		_clip_kind = "nodes"
 		_paste_count = 0
-		_delete_selected_nodes()
+		_delete_selected_nodes()  # pushes ONE undo snapshotting the nodes AND their pinned notes
+		_remove_pinned_comments(sel_ids)  # the notes leave with the cut nodes (same undo step)
+		_refresh_graph()
 
 
-# Ctrl+V — paste the clipboard, cascading the offset on repeated pastes.
+# Ctrl+V — paste the clipboard into the CENTRE OF THE CURRENT VIEW (not back at the copied nodes'
+# original spot, which is often scrolled off-screen), cascading down-right on repeated pastes.
 func _paste_clipboard() -> void:
 	if _clip_kind == "":
 		return
 	_paste_count += 1
 	match _clip_kind:
 		"nodes":
-			_paste_nodes(_node_clipboard, _paste_count)
+			_paste_nodes(
+				_node_clipboard,
+				_view_paste_offset(_clip_positions(_node_clipboard)),
+				_clip_comments
+			)
 		"comment":
-			_paste_comment(_clip_comment, _paste_count)
+			var cpos: Vector2 = _clip_comment.get("pos", Vector2.ZERO)
+			_paste_comment(_clip_comment, _view_paste_offset([cpos]))
 
 
-# Ctrl+D — duplicate the active selection in place (without disturbing the clipboard).
+# Ctrl+D — duplicate the active selection in place (a small nudge off the original, so the copy is
+# visible right where the author is working — deliberately NOT recentred on the view like paste).
 func _duplicate_selection() -> void:
 	if _selected_comment_idx >= 0:
 		var comments: Array = _graph_model.get("comments", [])
 		if _selected_comment_idx < comments.size():
-			_paste_comment((comments[_selected_comment_idx] as Dictionary).duplicate(true), 1)
+			_paste_comment(
+				(comments[_selected_comment_idx] as Dictionary).duplicate(true), PASTE_OFFSET
+			)
 	elif not _selected_graph_node_ids.is_empty():
-		_paste_nodes(_snapshot_selection(), 1)
+		_paste_nodes(_snapshot_selection(), PASTE_OFFSET, _snapshot_pinned_comments())
 
 
-# Creates fresh nodes from a clipboard-shaped list, offset by `offset_mult` grid steps. Edges between
-# copied nodes are remapped to the new ids; an edge leaving the copied set is dropped (regular node)
-# or unwired (fork choice, so the fork keeps all its slots). Pushes undo and selects the new nodes.
-func _paste_nodes(entries: Array, offset_mult: int) -> void:
+# Top-left positions of a clipboard-shaped node list, used to find the group's bounds for centering.
+func _clip_positions(entries: Array) -> Array:
+	var out: Array = []
+	for entry: Dictionary in entries:
+		out.append((entry.get("node", {}) as Dictionary).get("pos", Vector2.ZERO) as Vector2)
+	return out
+
+
+# Offset that lands the pasted group's centre on the current view centre, then cascades down-right on
+# repeat pastes so successive Ctrl+V don't stack exactly. `positions` are the source top-left corners;
+# adding half a node recentres the group on its middle rather than its top-left corner.
+func _view_paste_offset(positions: Array) -> Vector2:
+	if positions.is_empty():
+		return Vector2.ZERO
+	var top_left: Vector2 = positions[0]
+	var bottom_right: Vector2 = positions[0]
+	for p: Vector2 in positions:
+		top_left = top_left.min(p)
+		bottom_right = bottom_right.max(p)
+	var half_node: Vector2 = Vector2(GraphView.NODE_WIDTH, GraphView.NODE_HEIGHT) * 0.5
+	var group_centre: Vector2 = (top_left + bottom_right) * 0.5 + half_node
+	var cascade: Vector2 = PASTE_OFFSET * float(_paste_count - 1)
+	return _graph.view_center_world() - group_centre + cascade
+
+
+# Creates fresh nodes from a clipboard-shaped list, translated by `offset` (view-centred on paste, a
+# small nudge on duplicate). Edges between copied nodes are remapped to the new ids; an edge leaving
+# the copied set is dropped (regular node) or unwired (fork choice, so the fork keeps all its slots).
+# Pushes undo and selects the new nodes.
+func _paste_nodes(entries: Array, offset: Vector2, pinned_comments: Array = []) -> void:
 	if entries.is_empty():
 		return
 	_push_undo()
 	if not _graph_model.has("nodes"):
 		_graph_model["nodes"] = {}
 	var nodes: Dictionary = _graph_model["nodes"]
-	var offset: Vector2 = PASTE_OFFSET * float(offset_mult)
-	# Fresh id per copied node, so internal edges can be remapped.
-	var id_map: Dictionary = {}
+	# Fresh id per copied node, so internal edges can be remapped from old id -> new id.
+	var old_to_new_id: Dictionary = {}
 	for entry: Dictionary in entries:
-		id_map[str(entry["id"])] = JourneyData.new_node_id()
+		old_to_new_id[str(entry["id"])] = JourneyData.new_node_id()
 	var pasted_ids: Array = []
 	for entry: Dictionary in entries:
 		var src: Dictionary = entry["node"]
-		var new_id: String = str(id_map[str(entry["id"])])
+		var new_id: String = str(old_to_new_id[str(entry["id"])])
 		var src_type: String = str(src.get("type", "round"))
-		var out: Array = []
+		var out_edges: Array = []
 		if src_type == "fork":
-			for e: Dictionary in src.get("out", []):
-				var ne: Dictionary = (e as Dictionary).duplicate(true)
-				var fto: String = str(e.get("to", ""))
-				ne["to"] = str(id_map[fto]) if id_map.has(fto) else ""
-				out.append(ne)
+			# A fork keeps every slot: an edge to a node outside the copied set is unwired (to = "").
+			for edge: Dictionary in src.get("out", []):
+				var new_edge: Dictionary = (edge as Dictionary).duplicate(true)
+				var target_id: String = str(edge.get("to", ""))
+				new_edge["to"] = (
+					str(old_to_new_id[target_id]) if old_to_new_id.has(target_id) else ""
+				)
+				out_edges.append(new_edge)
 		else:
-			for e: Dictionary in src.get("out", []):
-				var to: String = str(e.get("to", ""))
-				if id_map.has(to):
-					var ne2: Dictionary = (e as Dictionary).duplicate(true)
-					ne2["to"] = str(id_map[to])
-					out.append(ne2)
+			# A regular node just drops any edge leaving the copied set.
+			for edge: Dictionary in src.get("out", []):
+				var target_id: String = str(edge.get("to", ""))
+				if old_to_new_id.has(target_id):
+					var new_edge: Dictionary = (edge as Dictionary).duplicate(true)
+					new_edge["to"] = str(old_to_new_id[target_id])
+					out_edges.append(new_edge)
 		var data: Dictionary = (src.get("data", {}) as Dictionary).duplicate(true)
 		data.erase("type")
 		data.erase("node_id")
@@ -2529,19 +3157,36 @@ func _paste_nodes(entries: Array, offset_mult: int) -> void:
 			"type": src_type,
 			"data": data,
 			"pos": GraphLayout.snap((src.get("pos", Vector2.ZERO) as Vector2) + offset),
-			"out": out,
+			"out": out_edges,
 		}
 		if str(_graph_model.get("start", "")) == "":
 			_graph_model["start"] = new_id
 		pasted_ids.append(new_id)
+
+	# Re-create the notes that were pinned to the copied nodes, re-pinned to the new node ids and offset by
+	# the same amount so each note lands in the same spot beside its (pasted) node.
+	if not pinned_comments.is_empty():
+		if not _graph_model.has("comments"):
+			_graph_model["comments"] = []
+		var comments: Array = _graph_model["comments"]
+		for pc: Dictionary in pinned_comments:
+			var old_nid: String = str(pc.get("node_id", ""))
+			if not old_to_new_id.has(old_nid):
+				continue  # its node wasn't in the pasted set — skip rather than leave a dangling pin
+			var nc: Dictionary = (pc as Dictionary).duplicate(true)
+			nc["node_id"] = str(old_to_new_id[old_nid])
+			nc["pos"] = GraphLayout.snap((pc.get("pos", Vector2.ZERO) as Vector2) + offset)
+			comments.append(nc)
+
 	_graph.set_selection(pasted_ids)
 	_show_status(
 		"Pasted %d node%s." % [pasted_ids.size(), "" if pasted_ids.size() == 1 else "s"], false
 	)
 
 
-# Paste a sticky note from the clipboard, offset by `offset_mult` grid steps; selects it. One undo step.
-func _paste_comment(comment: Dictionary, offset_mult: int) -> void:
+# Paste a sticky note from the clipboard, translated by `offset` (view-centred on paste, a small
+# nudge on duplicate); selects it. One undo step.
+func _paste_comment(comment: Dictionary, offset: Vector2) -> void:
 	if comment.is_empty():
 		return
 	_push_undo()
@@ -2549,9 +3194,7 @@ func _paste_comment(comment: Dictionary, offset_mult: int) -> void:
 		_graph_model["comments"] = []
 	var comments: Array = _graph_model["comments"]
 	var nc: Dictionary = comment.duplicate(true)
-	nc["pos"] = GraphLayout.snap(
-		(comment.get("pos", Vector2.ZERO) as Vector2) + PASTE_OFFSET * float(offset_mult)
-	)
+	nc["pos"] = GraphLayout.snap((comment.get("pos", Vector2.ZERO) as Vector2) + offset)
 	comments.append(nc)
 	_graph.deselect_nodes_silent()
 	_selected_graph_node_ids = []
@@ -2595,11 +3238,49 @@ func _begin_connect_fork_edge(fork_id: String, edge_idx: int) -> void:
 	_side_renderer.show_graph_node_editor(fork_id)
 
 
+# Rendition authoring: appends an OVERLAY choice to a ghosted base fork — an extra option shown only when
+# this rendition is installed. It's an append-anchor ({_anchor}, no `_slot`), unconnected until the author
+# wires it. Capped at the 4-choice ForkScreen layout (base slots + overlay choices).
+func _add_overlay_fork_choice(fork_id: String) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	if not nodes.has(fork_id):
+		return
+	var out: Array = (nodes[fork_id] as Dictionary).get("out", [])
+	if out.size() >= 4:
+		_show_status("This fork is full — 4 choices max.", true)
+		return
+	_push_undo()
+	out.append({"to": "", "name": "", "image_path": "", "_anchor": true})
+	(nodes[fork_id] as Dictionary)["out"] = out
+	_refresh_graph()
+	_side_renderer.show_graph_node_editor(fork_id)
+	_show_status("Overlay choice added — name it, then connect it to a node.", false)
+
+
+# Removes an OVERLAY choice (an append-anchor) from a ghosted base fork. Never touches a base choice or a
+# filled base slot — those are base-owned. Overlay choices always sit AFTER the base's, so removing one
+# can't shift a filled slot's recorded index.
+func _remove_overlay_fork_choice(fork_id: String, edge_idx: int) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	if not nodes.has(fork_id):
+		return
+	var out: Array = (nodes[fork_id] as Dictionary).get("out", [])
+	if edge_idx < 0 or edge_idx >= out.size():
+		return
+	var edge: Dictionary = out[edge_idx]
+	if not bool(edge.get("_anchor", false)) or edge.has("_slot"):
+		return  # a base choice or a filled base slot — not an overlay choice
+	_push_undo()
+	_side_renderer._delete_saved_image(str(edge.get("image_path", "")))
+	out.remove_at(edge_idx)
+	_refresh_graph()
+	_side_renderer.show_graph_node_editor(fork_id)
+	_show_status("Overlay choice removed.", false)
+
+
 # Completes a click-to-connect: wires the armed source to `target_id` — either a fork choice's
 # out-edge (when _connecting_edge_idx >= 0) or a regular node's single out-edge. Rejects a
-# self-link or a *disallowed* out-edge cycle (round↔round softlocks). Fork-hub loops
-# (Back between forks, clear back to a hub) are allowed. release_jump_to loops are separate.
-# Re-selects the source.
+# self-link or anything that would form a cycle (the runtime is a DAG). Re-selects the source.
 func _finish_connect(target_id: String) -> void:
 	var source: String = _connecting_from
 	var edge_idx: int = _connecting_edge_idx
@@ -2609,11 +3290,17 @@ func _finish_connect(target_id: String) -> void:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
 	if source == "" or not nodes.has(source):
 		return
+	# Rendition ANCHOR: dragging from a ghosted base node attaches a new overlay path here. It's ADDITIVE
+	# (appended, never replacing the base's own edges) and the base is never re-saved, so it can't be
+	# corrupted. The delta save extracts these `_anchor` edges (later slice).
+	if _rendition_parent_ids.has(source):
+		_finish_anchor(source, target_id, edge_idx)
+		return
 	if target_id == source or not nodes.has(target_id):
 		_show_status("Connect cancelled (can't link a node to itself).", true)
 		_graph.select_graph_node(source)
 		return
-	if JourneyGraph.would_create_disallowed_cycle(_graph_model, source, target_id):
+	if JourneyGraph.reachable_ids(_graph_model, target_id).has(source):
 		_show_status("Can't connect — that would create a loop.", true)
 		_graph.select_graph_node(source)
 		return
@@ -2634,6 +3321,77 @@ func _finish_connect(target_id: String) -> void:
 	else:
 		(nodes[source] as Dictionary)["out"] = [{"to": target_id}]
 	_graph.select_graph_node(source)
+
+
+# Attaches a rendition ANCHOR from a ghosted base node to a NEW overlay node. Additive — the base's own
+# structure is never rewritten on disk. Forms, by where the connect started (`edge_idx`):
+#  • edge_idx < 0 (a node's single out-handle): only a base ENDING may be anchored — a rendition EXTENDS
+#    an ending, never splices into mid-flow. One overlay path per ending, and re-dragging re-points it.
+#  • edge_idx ≥ 0 (a fork choice): if that out-edge is a VIRGIN base slot, FILL it in place (marked `_slot`
+#    so compose fills that reserved choice); if it's already an overlay anchor (an appended overlay choice
+#    or a re-point), just (re)point `to` — it stays an APPEND with no `_slot`, so compose adds an extra
+#    choice. A base-wired choice is off limits.
+# Refuses to anchor onto another base node (you attach overlay content, not re-wire the base) or to loop.
+func _finish_anchor(source: String, target_id: String, edge_idx: int = -1) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	if not nodes.has(target_id) or _rendition_parent_ids.has(target_id):
+		_show_status("Anchor to a NEW node — not the locked base.", true)
+		return
+	if target_id == source:
+		return
+	if JourneyGraph.reachable_ids(_graph_model, target_id).has(source):
+		_show_status("Can't anchor — that would create a loop.", true)
+		return
+	var out: Array = (nodes[source] as Dictionary).get("out", [])
+	# A fork choice handle. Two cases, distinguished by whether this out-edge is already an overlay anchor:
+	#  • a VIRGIN base open slot (not yet an anchor) → fill it IN PLACE and record `_slot` so compose fills
+	#    that exact reserved choice (keeps the fork's choice count).
+	#  • an OVERLAY choice (already `_anchor`: an appended option, or one re-pointed) → just (re)point `to`;
+	#    it stays an APPEND with no `_slot`, so compose adds it as an extra choice.
+	if edge_idx >= 0:
+		if edge_idx >= out.size():
+			return
+		var choice: Dictionary = out[edge_idx]
+		var was_anchor: bool = bool(choice.get("_anchor", false))
+		if str(choice.get("to", "")) != "" and not was_anchor:
+			_show_status("That fork choice is set by the base — pick an open slot.", true)
+			return
+		_push_undo()
+		choice["to"] = target_id
+		choice["_anchor"] = true
+		if not was_anchor:
+			choice["_slot"] = edge_idx  # first-time fill of a base open slot
+		_refresh_graph()
+		_show_status(
+			(
+				"Fork slot filled — this overlay path fills the open choice."
+				if choice.has("_slot")
+				else "Overlay choice connected."
+			),
+			false
+		)
+		return
+	# One overlay path per ending, but reassignable: a drag from an already-anchored ending RE-POINTS its
+	# existing anchor rather than adding a second. A non-anchor (base) edge means it isn't an ending.
+	var anchor_edge: Dictionary = {}
+	for e: Dictionary in out:
+		if bool(e.get("_anchor", false)):
+			anchor_edge = e
+		else:
+			_show_status(
+				"Anchor a base ENDING only — that node already continues in the base.", true
+			)
+			return
+	_push_undo()
+	if anchor_edge.is_empty():
+		out.append({"to": target_id, "_anchor": true})
+		(nodes[source] as Dictionary)["out"] = out
+		_refresh_graph()
+		_show_status("Anchor added — this overlay path attaches after the base node.", false)
+	else:
+		anchor_edge["to"] = target_id  # re-point the existing anchor to the new target
+		_refresh_graph()
+		_show_status("Anchor re-pointed to the new node.", false)
 
 
 # Drops an armed click-to-connect (the Escape shortcut), restoring the source node's editor.
@@ -2714,6 +3472,9 @@ func _remove_fork_edge(fork_id: String, edge_idx: int) -> void:
 	var data: Dictionary = node.get("data", {})
 	if int(data.get("default_path", 0)) >= edges.size():
 		data["default_path"] = max(0, edges.size() - 1)
+	# timeout_path may be -1 (random); only clamp a real index that now points past the end.
+	if int(data.get("timeout_path", -1)) >= edges.size():
+		data["timeout_path"] = -1
 	_graph.select_graph_node(fork_id)
 
 
@@ -2754,9 +3515,34 @@ func _push_undo() -> void:
 func _undo() -> void:
 	if _undo_stack.is_empty():
 		return
+	var snap: Dictionary = _undo_stack.pop_back()
 	_redo_stack.append(_graph_snapshot())
-	_restore_graph_snapshot(_undo_stack.pop_back())
-	_show_status("Undo.", false)
+	_restore_graph_snapshot(snap)
+	# Reversing an EXTRACTION: the extracted nodes are now back in the base, so the rendition written at
+	# extract time is a duplicate — delete it (and its isolated saves). Redo can't recreate that file, so
+	# drop the redo future to avoid a broken re-apply that would lose the nodes.
+	if snap.has("_extract_folder"):
+		_delete_rendition_artifacts(str(snap["_extract_folder"]))
+		_redo_stack.clear()
+		_show_status("Undo — extracted rendition removed.", false)
+	else:
+		_show_status("Undo.", false)
+
+
+# Deletes a rendition's journey folder (by folder name) plus any isolated run-saves/scoreboard it spawned.
+# Used by extract-undo and could back a catalogue delete. Idempotent.
+func _delete_rendition_artifacts(rend_name: String) -> void:
+	var folder_name: String = JourneyData.sanitize_folder_name(rend_name)
+	if folder_name == "":
+		return
+	JourneyData.delete_dir_recursive(SettingsService.get_journeys_dir() + "/" + folder_name)
+	# A composed run keys its save/scoreboard under "<base>__rend_<rendition>"; a just-extracted rendition
+	# has never been played, but clean defensively in case it was.
+	var run_key: String = JourneyData.sanitize_folder_name(
+		JourneyData.sanitize_folder_name(str(_journey_name)) + "__rend_" + folder_name
+	)
+	JourneySaveService.delete_save(run_key)
+	ScoreboardService.clear(run_key)
 
 
 # Ctrl+Y / Ctrl+Shift+Z — reapplies the most recently undone structure.
@@ -2810,10 +3596,20 @@ func _on_save_pressed() -> void:
 	# success/failure signal so the flow reads as a sequence of steps rather
 	# than 250 lines of nested branches. Helpers that fail are responsible for
 	# their own user-facing error modal and any staging cleanup.
+	_commit_focused_field()
 	_save_btn.disabled = true
 	_reset_save_state()
 	if not await _do_save():
 		_save_btn.disabled = false
+
+
+# Drops focus from whatever side-panel field holds it so its pending edit commits before the
+# save reads the round data. Clicking Save straight from a field would otherwise write the
+# value the field had when it was last committed, not what's on screen.
+func _commit_focused_field() -> void:
+	var focused: Control = get_viewport().gui_get_focus_owner()
+	if focused != null:
+		focused.release_focus()
 
 
 # "Save & Test from here" entry point. Runs the exact same save pipeline as a
@@ -2870,6 +3666,8 @@ func _launch_test_play(paths: Dictionary) -> void:
 	GameState.set_meta("_test_seed_score", _test_seed_score)
 	GameState.set_meta("_test_seed_coins", _test_seed_coins)
 	GameState.set_meta("_test_seed_flags", _test_seed_flags)
+	GameState.set_meta("_test_seed_items", _test_seed_items)
+	GameState.set_meta("_test_seed_counters", _test_seed_counters)
 	Transition.change_scene("res://scenes/game_loop/GameLoop.tscn")
 
 
@@ -2879,7 +3677,12 @@ func _launch_test_play(paths: Dictionary) -> void:
 # folder cleanup is centralised here so the per-phase code stays focused on
 # its own responsibility.
 func _do_save() -> bool:
+	# Rendition mode saves an overlay delta to its own folder — never the base — via a separate path.
+	if _rendition_mode:
+		return await _save_rendition()
 	if not _validate_presave():
+		return false
+	if not _check_animated_images():
 		return false
 	if not _build_transcode_plan():
 		return false
@@ -2911,6 +3714,770 @@ func _do_save() -> bool:
 	return true
 
 
+# ── Extract to rendition (feature #3) ─────────────────────────────────────────
+
+
+# Feature #3 entry (from the selection panels): validate the current node selection, then confirm the
+# split. Extraction only makes sense on a SAVED base journey — the overlay needs the base's JourneyId as
+# its parent, and the base folder on disk to pool the extracted media from.
+func _begin_extract_to_rendition() -> void:
+	if _rendition_mode:
+		_show_status("You're editing a rendition — extraction works on a base journey.", true)
+		return
+	if _journey_id.strip_edges() == "" or _original_journey_folder.strip_edges() == "":
+		_show_builder_message(
+			"SAVE FIRST",
+			"Extraction pulls the selected nodes into a SEPARATE rendition that overlays this journey — so the journey must be saved first (it becomes the rendition's parent). Save, then extract."
+		)
+		return
+	var result: Dictionary = JourneyExtract.extract_rendition(
+		_graph_model, _selected_graph_node_ids
+	)
+	var errors: Array = result.get("errors", [])
+	if not errors.is_empty():
+		_show_builder_message("CAN'T EXTRACT", _extract_error_text(errors))
+		return
+	_show_extract_confirm(result, _unique_extract_name())
+
+
+# Names the extracted overlay so its folder can't collide with the base's: "<base> — extract", bumped to
+# "…2", "…3" if that folder already exists.
+func _unique_extract_name() -> String:
+	var base_name: String = _journey_name.strip_edges()
+	if base_name == "":
+		base_name = "Journey"
+	var root: String = SettingsService.get_journeys_dir()
+	var stem: String = base_name + " — extract"
+	var candidate: String = stem
+	var n: int = 2
+	while DirAccess.dir_exists_absolute(
+		ProjectSettings.globalize_path(root + "/" + JourneyData.sanitize_folder_name(candidate))
+	):
+		candidate = "%s %d" % [stem, n]
+		n += 1
+	return candidate
+
+
+# A human message for an extraction JourneyExtract refused.
+func _extract_error_text(errors: Array) -> String:
+	match str((errors[0] as Dictionary).get("kind", "")):
+		"empty_selection":
+			return "Select the nodes you want to pull into a rendition first."
+		"selects_start":
+			return "The selection includes the journey's START node, which can't move to an overlay. Leave the start in the base."
+		"fork_underflow":
+			return "A fork would be left with fewer than 2 choices. Extract the whole fork, or leave it enough choices to stand on its own."
+		"no_anchor":
+			return "Nothing in the rest of the journey leads into the selection, so the rendition would have no attachment point. Select a branch that hangs off the base — not a disconnected island."
+		"missing_node":
+			return "The selection referenced a node that no longer exists. Reselect and try again."
+	return "This selection can't be extracted into a clean rendition."
+
+
+func _show_extract_confirm(result: Dictionary, rend_name: String) -> void:
+	var count: int = (result["rendition"]["nodes"] as Dictionary).size()
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"EXTRACT TO RENDITION", UITheme.CYAN, Vector2i(560, 300)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
+	var lbl: Label = Label.new()
+	lbl.text = (
+		'Move %d selected node%s into a new rendition:\n\n"%s"\n\nThe rendition is saved now. This journey keeps the rest — Save it afterwards to finalize the base.'
+		% [count, "s" if count != 1 else "", rend_name]
+	)
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(lbl, UITheme.WHITE_SOFT, 13, false)
+	vbox.add_child(lbl)
+	var row: HBoxContainer = HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+	vbox.add_child(row)
+	var cancel_btn: Button = Button.new()
+	cancel_btn.text = "CANCEL"
+	cancel_btn.custom_minimum_size = Vector2(140, 0)
+	UITheme.style_button(cancel_btn, UITheme.PURPLE_MID)
+	cancel_btn.pressed.connect(func() -> void: modal.queue_free())
+	row.add_child(cancel_btn)
+	var go_btn: Button = Button.new()
+	go_btn.text = "⑂ EXTRACT"
+	go_btn.custom_minimum_size = Vector2(180, 0)
+	UITheme.style_button(go_btn, UITheme.CYAN)
+	go_btn.pressed.connect(
+		func() -> void:
+			modal.queue_free()
+			_do_extract(result, rend_name)
+	)
+	row.add_child(go_btn)
+	add_child(modal)
+
+
+# A plain message + OK modal, built dynamically like the other builder dialogs.
+func _show_builder_message(title: String, body: String) -> void:
+	var parts: Dictionary = UITheme.build_centered_modal(
+		title, UITheme.PURPLE_BRIGHT, Vector2i(560, 260)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
+	var lbl: Label = Label.new()
+	lbl.text = body
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(lbl, UITheme.WHITE_SOFT, 13, false)
+	vbox.add_child(lbl)
+	var row: HBoxContainer = HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_child(row)
+	var ok_btn: Button = Button.new()
+	ok_btn.text = "OK"
+	ok_btn.custom_minimum_size = Vector2(140, 0)
+	UITheme.style_button(ok_btn, UITheme.PURPLE_MID)
+	ok_btn.pressed.connect(func() -> void: modal.queue_free())
+	row.add_child(ok_btn)
+	add_child(modal)
+
+
+# Writes the extracted rendition to disk, then removes the extracted nodes from the base IN MEMORY (the
+# author Saves to finalize). Temporarily borrows the rendition-authoring state — the FINAL base as the
+# ghosted parent + the extracted nodes + the anchors injected onto the base — to drive _write_rendition_pack,
+# then restores base editing. On failure the base is left exactly as it was.
+func _do_extract(result: Dictionary, rend_name: String) -> void:
+	var base_graph: Dictionary = result["base"]
+	var delta: Dictionary = result["rendition"]
+	var extracted_count: int = (delta["nodes"] as Dictionary).size()
+
+	# The pristine base graph (JourneyExtract deep-copies, so _graph_model is untouched) — for undo + the
+	# state we restore afterwards.
+	var snap_graph: Dictionary = _graph_model
+	var snap_id: String = _journey_id
+	var snap_name: String = _journey_name
+	var snap_folder: String = _original_journey_folder
+
+	# Transient rendition-authoring graph: the final base (ghosted parent) + extracted nodes, with the
+	# anchors injected onto the base nodes so _extract_anchors picks them up.
+	var authoring: Dictionary = {}
+	for id: String in base_graph["nodes"] as Dictionary:
+		authoring[id] = (base_graph["nodes"][id] as Dictionary).duplicate(true)
+	for id: String in delta["nodes"] as Dictionary:
+		authoring[id] = (delta["nodes"][id] as Dictionary).duplicate(true)
+	for a: Dictionary in delta["anchors"] as Array:
+		var aid: String = str(a.get("anchor", ""))
+		if not authoring.has(aid):
+			continue
+		var an: Dictionary = authoring[aid]
+		if not an.has("out"):
+			an["out"] = []
+		var edge: Dictionary = (a.get("edge", {}) as Dictionary).duplicate(true)
+		edge["_anchor"] = true
+		(an["out"] as Array).append(edge)
+
+	_reset_save_state()
+	_graph_model = {"start": str(base_graph.get("start", "")), "nodes": authoring}
+	_rendition_mode = true
+	_rendition_parent_id = snap_id
+	_rendition_parent_folder = snap_folder
+	_rendition_parent_ids = {}
+	for id: String in base_graph["nodes"] as Dictionary:
+		_rendition_parent_ids[id] = true
+	_rendition_slot_fills = []
+	_journey_id = ""
+	_journey_name = rend_name
+	_original_journey_folder = ""
+
+	var ok: bool = await _write_rendition_pack()
+
+	# Restore base editing regardless of outcome.
+	_rendition_mode = false
+	_rendition_parent_ids = {}
+	_rendition_parent_id = ""
+	_rendition_parent_folder = ""
+	_rendition_slot_fills = []
+	_journey_id = snap_id
+	_journey_name = snap_name
+	_original_journey_folder = snap_folder
+	if not ok:
+		_graph_model = snap_graph  # write failed / cancelled — base untouched
+		_refresh_graph()
+		return
+	# Apply the base-node removal as an undoable step. Stamp the undo entry with the written rendition's
+	# folder so undoing the extraction also deletes it (the nodes come back to the base, so the rendition
+	# would otherwise be a duplicate) — see _undo.
+	_graph_model = snap_graph
+	_push_undo()
+	if not _undo_stack.is_empty():
+		(_undo_stack[-1] as Dictionary)["_extract_folder"] = rend_name
+	# Reduced base — keep the base's comments/groups (only its nodes/start changed).
+	_graph_model = {
+		"start": str(base_graph.get("start", "")),
+		"nodes": base_graph["nodes"],
+		"comments": snap_graph.get("comments", []),
+		"groups": snap_graph.get("groups", []),
+	}
+	_graph.clear_graph_selection()
+	_refresh_graph()
+	_show_status(
+		(
+			'Extracted %d node%s into rendition "%s". Save this journey to finalize the base.'
+			% [extracted_count, "s" if extracted_count != 1 else "", rend_name]
+		),
+		false
+	)
+
+
+# ── Merge an overlay node back into the base (extract recovery) ───────────────
+
+
+# Right-click "Merge into Base" on an overlay node while authoring a rendition: move that node AND its whole
+# overlay branch (every rendition node reachable from it) out of the rendition and into the base in one go.
+# The node must be a BOUNDARY node — one attached directly to the base — so its branch re-attaches to the
+# base through a real anchor edge. Every node keeps its edges intact, so fork default/timeout indices survive
+# the move untouched. Confirms, then hands off to _do_merge_to_base.
+func _begin_merge_to_base(node_id: String) -> void:
+	if not _rendition_mode or _rendition_parent_ids.has(node_id):
+		return
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	if not nodes.has(node_id):
+		return
+	if _original_journey_folder.strip_edges() == "":
+		_show_builder_message(
+			"SAVE FIRST",
+			"Save this rendition before merging a branch back — the merge rewrites the rendition on disk."
+		)
+		return
+	# The node must be anchored directly to a base node, so its branch has a clean base attachment point.
+	if not _has_base_anchor(node_id):
+		_show_builder_message(
+			"CAN'T MERGE",
+			"This node isn't attached directly to the base. Merge from the node that hangs off the base — it brings this whole branch with it."
+		)
+		return
+	var branch: Dictionary = _collect_overlay_subtree(node_id)
+	var count: int = branch.size()
+	var body: String = (
+		"Move this node back into the base?"
+		if count <= 1
+		else "Move this node and its whole branch (%d nodes) back into the base?" % count
+	)
+	_show_builder_confirm(
+		"MERGE INTO BASE",
+		(
+			body
+			+ "\n\nThe rendition is re-saved without them, then the base opens with the branch re-added for you to Save."
+		),
+		"⤺ MERGE",
+		func() -> void: _do_merge_to_base(node_id)
+	)
+
+
+# True if a base node anchors `node_id` directly (a base node with an `_anchor` edge pointing at it).
+func _has_base_anchor(node_id: String) -> bool:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	for bid: String in _rendition_parent_ids:
+		if not nodes.has(bid):
+			continue
+		for e: Variant in (nodes[bid] as Dictionary).get("out", []):
+			if (
+				e is Dictionary
+				and bool((e as Dictionary).get("_anchor", false))
+				and str((e as Dictionary).get("to", "")) == node_id
+			):
+				return true
+	return false
+
+
+# Every overlay node reachable from `root` (root included), stopping at base nodes. Cycle-safe. These are the
+# rendition nodes that move to the base together as one branch.
+func _collect_overlay_subtree(root: String) -> Dictionary:
+	var seen: Dictionary = {}
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var cur: String = str(stack.pop_back())
+		if seen.has(cur) or not nodes.has(cur) or _rendition_parent_ids.has(cur):
+			continue
+		seen[cur] = true
+		for e: Variant in (nodes[cur] as Dictionary).get("out", []):
+			if e is Dictionary:
+				var to: String = str((e as Dictionary).get("to", ""))
+				if to != "" and not seen.has(to) and not _rendition_parent_ids.has(to):
+					stack.append(to)
+	return seen
+
+
+func _do_merge_to_base(node_id: String) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	if not nodes.has(node_id):
+		return
+	# 1) The whole overlay branch moves to the base. Each node keeps ALL its edges as-is — edges to base
+	#    nodes and edges to other branch nodes are all valid base edges now, so nothing is stripped and fork
+	#    default/timeout indices stay correct.
+	var branch: Dictionary = _collect_overlay_subtree(node_id)
+	var node_injections: Array = []
+	for sid: String in branch:
+		node_injections.append({"id": sid, "node": (nodes[sid] as Dictionary).duplicate(true)})
+
+	# 2) Every base→branch anchor becomes a real base edge that reattaches the branch. A slot anchor fills the
+	#    base fork's open slot in place; everything else appends.
+	var edge_injections: Array = []
+	for bid: String in _rendition_parent_ids:
+		if not nodes.has(bid):
+			continue
+		for e: Variant in (nodes[bid] as Dictionary).get("out", []):
+			if (
+				e is Dictionary
+				and bool((e as Dictionary).get("_anchor", false))
+				and branch.has(str((e as Dictionary).get("to", "")))
+			):
+				var be: Dictionary = (e as Dictionary).duplicate(true)
+				var slot: int = int(be.get("_slot", -1))
+				be.erase("_anchor")
+				be.erase("_slot")
+				edge_injections.append({"anchor": bid, "edge": be, "slot": slot})
+
+	# 3) Rewrite the rendition on disk WITHOUT the branch — in-place JSON surgery, no re-pool, so the nodes'
+	#    media stays in the rendition folder for the base Save to pool from.
+	if not _rewrite_rendition_without_subtree(branch):
+		_show_builder_message(
+			"MERGE FAILED", "Couldn't update the rendition on disk. Nothing was changed."
+		)
+		return
+
+	# 4) Reload the builder editing the BASE, injecting the branch + its now-real edges (fresh scene, so all
+	#    rendition chrome resets cleanly). The author lands on the base, branch re-added, ready to Save.
+	edit_journey = _rendition_parent_journey
+	merge_inject = {"nodes": node_injections, "edges": edge_injections}
+	Transition.change_scene("res://scenes/journey_builder/JourneyBuilder.tscn")
+
+
+# Injects a merged-back branch into the freshly-loaded base graph (consumed by _ready when merge_inject is
+# set): adds every branch node, then reattaches it by writing each base edge onto its source node — a slot
+# edge fills the base fork's open slot in place, others append. The nodes' media paths still point at the
+# rendition folder, so the base Save pools them across.
+func _apply_merge_inject(inj: Dictionary) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	for entry: Variant in inj.get("nodes", []):
+		if not (entry is Dictionary):
+			continue
+		var nid: String = str((entry as Dictionary).get("id", ""))
+		if nid == "" or nodes.has(nid):
+			continue
+		nodes[nid] = ((entry as Dictionary).get("node", {}) as Dictionary).duplicate(true)
+	for attach: Variant in inj.get("edges", []):
+		if not (attach is Dictionary):
+			continue
+		var src: String = str((attach as Dictionary).get("anchor", ""))
+		if not nodes.has(src):
+			continue
+		var b: Dictionary = nodes[src]
+		if not b.has("out"):
+			b["out"] = []
+		var out_arr: Array = b["out"]
+		var edge: Dictionary = ((attach as Dictionary).get("edge", {}) as Dictionary).duplicate(
+			true
+		)
+		var slot: int = int((attach as Dictionary).get("slot", -1))
+		if slot >= 0 and slot < out_arr.size():
+			out_arr[slot] = edge  # fill the base fork's open slot in place
+		else:
+			out_arr.append(edge)
+	_show_status("Merged from rendition — Save this journey to finalize.", false)
+
+
+# Rewrites the rendition's journey.json (at its own folder) without the merged branch — a structural edit
+# only, so no media is re-pooled (the nodes' files linger for the base Save). Removes every branch node and
+# every anchor that attached one; nothing needs re-anchoring because the whole branch moves together. Never
+# deletes the folder even if it empties, so those files survive; an empty rendition can be removed from the
+# catalogue. Returns false on read/parse/write failure (caller leaves everything unchanged).
+func _rewrite_rendition_without_subtree(branch: Dictionary) -> bool:
+	var folder: String = _original_journey_folder  # the rendition's own folder while editing it
+	if folder == "":
+		return false
+	var json_path: String = folder + "/journey.json"
+	if not FileAccess.file_exists(json_path):
+		return false
+	var rf: FileAccess = FileAccess.open(json_path, FileAccess.READ)
+	if rf == null:
+		return false
+	var parser: JSON = JSON.new()
+	var ok: int = parser.parse(rf.get_as_text())
+	rf.close()
+	if ok != OK or not (parser.data is Dictionary):
+		return false
+	var data: Dictionary = parser.data
+	var new_nodes: Array = []
+	for n: Variant in data.get("Nodes", []):
+		if n is Dictionary and branch.has(str((n as Dictionary).get("id", ""))):
+			continue
+		new_nodes.append(n)
+	data["Nodes"] = new_nodes
+	# Drop every anchor that attached a branch node (each becomes a real base edge on the injection side).
+	var new_anchors: Array = []
+	for a: Variant in data.get("Anchors", []):
+		var drop: bool = false
+		if a is Dictionary:
+			var edge: Dictionary = (a as Dictionary).get("Edge", {})
+			drop = branch.has(str(edge.get("to", "")))
+		if not drop:
+			new_anchors.append(a)
+	data["Anchors"] = new_anchors
+	var wf: FileAccess = FileAccess.open(json_path, FileAccess.WRITE)
+	if wf == null:
+		return false
+	wf.store_string(JSON.stringify(data, "\t"))
+	wf.close()
+	return true
+
+
+# A plain confirm modal (OK / Cancel), built dynamically like the other builder dialogs.
+func _show_builder_confirm(title: String, body: String, ok_text: String, on_ok: Callable) -> void:
+	var parts: Dictionary = UITheme.build_centered_modal(title, UITheme.CYAN, Vector2i(560, 280))
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
+	var lbl: Label = Label.new()
+	lbl.text = body
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(lbl, UITheme.WHITE_SOFT, 13, false)
+	vbox.add_child(lbl)
+	var row: HBoxContainer = HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+	vbox.add_child(row)
+	var cancel_btn: Button = Button.new()
+	cancel_btn.text = "CANCEL"
+	cancel_btn.custom_minimum_size = Vector2(140, 0)
+	UITheme.style_button(cancel_btn, UITheme.PURPLE_MID)
+	cancel_btn.pressed.connect(func() -> void: modal.queue_free())
+	row.add_child(cancel_btn)
+	var ok_btn: Button = Button.new()
+	ok_btn.text = ok_text
+	ok_btn.custom_minimum_size = Vector2(180, 0)
+	UITheme.style_button(ok_btn, UITheme.CYAN)
+	ok_btn.pressed.connect(
+		func() -> void:
+			modal.queue_free()
+			on_ok.call()
+	)
+	row.add_child(ok_btn)
+	add_child(modal)
+
+
+# A manual rendition Save: write the overlay to disk, then finalize (return to the catalogue) like any
+# other save. Extraction instead calls _write_rendition_pack directly and STAYS in the builder.
+func _save_rendition() -> bool:
+	var ok: bool = await _write_rendition_pack()
+	if ok:
+		_finalize_save_success()
+	return ok
+
+
+# Writes the rendition overlay to disk: pools ONLY the new nodes' media into a fresh rendition folder,
+# extracts the anchor edges from the ghosted base nodes, pools their card images, and writes a
+# Type:"rendition" journey.json (the delta). The base is never touched — its nodes are skipped in pooling
+# and it's never re-written. Mirrors _do_save's staging → write → swap, but assembles a rendition. Does
+# NOT navigate away, so both the manual Save and the extract flow can reuse it.
+func _write_rendition_pack() -> bool:
+	if not _validate_rendition_presave():
+		return false
+	var paths: Dictionary = _setup_save_folders()  # folder named after the rendition (_journey_name)
+	var modal: Control = _create_save_progress_modal_if_needed()
+	var pooled: Dictionary = await _pool_graph_nodes(paths, modal, _rendition_parent_ids)  # skip the base
+	if not bool(pooled["ok"]):
+		if modal:
+			modal.queue_free()
+		JourneyData.delete_dir_recursive(paths["abs_dir"])
+		return false
+	# Overlay anchors: extract them off the ghosted base nodes, then pool any fork-choice card image they
+	# carry — the base fork is skipped by the pool above, so its overlay edges' images are pooled here.
+	var anchors: Array = await _pool_anchor_images(_extract_anchors(), paths, modal)
+	if modal:
+		modal.queue_free()
+	if _save_aborted:
+		JourneyData.delete_dir_recursive(paths["abs_dir"])
+		return false
+
+	var rendition: Dictionary = {
+		"journey_id": _journey_id,  # "" → coerce_rendition mints the overlay's own id
+		"name": paths["journey_name"],
+		"author": _journey_author.strip_edges(),
+		"description": _journey_desc.strip_edges(),
+		"parent_id": _rendition_parent_id,
+		"parent_min_version": "",
+		"nodes": pooled["nodes"],
+		"anchors": anchors,
+		"slot_fills": _pool_slot_fills(paths["abs_dir"]),  # channel scripts pooled after the nodes above
+	}
+	var data: Dictionary = JourneyRendition.coerce_rendition(rendition)
+	# The rendition's OWN backdrop layers (pooled into its media/) — the base's stay in the base and are
+	# NOT re-saved here; compose stacks them at play time.
+	data["MapBackdrops"] = _save_map_backdrops(paths["abs_media_dir"], paths["copied_images"])
+	_journey_id = str(data.get("JourneyId", ""))  # remember the minted id for a re-save
+	if not _write_journey_json(paths, data):
+		JourneyData.delete_dir_recursive(paths["abs_dir"])
+		return false
+	_swap_staging_into_place(paths)
+	return true
+
+
+# The anchors an overlay adds: every `_anchor`-marked out-edge on a ghosted base node, as
+# {anchor: <base id>, edge: {to, …}} with the authoring marker stripped.
+func _extract_anchors() -> Array:
+	var anchors: Array = []
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	for id: String in _rendition_parent_ids:
+		if not nodes.has(id):
+			continue
+		for e: Variant in (nodes[id] as Dictionary).get("out", []):
+			if not (e is Dictionary and bool((e as Dictionary).get("_anchor", false))):
+				continue
+			var ed: Dictionary = e
+			if ed.has("_slot"):
+				# Fork open-slot fill: needs a real target (an unfilled slot isn't a real anchor). Carries
+				# only the destination + slot index; the base owns the choice's label/image.
+				if str(ed.get("to", "")) == "":
+					continue
+				anchors.append(
+					{"anchor": id, "edge": {"to": str(ed.get("to", ""))}, "slot": int(ed["_slot"])}
+				)
+			else:
+				# Ending-extend or an overlay fork choice: the full edge travels (its name/image_path are
+				# the rendition's own; the card image is pooled by _pool_anchor_images before writing). An
+				# empty `to` on an overlay fork choice is a valid "ends the run" choice, exactly as in the
+				# base editor — kept, not dropped.
+				var edge: Dictionary = ed.duplicate(true)
+				edge.erase("_anchor")
+				anchors.append({"anchor": id, "edge": edge})
+	return anchors
+
+
+# Pools the card image on any overlay fork-choice anchor edge into the rendition's media folder, then
+# rewrites that edge's absolute image_path to the pooled rel. The base fork these choices attach to is
+# skipped by _pool_graph_nodes, so — unlike a native fork's choices — their images are pooled here.
+# Anchors without an image (ending-extends, slot fills) pass through untouched. Sets _save_aborted on a
+# copy failure (the caller wipes staging), mirroring the node pooling.
+func _pool_anchor_images(anchors: Array, paths: Dictionary, modal: Control) -> Array:
+	var abs_dir: String = paths["abs_dir"]
+	var abs_media_dir: String = paths["abs_media_dir"]
+	var copied_images: Dictionary = paths["copied_images"]
+	for ai in anchors.size():
+		var edge: Dictionary = (anchors[ai] as Dictionary).get("edge", {})
+		if str(edge.get("image_path", "")) == "":
+			continue
+		var rel: String = await _store_journey_image(
+			str(edge["image_path"]),
+			abs_dir,
+			abs_media_dir,
+			"anchor_%d_cover" % ai,
+			copied_images,
+			JourneyData.ANIM_CAP_FORK,
+			modal
+		)
+		edge["image_path"] = rel
+		if _save_aborted:
+			break
+	return anchors
+
+
+# Presave for renditions. Requires a name + at least one new node/overlay so an empty rendition can't be
+# saved, then INHERITS the base editor's validation (per-node content + structural checks) via
+# _collect_rendition_presave_issues — a rendition is a distributable journey, so it's held to the same bar.
+func _validate_rendition_presave() -> bool:
+	if _journey_name.strip_edges() == "":
+		_show_status("Name the rendition in the Journey Info panel before saving.", true)
+		return false
+	var new_nodes: int = 0
+	for id: String in _graph_model.get("nodes", {}):
+		if not _rendition_parent_ids.has(id):
+			new_nodes += 1
+	if new_nodes == 0 and _rendition_slot_fills.is_empty():
+		_show_status("Add a new node or a channel overlay before saving.", true)
+		return false
+	var issues: Array = _collect_rendition_presave_issues()
+	if issues.is_empty():
+		return true
+	_show_save_error_modal(
+		"CANNOT SAVE RENDITION",
+		(
+			"Found %d issue%s in this rendition. Fix the items below and try again."
+			% [issues.size(), "s" if issues.size() != 1 else ""]
+		),
+		issues
+	)
+	return false
+
+
+# Inherits the base editor's validation, but SCOPED to the overlay. Per-node content checks run on the
+# rendition's OWN nodes only — the base's media was validated when the base was saved, and re-checking it
+# here is both wrong (they're the base author's files) and fragile: a channel-only overlay adds no nodes,
+# so re-checking the base would block it for a base clip that isn't the rendition's problem. Structural
+# checks run on the whole composed graph, but since the base is a valid DAG, only overlay-introduced
+# problems (unreachable overlay node, dangling/cyclic overlay edge) can surface; no_start is inherited.
+func _collect_rendition_presave_issues() -> Array:
+	var issues: Array = []
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var ordinals: Dictionary = JourneyGraph.type_ordinals(nodes)
+	for id: String in nodes:
+		if _rendition_parent_ids.has(id):
+			continue  # ghosted base node — already validated at base save
+		var n: Dictionary = nodes[id]
+		var data: Dictionary = n.get("data", {})
+		var ordinal: int = int(ordinals.get(id, 0))
+		match str(n.get("type", "")):
+			"round":
+				_save_check_round(data, "Round %d" % ordinal, issues)
+			"storyboard":
+				_save_check_storyboard(data, "Storyboard %d" % ordinal, issues)
+			"fork":
+				_save_check_fork_graph(n, "Fork %d" % ordinal, issues)
+	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model, _journey_finish_node):
+		if str(gi.get("kind", "")) == "no_start":
+			continue  # the rendition inherits the base's start through its anchors
+		var m: Dictionary = _structural_issue_to_presave(gi)
+		if not m.is_empty():
+			issues.append(m)
+	return issues
+
+
+# ── Channel overlays (slot-fills on base rounds) ─────────────────────────────
+
+
+# Routes a batch of dropped funscripts onto a ghosted base ROUND's EMPTY channels (the inline replacement
+# for the old CHANNEL OVERLAYS modal — called from the channel-overlay side-panel editor). Each script's
+# axis/vibe is inferred from its filename suffix; an empty slot gets a slot_fill; a slot the base or the
+# rendition already fills is skipped. Refreshes the editor and reports what landed.
+func _route_channel_scripts(round_id: String, paths: PackedStringArray) -> void:
+	var added: Array = []
+	var skipped: int = 0
+	for path: String in paths:
+		var field: String
+		var channel: String
+		var vib: String = ImportScanner.detect_vib_channel(path)
+		if vib != "":
+			field = "vib_scripts"
+			channel = vib
+		else:
+			var axis: String = ImportScanner.detect_funscript_axis(path)
+			if axis == "L0":  # main stroke — the base owns it; not an overlay channel
+				skipped += 1
+				continue
+			field = "axis_scripts"
+			channel = axis
+		if _channel_slot_occupied(round_id, field, channel):
+			skipped += 1
+			continue
+		_rendition_slot_fills.append(
+			{"node": round_id, "field": field, "channel": channel, "path": path}
+		)
+		added.append(channel)
+	_side_renderer.show_graph_node_editor(round_id)
+	if added.is_empty() and skipped == 0:
+		_show_status(
+			"No axis/vibe scripts recognised — check filename suffixes (_L1, _R1, _vib1…).", true
+		)
+	elif added.is_empty():
+		_show_status("Nothing added — those channels are already filled (base or overlay).", true)
+	else:
+		var msg: String = (
+			"Overlaid %d channel%s: %s"
+			% [added.size(), "s" if added.size() != 1 else "", ", ".join(added)]
+		)
+		if skipped > 0:
+			msg += "  ·  %d skipped" % skipped
+		_show_status(msg, false)
+
+
+# True when a base round's channel slot can't take an overlay — the base already fills it, or the rendition
+# already slot-filled it this session.
+func _channel_slot_occupied(round_id: String, field: String, channel: String) -> bool:
+	var data: Dictionary = (_graph_model.get("nodes", {}).get(round_id, {}) as Dictionary).get(
+		"data", {}
+	)
+	if (data.get(field, {}) as Dictionary).has(channel):
+		return true
+	return _find_slot_fill(round_id, field, channel) >= 0
+
+
+# Removes a channel overlay (slot-fill) from a base round and refreshes its editor.
+func _remove_slot_fill(round_id: String, field: String, channel: String) -> void:
+	var idx: int = _find_slot_fill(round_id, field, channel)
+	if idx >= 0:
+		_rendition_slot_fills.remove_at(idx)
+		_side_renderer.show_graph_node_editor(round_id)
+
+
+# Removes ALL channel overlays this rendition added to `round_id` (the "wrong scripts" bulk escape hatch).
+func _clear_round_slot_fills(round_id: String) -> void:
+	var kept: Array = []
+	for sf: Dictionary in _rendition_slot_fills:
+		if str(sf.get("node", "")) != round_id:
+			kept.append(sf)
+	_rendition_slot_fills = kept
+	_side_renderer.show_graph_node_editor(round_id)
+	_show_status("Cleared this round's channel overlays.", false)
+
+
+func _find_slot_fill(round_id: String, field: String, channel: String) -> int:
+	for i: int in _rendition_slot_fills.size():
+		var sf: Dictionary = _rendition_slot_fills[i]
+		if (
+			str(sf.get("node", "")) == round_id
+			and str(sf.get("field", "")) == field
+			and str(sf.get("channel", "")) == channel
+		):
+			return i
+	return -1
+
+
+# Precise single-channel attach (the ＋ on a channel row): a file picker whose result fills that exact
+# channel regardless of the file's name. Refreshes the round's channel-overlay editor.
+func _pick_slot_fill_script(round_id: String, field: String, channel: String) -> void:
+	var dialog: FileDialog = FileDialog.new()
+	dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	dialog.access = FileDialog.ACCESS_FILESYSTEM
+	dialog.title = "Attach %s Script" % channel
+	dialog.add_filter("*.funscript", "Funscript")
+	SettingsService.remember_browse_dir(dialog)
+	dialog.file_selected.connect(
+		func(path: String) -> void:
+			dialog.queue_free()
+			if not _channel_slot_occupied(round_id, field, channel):
+				_rendition_slot_fills.append(
+					{"node": round_id, "field": field, "channel": channel, "path": path}
+				)
+			_side_renderer.show_graph_node_editor(round_id)
+	)
+	dialog.canceled.connect(dialog.queue_free)
+	add_child(dialog)
+	dialog.popup_centered_ratio(0.6)
+
+
+# Pools each channel-overlay script into the rendition's content/ (deduped against the nodes already
+# pooled this save) and returns the slot_fills with pooled rel paths for the delta. Call AFTER
+# _pool_graph_nodes so the pool map is live.
+func _pool_slot_fills(abs_dir: String) -> Array:
+	var out: Array = []
+	for sf: Dictionary in _rendition_slot_fills:
+		var src: String = str(sf.get("path", ""))
+		if src == "":
+			continue
+		var rel: String = str(_pool_funscript(src, abs_dir).get("rel", ""))
+		if rel == "":
+			continue
+		(
+			out
+			. append(
+				{
+					"node": str(sf.get("node", "")),
+					"field": str(sf.get("field", "")),
+					"channel": str(sf.get("channel", "")),
+					"path": rel,
+				}
+			)
+		)
+	return out
+
+
 # Clears all in-flight save state so a previous failed save can't bleed into
 # this one (stale _save_aborted flag, leftover error stash, round counter
 # from a partial walk).
@@ -2919,6 +4486,7 @@ func _reset_save_state() -> void:
 	_transcode_cancel = false
 	_save_aborted = false
 	_save_abort_error = {}
+	_anim_truncated.clear()
 	_round_folder_counter = 0
 	_invalidated_save_count = 0
 	_pending_test_location = {}
@@ -2941,13 +4509,13 @@ func _validate_presave() -> bool:
 	return false
 
 
-# The _transcode_plan key for a (source, trim) combo. Untrimmed keeps the bare
-# source path (legacy shape); a pending trim gets its own entry so the same
-# source can be cut differently — or not at all — by different rounds.
-func _transcode_plan_key(src: String, trim_in: int, trim_out: int) -> String:
-	if trim_in <= 0 and trim_out <= 0:
-		return src
-	return "%s|trim:%d-%d" % [src, trim_in, trim_out]
+# The _transcode_plan key for a (source, segments) combo. An uncut source keeps the bare
+# source path (legacy shape); a segment list gets its own entry so the same source can be
+# cut differently — or not at all — by different rounds. Shares JourneyData's identity
+# spelling so the key and the pooled fingerprint always agree on what "the same cut" means.
+func _transcode_plan_key(src: String, segments: Array) -> String:
+	var id: String = JourneyData.segments_identity(segments)
+	return src if id == "" else "%s|%s" % [src, id]
 
 
 # Populates _transcode_plan by probing every (video source, pending trim) combo
@@ -2957,14 +4525,54 @@ func _transcode_plan_key(src: String, trim_in: int, trim_out: int) -> String:
 # seconds off and silently desync the rebased funscript). Trims are baked even
 # with auto-transcode OFF, so ffmpeg is required whenever any trim is pending.
 # Returns false — with an actionable modal — when ffmpeg is needed but can't run.
+# Blocks the save when the journey uses animated images but ffmpeg can't run.
+#
+# Deliberately separate from _build_transcode_plan's gate, which can't cover this: that one returns
+# early when the journey has no video at all (a storyboard-only journey can still use a GIF), and
+# again when Auto-Transcode is off. Baking a GIF is NOT optional the way transcoding a video is —
+# Godot has no GIF decoder, so an unbaked GIF is simply an invisible image. There's no soft
+# fallback either: extracting even its first frame needs ffmpeg.
+func _check_animated_images() -> bool:
+	var sources: Array = JourneyData.graph_animated_image_sources(
+		_graph_model, MediaPoolService.ANIMATED_EXTENSIONS
+	)
+	if _cover_path != "" and MediaPoolService.is_animated_source(_cover_path):
+		sources.append(_cover_path)
+	# Character portraits are journey-level (not in the graph), so scan them here too — an animated
+	# portrait needs the same bake as any other animated image.
+	for c: Variant in _journey_characters:
+		if c is Dictionary:
+			for por: Variant in (c as Dictionary).get("portraits", []):
+				var p: String = str((por as Dictionary).get("path", ""))
+				if p != "" and MediaPoolService.is_animated_source(p):
+					sources.append(p)
+	if sources.is_empty() or MediaPoolService.is_available():
+		return true
+
+	var names: PackedStringArray = []
+	for s: String in sources:
+		names.append((s as String).get_file())
+	_show_save_error_single(
+		"CANNOT SAVE JOURNEY",
+		CAUSE_FFMPEG_MISSING,
+		"Journey",
+		(
+			"This journey uses animated images (%s), but ffmpeg / ffprobe could not be run. Animated images must be converted before the game can show them — unlike video transcoding, this can't be skipped."
+			% ", ".join(names)
+		),
+		"Set a custom ffmpeg location in Options → Transcoding (a folder containing ffmpeg and ffprobe), or install ffmpeg on your PATH. Alternatively, replace the animated images with still ones (PNG / JPG / WebP)."
+	)
+	return false
+
+
 func _build_transcode_plan() -> bool:
 	_transcode_plan = {}
 	if not JourneyData.graph_has_any_video(_graph_model):
 		return true
 
-	# Every round's (source, trim) combo; identical combos plan (and pool) once.
-	var combos: Dictionary = {}  # plan key → {src, trim_in, trim_out}
-	var any_trim: bool = false
+	# Every round's (source, segments) combo; identical combos plan (and pool) once.
+	var combos: Dictionary = {}  # plan key → {src, segments}
+	var any_cut: bool = false
 	for nid: String in _graph_model.get("nodes", {}):
 		var node: Dictionary = _graph_model["nodes"][nid]
 		if str(node.get("type", "")) != "round":
@@ -2972,22 +4580,23 @@ func _build_transcode_plan() -> bool:
 		var data: Dictionary = node.get("data", {})
 		var src: String = str(data.get("video_path", ""))
 		if src != "":
-			var t_in: int = int(data.get("trim_start_ms", 0))
-			var t_out: int = int(data.get("trim_end_ms", 0))
-			any_trim = any_trim or t_in > 0 or t_out > 0
-			combos[_transcode_plan_key(src, t_in, t_out)] = {
-				"src": src, "trim_in": t_in, "trim_out": t_out
-			}
-		# Pool round: each encounter entry's video is its own source (no trim).
+			# A multi-segment round bakes outside this plan (see _pool_video_into) because it
+			# always re-encodes; it still needs to flip any_cut so the ffmpeg gate below fires
+			# even with Auto-Transcode off. A single segment is a plain trim and plans normally.
+			var segs: Array = JourneyData.normalize_segments(data)
+			any_cut = any_cut or not segs.is_empty()
+			if segs.size() <= 1:
+				combos[_transcode_plan_key(src, segs)] = {"src": src, "segments": segs}
+		# Pool round: each encounter entry's video is its own source (never cut).
 		for pe: Variant in data.get("pool_entries", []):
 			var pv: String = str((pe as Dictionary).get("video_path", ""))
 			if pv != "":
-				combos[_transcode_plan_key(pv, 0, 0)] = {"src": pv, "trim_in": 0, "trim_out": 0}
+				combos[_transcode_plan_key(pv, [])] = {"src": pv, "segments": []}
 
 	# Auto-transcode disabled: copy videos verbatim and require nothing of
 	# ffmpeg (the escape hatch for setups where ffmpeg can't run, e.g. some
-	# Wine) — UNLESS a trim is pending, which can only ship as a re-encode.
-	if not SettingsService.get_auto_transcode() and not any_trim:
+	# Wine) — UNLESS a cut is pending, which can only ship as a re-encode.
+	if not SettingsService.get_auto_transcode() and not any_cut:
 		return true
 
 	# Honest fallback: without ffprobe/ffmpeg we can neither verify, convert,
@@ -3008,11 +4617,10 @@ func _build_transcode_plan() -> bool:
 	for key: String in combos:
 		var combo: Dictionary = combos[key]
 		var src: String = str(combo["src"])
-		var t_in: int = int(combo["trim_in"])
-		var t_out: int = int(combo["trim_out"])
-		var is_trim: bool = t_in > 0 or t_out > 0
+		var segs: Array = combo["segments"]
+		var is_trim: bool = not segs.is_empty()
 		if not auto_transcode and not is_trim:
-			continue  # transcode off: only pending trims are baked
+			continue  # transcode off: only pending cuts are baked
 
 		if not src_info.has(src):
 			src_info[src] = MediaPoolService.probe_stream_info(src)
@@ -3027,14 +4635,10 @@ func _build_transcode_plan() -> bool:
 			src_duration[src] = MediaPoolService.probe_duration_seconds(src)
 		var duration: float = float(src_duration[src])
 		if is_trim:
-			# Progress-bar duration = the trimmed window's length.
-			var end_s: float = (t_out / 1000.0) if t_out > 0 else duration
-			if duration > 0.0:
-				end_s = minf(end_s, duration)
-			duration = maxf(0.0, end_s - t_in / 1000.0)
-		_transcode_plan[key] = {
-			"codec": reason, "duration": duration, "trim_in": t_in, "trim_out": t_out
-		}
+			# Progress-bar duration = the baked length (only single-segment combos reach here;
+			# multi-segment rounds bake through _pool_video_into with their own progress).
+			duration = JourneyData.segments_total_ms(segs, roundi(duration * 1000.0)) / 1000.0
+		_transcode_plan[key] = {"codec": reason, "duration": duration, "segments": segs}
 
 	return true
 
@@ -3084,8 +4688,21 @@ func _setup_save_folders() -> Dictionary:
 	# the cover slot AND a storyboard wouldn't get copied twice.
 	var copied_images: Dictionary = {}
 	if _cover_path != "":
-		var ext: String = _cover_path.get_extension().to_lower()
-		_copy_image_deduped(_cover_path, abs_media_dir, "cover." + ext, copied_images)
+		if MediaPoolService.is_animated_source(_cover_path):
+			# The cover deliberately never animates — it sits in the catalogue grid, where N moving
+			# cards would cost real frames for no gain. But Godot can't read a GIF at all, so bake
+			# its first frame to a PNG. Unlike the in-game surfaces this does NOT go to the content
+			# pool: it has to land in media/ named "cover.*", which is where
+			# JourneyScanner.find_cover_image looks for it.
+			MediaPoolService.extract_first_frame(
+				_cover_path,
+				abs_media_dir + "/cover.png",
+				JourneyData.ANIM_CAP_COVER.x,
+				JourneyData.ANIM_CAP_COVER.y
+			)
+		else:
+			var ext: String = _cover_path.get_extension().to_lower()
+			_copy_image_deduped(_cover_path, abs_media_dir, "cover." + ext, copied_images)
 
 	return {
 		"journey_name": journey_name,
@@ -3101,11 +4718,48 @@ func _setup_save_folders() -> Dictionary:
 # transfer video bytes. Returns null when there are no videos to save (no
 # point in flashing a modal that immediately dismisses).
 func _create_save_progress_modal_if_needed() -> Control:
-	if not JourneyData.graph_has_any_video(_graph_model):
+	# Animated images are encodes too, and a journey can have them with no video at all (a
+	# storyboard-only journey) — without this it would bake with no modal and look frozen.
+	var has_anim: bool = not (
+		JourneyData
+		. graph_animated_image_sources(_graph_model, MediaPoolService.ANIMATED_EXTENSIONS)
+		. is_empty()
+	)
+	if not JourneyData.graph_has_any_video(_graph_model) and not has_anim:
 		return null
 	var modal: Control = _create_transcode_modal()
 	add_child(modal)
 	return modal
+
+
+# Copies this journey's OWN backdrop layers into media/map_<n>.<ext> (static images, deduped) and returns
+# their on-disk meta [{Image, X, Y, Scale, Opacity}]. Base context layers (_base_backdrops) are NOT saved —
+# they live in the base journey. Used by both the base save and the rendition delta save.
+func _save_map_backdrops(abs_media_dir: String, copied_images: Dictionary) -> Array:
+	var meta: Array = []
+	for i: int in _map_backdrops.size():
+		var b: Dictionary = _map_backdrops[i]
+		var src: String = str(b.get("path", ""))
+		if src == "" or MediaPoolService.is_animated_source(src):
+			continue
+		var ext: String = src.get_extension().to_lower()
+		var fname: String = "map_%d.%s" % [i + 1, ext]
+		_copy_image_deduped(src, abs_media_dir, fname, copied_images)
+		var off: Vector2 = b.get("offset", Vector2.ZERO)
+		(
+			meta
+			. append(
+				{
+					"Image": fname,
+					"X": off.x,
+					"Y": off.y,
+					"Scale": float(b.get("scale", 1.0)),
+					"Opacity": float(b.get("opacity", 0.6)),
+					"Rot": float(b.get("rotation", 0.0)),
+				}
+			)
+		)
+	return meta
 
 
 # Graph-editor save: walks _graph_model into the Format-2 journey.json shape
@@ -3114,6 +4768,93 @@ func _create_save_progress_modal_if_needed() -> Control:
 # journey.json dict, or {} on cancel/I-O failure (the error modal + staging cleanup happen in
 # _do_save).
 func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
+	var abs_dir: String = paths["abs_dir"]
+	var abs_media_dir: String = paths["abs_media_dir"]
+	var copied_images: Dictionary = paths["copied_images"]
+
+	var pooled: Dictionary = await _pool_graph_nodes(paths, modal)
+	if not bool(pooled["ok"]):
+		return {}
+	var out_nodes: Dictionary = pooled["nodes"]
+
+	# Assemble the Format-2 node block (Format/Start/Nodes) + journey meta around it.
+	# Redirects are intentionally gone — in a free-form graph, skip/converge/end are just
+	# edges (GRAPH_EDITOR_OVERHAUL.md §7).
+	var node_block: Dictionary = JourneyGraph.to_json(
+		{"start": _graph_model.get("start", ""), "nodes": out_nodes}
+	)
+
+	# Pool custom-item icons into content/ (small stills, hash-deduped) so the saved Items block
+	# carries a relative pooled path rather than the author's absolute source path.
+	var items_for_save: Array = []
+	for it: Dictionary in _journey_items:
+		var saved_item: Dictionary = (it as Dictionary).duplicate(true)
+		var img_src: String = str(saved_item.get("image", ""))
+		if img_src != "":
+			saved_item["image"] = _pool_small_file(img_src, abs_dir)
+		items_for_save.append(saved_item)
+
+	# Store each cast portrait through the same image path as boss/storyboard art — a still is deduped
+	# into media/, an animated source (gif/apng/mp4/…) is baked to looping H.264 in content/ and played
+	# by JourneyImage at runtime. Keyed by character id + portrait id so nothing collides. A character's
+	# placements are pure fraction boxes, so they persist verbatim (no media).
+	var characters_for_save: Array = []
+	for c: Dictionary in _journey_characters:
+		var saved_char: Dictionary = (c as Dictionary).duplicate(true)
+		var portraits_out: Array = []
+		for por: Variant in saved_char.get("portraits", []):
+			var por_copy: Dictionary = (por as Dictionary).duplicate(true)
+			var src: String = str(por_copy.get("path", ""))
+			if src != "":
+				por_copy["path"] = await _store_journey_image(
+					src,
+					abs_dir,
+					abs_media_dir,
+					"char_%s_%s" % [str(saved_char.get("id", "x")), str(por_copy.get("id", "p"))],
+					copied_images,
+					JourneyData.ANIM_CAP_PORTRAIT,
+					modal
+				)
+			portraits_out.append(por_copy)
+		saved_char["portraits"] = portraits_out
+		characters_for_save.append(saved_char)
+
+	var result: Dictionary = {
+		"Name": paths["journey_name"],
+		"Author": _journey_author.strip_edges(),
+		"Description": _journey_desc.strip_edges(),
+		"Difficulty": JourneyData.DIFFICULTIES[_journey_difficulty_idx],
+		"Tags": TagRegistry.sanitize(_journey_tags),
+		"MapEnabled": _journey_map_enabled,
+		"ShowForkCounts": _journey_show_fork_counts,
+		"ShowLoopsOnMap": _journey_show_loops_on_map,
+		"MapBackdrops": _save_map_backdrops(abs_media_dir, copied_images),
+		"MapFog": _journey_map_fog,
+		"MapFogReveal": _journey_map_fog_reveal,
+		"AutoAdvanceEnabled": _journey_auto_advance_enabled,
+		"AutoAdvanceStoryboardSecs": _journey_auto_advance_storyboard_secs,
+		"AutoAdvanceForkSecs": _journey_auto_advance_fork_secs,
+		"ShownCounters": JourneyData.clean_flag_list(_journey_shown_counters),
+		"AllowFinish": _journey_allow_finish,
+		"FinishNode": _journey_finish_node,
+		"Items": JourneyData.coerce_journey_items(items_for_save),
+		"Characters": JourneyData.coerce_journey_characters(characters_for_save),
+	}
+	# Identity + version stamps. _journey_id is empty for a new journey (minted here) and carries
+	# the loaded id for an existing one, so re-saving — or renaming — never changes it.
+	JourneyData.stamp_journey_identity(result, _journey_id)
+	_journey_id = str(result["JourneyId"])
+	result.merge(node_block)  # adds Format, Start, Nodes
+	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))
+	result["Groups"] = _serialize_groups(_graph_model.get("groups", []))
+	return result
+
+
+# Pools every non-skipped node's media into the staging content/media dirs, returning
+# {"ok": bool, "nodes": {id:{type,data,out,pos?}}}. Shared by the journey save and the rendition save
+# (which passes the ghosted base node ids as skip_ids). ok=false ⇒ a transcode/copy failed and the error
+# modal was already shown.
+func _pool_graph_nodes(paths: Dictionary, modal: Control, skip_ids: Dictionary = {}) -> Dictionary:
 	var abs_dir: String = paths["abs_dir"]
 	var abs_media_dir: String = paths["abs_media_dir"]
 	var copied_images: Dictionary = paths["copied_images"]
@@ -3128,11 +4869,13 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 	# Round count drives the transcode modal's "Round x / N" label.
 	var total_rounds: int = 0
 	for id: String in nodes_in:
-		if str((nodes_in[id] as Dictionary).get("type", "")) == "round":
+		if not skip_ids.has(id) and str((nodes_in[id] as Dictionary).get("type", "")) == "round":
 			total_rounds += 1
 	var round_seen: int = 0
 
 	for id: String in nodes_in:
+		if skip_ids.has(id):
+			continue
 		if _save_aborted:
 			break
 		var node: Dictionary = nodes_in[id]
@@ -3148,22 +4891,29 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 					saved_data, data_in, abs_dir, modal, round_seen, total_rounds
 				)
 				if saved_data.is_empty():
-					return {}  # transcode/copy failure: modal already shown
+					return {"ok": false, "nodes": {}}  # transcode/copy failure: modal already shown
 			"storyboard":
-				saved_data = _save_storyboard_node_media(
-					saved_data, data_in, abs_media_dir, id, copied_images
+				saved_data = await _save_storyboard_node_media(
+					saved_data, data_in, abs_dir, abs_media_dir, id, copied_images, modal
 				)
-			"cutscene":
-				saved_data = await _save_cutscene_node_media(
-					saved_data, data_in, abs_dir, modal
-				)
-				if saved_data.is_empty():
-					return {}
 			"fork":
-				saved_out = _save_fork_node_edges(
-					node.get("out", []), abs_media_dir, id, copied_images
+				saved_out = await _save_fork_node_edges(
+					node.get("out", []), abs_dir, abs_media_dir, id, copied_images, modal
 				)
-			"shop", "cooldown":
+				# Optional fork audio accent — pooled like the storyboard's, replacing the author's
+				# absolute source path (carried in by coerce's data.duplicate) with the pooled rel.
+				var fork_audio: String = _pool_small_file(str(data_in.get("audio", "")), abs_dir)
+				if fork_audio != "":
+					saved_data["audio"] = fork_audio
+					saved_data["audio_loop"] = bool(data_in.get("audio_loop", false))
+					saved_data["audio_volume"] = clampf(
+						float(data_in.get("audio_volume", 1.0)), 0.0, 1.0
+					)
+				else:
+					saved_data.erase("audio")
+					saved_data.erase("audio_loop")
+					saved_data.erase("audio_volume")
+			"shop", "checkpoint":
 				pass  # no media
 
 		# A non-video copy (funscript / axis / vib / boss / image) failed somewhere above.
@@ -3173,38 +4923,14 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 			)
 			var si: String = _save_abort_error.get("item", "File copy")
 			_show_copy_failure_modal(sr, si)
-			return {}
+			return {"ok": false, "nodes": {}}
 
 		var saved_node: Dictionary = {"type": node_type, "data": saved_data, "out": saved_out}
 		if node.has("pos"):
 			saved_node["pos"] = node["pos"]
 		out_nodes[id] = saved_node
 
-	# Assemble the Format-2 node block (Format/Start/Nodes) + journey meta around it.
-	# Redirects are intentionally gone — in a free-form graph, skip/converge/end are just
-	# edges (GRAPH_EDITOR_OVERHAUL.md §7).
-	var node_block: Dictionary = JourneyGraph.to_json(
-		{"start": _graph_model.get("start", ""), "nodes": out_nodes}
-	)
-	var result: Dictionary = {
-		"Name": paths["journey_name"],
-		"Author": _journey_author.strip_edges(),
-		"Description": _journey_desc.strip_edges(),
-		"Difficulty": JourneyData.DIFFICULTIES[_journey_difficulty_idx],
-		"Tags": TagRegistry.sanitize(_journey_tags),
-		"MapEnabled": _journey_map_enabled,
-		"MapFog": _journey_map_fog,
-		"MapFogReveal": _journey_map_fog_reveal,
-		"UnlockPayPerUse": _journey_unlock_pay_per_use,
-		# Version stamps: CreatedWith = the exact app build that wrote this file (informational);
-		# MinVersion = the floor needed to open it safely (JourneySelect gates on this).
-		"CreatedWith": str(ProjectSettings.get_setting("application/config/version", "")),
-		"MinVersion": JOURNEY_MIN_APP_VERSION,
-	}
-	result.merge(node_block)  # adds Format, Start, Nodes
-	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))
-	result["Groups"] = _serialize_groups(_graph_model.get("groups", []))
-	return result
+	return {"ok": true, "nodes": out_nodes}
 
 
 # Serializes the editor's sticky-note comments to the journey.json `Comments` overlay (runtime ignores it).
@@ -3215,6 +4941,8 @@ func _serialize_comments(comments: Array) -> Array:
 		var entry: Dictionary = {"Pos": [p.x, p.y], "Text": str(c.get("text", ""))}
 		if c.has("color"):
 			entry["Color"] = (c["color"] as Color).to_html()
+		if str(c.get("node_id", "")) != "":
+			entry["NodeId"] = str(c["node_id"])  # pinned note — follows this node in the builder
 		out.append(entry)
 	return out
 
@@ -3257,40 +4985,44 @@ func _save_round_node_media(
 ) -> Dictionary:
 	var round_name: String = str(saved_data.get("name", "")).strip_edges()
 	# FolderName slug — a stable logical round id + the legacy folder-scan fallback key.
-	# In-journey assets keep their relative paths; external imports still pool under content/.
+	# No per-round folder is created; all playback assets pool into content/ by hash.
 	saved_data["folder"] = _next_round_folder_slug()
 
-	# Pending trim (consumed by this save): the video is cut and every script
-	# rebased to the window; journey.json never carries the trim itself.
-	var trim_in: int = int(data_in.get("trim_start_ms", 0))
-	var trim_out: int = int(data_in.get("trim_end_ms", 0))
+	# Pending segments, consumed by this save: the video is cut to them and every script rebased
+	# to match. Empty for an uncut round (the common case). normalize_segments migrates the
+	# legacy trim / section-loop fields, so an older round bakes identically.
+	var segments: Array = JourneyData.normalize_segments(data_in)
+
 	# The round's OWN media (funscript / axis / vib / boss image / video). All empty
 	# for a pool round — its media lives in the entries, pooled below.
-	var fs: Dictionary = _pool_funscript(
-		str(data_in.get("funscript_path", "")), abs_dir, trim_in, trim_out
-	)
+	var fs: Dictionary = _pool_funscript(str(data_in.get("funscript_path", "")), abs_dir, segments)
 	saved_data["funscript_path"] = fs["rel"]
 	saved_data["action_count"] = fs["count"]
 	saved_data["length_ms"] = fs["length_ms"]
 
-	# Secondary-axis + vib scripts — pooled, keyed by channel (suffix preserved),
-	# trim-rebased identically. Dual Restim kits under restim_axis_scripts.
-	var ras_in: Dictionary = JourneyData.coerce_restim_axis_scripts(data_in)
-	var ras_out: Dictionary = JourneyData.empty_restim_axis_scripts()
-	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-		ras_out[slot] = _pool_channels(
-			ras_in[slot] as Dictionary, abs_dir, JourneyData.AXIS_SUFFIXES, trim_in, trim_out
-		)
-	saved_data["restim_axis_scripts"] = ras_out
-	saved_data["axis_scripts"] = (ras_out["shared"] as Dictionary).duplicate(true)
+	# Secondary-axis + vib scripts — pooled, keyed by channel (suffix preserved), cut
+	# identically to the main funscript.
+	saved_data["axis_scripts"] = _pool_channels(
+		data_in.get("axis_scripts", {}), abs_dir, JourneyData.AXIS_SUFFIXES, segments
+	)
 	saved_data["vib_scripts"] = _pool_channels(
-		data_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, trim_in, trim_out
+		data_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, segments
 	)
 
-	# Boss intro image (boss rounds only) → content pool.
+	# restim (E-Stim Full) parameter scripts — pooled, keyed by restim axis; trimmed identically.
+	saved_data["estim_scripts"] = _pool_channels(
+		data_in.get("estim_scripts", {}), abs_dir, JourneyData.ESTIM_SUFFIXES, segments
+	)
+
+	# Boss intro image (boss rounds only) → content pool. A GIF is baked to a looping H.264 (or a
+	# PNG if it's single-frame) — Godot can't decode GIF, so it can never ship verbatim.
 	var boss_rel: String = ""
 	if str(saved_data.get("round_type", "normal")) == "boss":
-		boss_rel = _pool_small_file(str(data_in.get("boss_image", "")), abs_dir)
+		var boss_src: String = str(data_in.get("boss_image", ""))
+		var gif: Dictionary = await _store_gif_source(
+			boss_src, abs_dir, JourneyData.ANIM_CAP_BOSS, false, modal
+		)
+		boss_rel = str(gif["rel"]) if gif["handled"] else _pool_small_file(boss_src, abs_dir)
 	saved_data["boss_image"] = boss_rel
 
 	# Video → content pool. Legacy fallback: a pre-VideoPath round carries its video
@@ -3299,30 +5031,20 @@ func _save_round_node_media(
 	if vid_src == "":
 		vid_src = JourneyData.find_video_in_round(str(data_in.get("folder", "")))
 	var vres: Dictionary = await _pool_video_into(
-		vid_src,
-		abs_dir,
-		modal,
-		round_name,
-		'Round "%s"' % round_name,
-		rorder,
-		total,
-		trim_in,
-		trim_out
+		vid_src, abs_dir, modal, round_name, 'Round "%s"' % round_name, rorder, total, segments
 	)
 	if not vres["ok"]:
 		return {}
 	saved_data["video_path"] = vres["rel"]
 
 	# Pool round: pool each encounter entry's media (video + funscript + axis/vib),
-	# rewriting each entry's paths to content/ rels. No trim on entries.
+	# rewriting each entry's paths to content/ rels. Entries are never cut.
 	if str(saved_data.get("round_type", "normal")) == "pool":
 		var entries_out: Array = []
 		for pe: Variant in data_in.get("pool_entries", []):
 			var entry_in: Dictionary = pe
 			var ename: String = str(entry_in.get("name", "")).strip_edges()
-			var e_fs: Dictionary = _pool_funscript(
-				str(entry_in.get("funscript_path", "")), abs_dir, 0, 0
-			)
+			var e_fs: Dictionary = _pool_funscript(str(entry_in.get("funscript_path", "")), abs_dir)
 			var e_vid: Dictionary = await _pool_video_into(
 				str(entry_in.get("video_path", "")),
 				abs_dir,
@@ -3330,30 +5052,22 @@ func _save_round_node_media(
 				ename,
 				'Encounter "%s"' % ename,
 				rorder,
-				total,
-				0,
-				0
+				total
 			)
 			if not e_vid["ok"]:
 				return {}
-			var e_ras_in: Dictionary = JourneyData.coerce_restim_axis_scripts(entry_in)
-			var e_ras_out: Dictionary = JourneyData.empty_restim_axis_scripts()
-			for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-				e_ras_out[slot] = _pool_channels(
-					e_ras_in[slot] as Dictionary, abs_dir, JourneyData.AXIS_SUFFIXES, 0, 0
-				)
 			var entry_out: Dictionary = {
 				"name": ename,
 				"video_path": e_vid["rel"],
 				"funscript_path": e_fs["rel"],
 				"action_count": e_fs["count"],
 				"length_ms": e_fs["length_ms"],
-				"restim_axis_scripts": e_ras_out,
-				"axis_scripts": (e_ras_out["shared"] as Dictionary).duplicate(true),
-				"vib_scripts":
+				"axis_scripts":
 				_pool_channels(
-					entry_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES, 0, 0
+					entry_in.get("axis_scripts", {}), abs_dir, JourneyData.AXIS_SUFFIXES
 				),
+				"vib_scripts":
+				_pool_channels(entry_in.get("vib_scripts", {}), abs_dir, JourneyData.VIB_SUFFIXES),
 				"weight": maxi(1, int(entry_in.get("weight", 1))),
 				# Per-entry type (a rolled encounter can be a boss). Boss config rides along;
 				# its intro image is pooled like a boss round's.
@@ -3364,8 +5078,13 @@ func _save_round_node_media(
 					(entry_in.get("boss_modifiers", []) as Array).duplicate(true)
 				)
 				entry_out["boss_tagline"] = str(entry_in.get("boss_tagline", ""))
-				entry_out["boss_image"] = _pool_small_file(
-					str(entry_in.get("boss_image", "")), abs_dir
+				# Same GIF-bake rule as a round-level boss image (Godot can't show a GIF).
+				var e_boss_src: String = str(entry_in.get("boss_image", ""))
+				var e_gif: Dictionary = await _store_gif_source(
+					e_boss_src, abs_dir, JourneyData.ANIM_CAP_BOSS, false, modal
+				)
+				entry_out["boss_image"] = (
+					str(e_gif["rel"]) if e_gif["handled"] else _pool_small_file(e_boss_src, abs_dir)
 				)
 				entry_out["sensory"] = (entry_in.get("sensory", []) as Array).duplicate(true)
 			entries_out.append(entry_out)
@@ -3374,46 +5093,38 @@ func _save_round_node_media(
 	return saved_data
 
 
-# Pools a funscript source into content/ (trim-rebased when trim set), caching stats
-# by fingerprint so a reused source is parsed once. Returns {rel, count, length_ms};
-# empty source → empty rel + zero stats.
-func _pool_funscript(fs_src: String, abs_dir: String, trim_in: int, trim_out: int) -> Dictionary:
+# Pools a funscript source into content/ (rebased to the round's segments when it has any),
+# caching stats by fingerprint so a reused source is parsed once. Returns {rel, count,
+# length_ms}; empty source → empty rel + zero stats.
+func _pool_funscript(fs_src: String, abs_dir: String, segments: Array = []) -> Dictionary:
 	if fs_src == "":
 		return {"rel": "", "count": 0, "length_ms": 0}
-	var abs_src: String = _resolve_media_abs(fs_src)
-	var pool: Dictionary = _assign_pooled_media(fs_src, fs_src.get_extension(), trim_in, trim_out)
+	var pool: Dictionary = _assign_pooled_media(fs_src, fs_src.get_extension(), segments)
 	var rel: String = pool["rel"]
 	var stats: Dictionary = {"count": 0, "length_ms": 0}
 	if pool["copy"]:
 		var dst: String = abs_dir + "/" + rel
-		_ensure_parent_dir(dst)
-		if trim_in > 0 or trim_out > 0:
-			_write_trimmed_funscript(abs_src if abs_src != "" else fs_src, dst, trim_in, trim_out)
+		if segments.is_empty():
+			_copy_file(fs_src, dst)
 		else:
-			_copy_file(abs_src if abs_src != "" else fs_src, dst)
+			_write_edl_funscript(fs_src, dst, segments)
 		stats = JourneyData.read_funscript_stats(dst)
 		_pooled_fs_stats[pool["fingerprint"]] = stats
 	else:
 		stats = _pooled_fs_stats.get(pool["fingerprint"], stats)
-		# Keep-as-is reuse: stats may not be cached yet this save — read from source.
-		if int(stats.get("count", 0)) == 0 and int(stats.get("length_ms", 0)) == 0:
-			var read_from: String = abs_src if abs_src != "" else (abs_dir + "/" + rel)
-			if FileAccess.file_exists(read_from):
-				stats = JourneyData.read_funscript_stats(read_from)
-				_pooled_fs_stats[pool["fingerprint"]] = stats
 	return {"rel": rel, "count": stats["count"], "length_ms": stats["length_ms"]}
 
 
 # Pools a {channel: source} map (secondary-axis or vib scripts) into content/, keyed
 # by channel with the suffix preserved. Returns {channel: rel} (skips empty sources).
 func _pool_channels(
-	channels_in: Dictionary, abs_dir: String, suffixes: Dictionary, trim_in: int, trim_out: int
+	channels_in: Dictionary, abs_dir: String, suffixes: Dictionary, segments: Array = []
 ) -> Dictionary:
 	var out: Dictionary = {}
 	for ch: String in channels_in:
 		var src: String = str(channels_in[ch])
 		var rel: String = _pool_small_file(
-			src, abs_dir, _channel_pool_ext(suffixes.get(ch, ""), src), trim_in, trim_out
+			src, abs_dir, _channel_pool_ext(suffixes.get(ch, ""), src), segments
 		)
 		if rel != "":
 			out[ch] = rel
@@ -3433,27 +5144,60 @@ func _pool_video_into(
 	subject: String,
 	rorder: int,
 	total: int,
-	trim_in: int,
-	trim_out: int
+	segments: Array = []
 ) -> Dictionary:
 	if vid_src == "":
 		return {"rel": "", "ok": true}
-	var abs_src: String = _resolve_media_abs(vid_src)
-	var plan_key: String = _transcode_plan_key(vid_src, trim_in, trim_out)
-	var is_transcode: bool = _transcode_plan.has(plan_key)
-	var vid_ext: String = "mp4" if is_transcode else vid_src.get_extension()
-	var pool: Dictionary = _assign_pooled_media(vid_src, vid_ext, trim_in, trim_out)
+	# One segment is a plain trim and rides the transcode plan as a single ffmpeg cut; two or
+	# more can only be a concat, so they always re-encode and bypass the plan entirely.
+	var is_edl: bool = segments.size() >= 2
+	var trim_in: int = 0
+	var trim_out: int = 0
+	if segments.size() == 1:
+		var only: Dictionary = segments[0]
+		trim_in = int(only.get("in_ms", 0))
+		trim_out = int(only.get("out_ms", 0))
+	var plan_key: String = _transcode_plan_key(vid_src, segments)
+	var is_transcode: bool = (not is_edl) and _transcode_plan.has(plan_key)
+	var vid_ext: String = "mp4" if (is_transcode or is_edl) else vid_src.get_extension()
+	var pool: Dictionary = _assign_pooled_media(vid_src, vid_ext, segments)
 	var rel: String = pool["rel"]
 	if not pool["copy"]:
 		return {"rel": rel, "ok": true}
 	var vid_dst: String = abs_dir + "/" + rel
-	_ensure_parent_dir(vid_dst)
-	if is_transcode:
+	if is_edl:
+		_update_modal_label(
+			modal, "Round %d / %d — %s  (building segments)" % [rorder, total, display]
+		)
+		_transcode_cancel = false
+		var lok: bool = await MediaPoolService.bake_edl(
+			vid_src,
+			vid_dst,
+			segments,
+			func(frac: float, cur: float, tot: float, spd: String) -> void:
+				_update_modal_progress(modal, frac, cur, tot, spd),
+			func() -> bool: return _transcode_cancel
+		)
+		if not lok:
+			var reason: String = CAUSE_CANCELLED if _transcode_cancel else CAUSE_TRANSCODE_FAILED
+			var headline: String = "SAVE CANCELLED" if _transcode_cancel else "SAVE FAILED"
+			var detail: String = "ffmpeg failed to build the segmented clip for %s." % subject
+			if _transcode_cancel:
+				detail = "You cancelled the segment bake while %s was being processed." % subject
+			_show_save_error_single(
+				headline,
+				reason,
+				subject,
+				detail,
+				"Press Save again to retry. Nothing on disk was changed."
+			)
+			return {"rel": rel, "ok": false}
+	elif is_transcode:
 		var info: Dictionary = _transcode_plan[plan_key]
 		_update_modal_round(modal, rorder, total, display, info["codec"])
 		_transcode_cancel = false
 		var ok: bool = await MediaPoolService.transcode_video(
-			abs_src if abs_src != "" else vid_src,
+			vid_src,
 			vid_dst,
 			info["duration"],
 			trim_in,
@@ -3483,15 +5227,18 @@ func _pool_video_into(
 					"The source video may be corrupt or use an unsupported variant. Try re-encoding it to H.264 .mp4 outside the editor, then re-drag it into this round."
 				)
 			return {"rel": rel, "ok": false}
+	# Unchanged video: on a re-save the source is this journey's own pooled file, so hardlink it
+	# into staging instead of byte-copying it (linear in journey size, every save — the real cost
+	# on a large project). An author's original source isn't a pooled file, so it still copies.
+	elif (
+		MediaPoolService.is_pooled_content_file(vid_src)
+		and MediaPoolService.try_hardlink(vid_src, vid_dst)
+	):
+		pass  # reused via hardlink — no copy needed
 	else:
-		var copy_label: String = (
-			"Round %d / %d — %s  (copying video)" % [rorder, total, display]
-			if total > 0
-			else "%s  (copying video)" % display
-		)
-		_update_modal_label(modal, copy_label)
+		_update_modal_label(modal, "Round %d / %d — %s  (copying video)" % [rorder, total, display])
 		var copy_result: Dictionary = await _copy_file_chunked(
-			abs_src if abs_src != "" else vid_src,
+			vid_src,
 			vid_dst,
 			func(done: int, tot: int) -> void: _update_modal_copy(modal, done, tot)
 		)
@@ -3508,39 +5255,60 @@ func _pool_video_into(
 func _save_storyboard_node_media(
 	saved_data: Dictionary,
 	data_in: Dictionary,
+	abs_dir: String,
 	abs_media_dir: String,
 	node_id: String,
-	copied_images: Dictionary
+	copied_images: Dictionary,
+	modal: Control
 ) -> Dictionary:
-	var img_src: String = str(data_in.get("image", ""))
-	saved_data["image"] = ""
-	if img_src != "":
-		var ext: String = img_src.get_extension().to_lower()
-		var f: String = _copy_image_deduped(
-			img_src, abs_media_dir, "%s.%s" % [node_id, ext], copied_images
-		)
-		saved_data["image"] = ("media/" + f) if f != "" else ""
+	saved_data["image"] = await _store_journey_image(
+		str(data_in.get("image", "")),
+		abs_dir,
+		abs_media_dir,
+		node_id,
+		copied_images,
+		JourneyData.ANIM_CAP_STORYBOARD,
+		modal
+	)
 
 	var lines_out: Array = []
 	var lines_in: Array = data_in.get("lines", [])
 	for li in lines_in.size():
 		var line: Dictionary = lines_in[li]
-		var li_src: String = str(line.get("image", ""))
-		var li_rel: String = ""
-		if li_src != "":
-			var le: String = li_src.get_extension().to_lower()
-			var lf: String = _copy_image_deduped(
-				li_src, abs_media_dir, "%s_line_%d.%s" % [node_id, li, le], copied_images
-			)
-			li_rel = ("media/" + lf) if lf != "" else ""
-		lines_out.append(
-			{
-				"speaker": str(line.get("speaker", "")),
-				"text": str(line.get("text", "")),
-				"image": li_rel
-			}
+		var li_rel: String = await _store_journey_image(
+			str(line.get("image", "")),
+			abs_dir,
+			abs_media_dir,
+			"%s_line_%d" % [node_id, li],
+			copied_images,
+			JourneyData.ANIM_CAP_STORYBOARD,
+			modal
 		)
+		var line_out: Dictionary = {
+			"speaker": str(line.get("speaker", "")),
+			"text": str(line.get("text", "")),
+			"image": li_rel,
+		}
+		# Persistent-stage portraits: a list of {character, portrait?, placement?} (ids only — the media
+		# is pooled once per character). Carries through verbatim; omitted when empty to keep the schema
+		# lean (mirrors set_counters / audio).
+		var stage: Array = JourneyData.clean_stage(line.get("stage", []))
+		if not stage.is_empty():
+			line_out["stage"] = stage
+		# Optional per-line audio accent — hash-pooled like any small file (no transcode; Godot
+		# decodes ogg/mp3/wav natively). Only stored when set, to keep the schema lean.
+		var audio_rel: String = _pool_small_file(str(line.get("audio", "")), abs_dir)
+		if audio_rel != "":
+			line_out["audio"] = audio_rel
+			line_out["audio_loop"] = bool(line.get("audio_loop", false))
+			line_out["audio_volume"] = clampf(float(line.get("audio_volume", 1.0)), 0.0, 1.0)
+		lines_out.append(line_out)
 	saved_data["lines"] = lines_out
+	# Optional overarching BGM — one looping track under every line, pooled like the line accents.
+	var bgm_rel: String = _pool_small_file(str(data_in.get("bgm", "")), abs_dir)
+	if bgm_rel != "":
+		saved_data["bgm"] = bgm_rel
+		saved_data["bgm_volume"] = clampf(float(data_in.get("bgm_volume", 0.6)), 0.0, 1.0)
 	return saved_data
 
 
@@ -3549,19 +5317,25 @@ func _save_storyboard_node_media(
 # (keyed by node id + choice index so paths sharing a name can't collide). The `to` target
 # id is preserved verbatim (it's a node reference, not a path).
 func _save_fork_node_edges(
-	edges: Array, abs_media_dir: String, node_id: String, copied_images: Dictionary
+	edges: Array,
+	abs_dir: String,
+	abs_media_dir: String,
+	node_id: String,
+	copied_images: Dictionary,
+	modal: Control
 ) -> Array:
 	var out: Array = []
 	for ei in edges.size():
 		var e: Dictionary = edges[ei]
-		var img_src: String = str(e.get("image_path", ""))
-		var img_rel: String = ""
-		if img_src != "":
-			var ext: String = img_src.get_extension().to_lower()
-			var f: String = _copy_image_deduped(
-				img_src, abs_media_dir, "%s_e%d_cover.%s" % [node_id, ei, ext], copied_images
-			)
-			img_rel = ("media/" + f) if f != "" else ""
+		var img_rel: String = await _store_journey_image(
+			str(e.get("image_path", "")),
+			abs_dir,
+			abs_media_dir,
+			"%s_e%d_cover" % [node_id, ei],
+			copied_images,
+			JourneyData.ANIM_CAP_FORK,
+			modal
+		)
 		(
 			out
 			. append(
@@ -3570,12 +5344,17 @@ func _save_fork_node_edges(
 					"name": str(e.get("name", "")),
 					"description": str(e.get("description", "")),
 					"image_path": img_rel,
+					"image_fit": str(e.get("image_fit", "")),
 					"weight": int(e.get("weight", 1)),
 					"threshold": int(e.get("threshold", 0)),
 					"required_item": str(e.get("required_item", "")),
 					"cost": int(e.get("cost", 0)),
 					"required_flag": str(e.get("required_flag", "")),
+					"cond_counter": str(e.get("cond_counter", "")),  # per-choice counter override (blank = fork default)
 					"set_flags": JourneyData.clean_flag_list(e.get("set_flags", [])),
+					"clear_flags": JourneyData.clean_flag_list(e.get("clear_flags", [])),
+					"set_counters": JourneyData.clean_counter_deltas(e.get("set_counters", {})),
+					"remove_items": JourneyData.clean_flag_list(e.get("remove_items", [])),
 				}
 			)
 		)
@@ -3670,8 +5449,25 @@ func _finalize_save_success() -> void:
 	var message: String = "Journey saved! Returning to catalogue..."
 	if _invalidated_save_count > 0:
 		message = "Journey saved! Existing player save reset. Returning to catalogue..."
+
+	# An animation clipped to the length cap is named rather than silently shortened — otherwise the
+	# author just finds their image mysteriously ending early and assumes it's a bug. Held longer
+	# than the plain confirmation so there's time to actually read it.
+	var hold: float = 1.5
+	if not _anim_truncated.is_empty():
+		message = (
+			"Journey saved — trimmed %d animated image%s to %ds: %s"
+			% [
+				_anim_truncated.size(),
+				"s" if _anim_truncated.size() != 1 else "",
+				int(MediaPoolService.ANIM_MAX_SECS),
+				", ".join(_anim_truncated),
+			]
+		)
+		hold = 4.0
+
 	_show_status(message, false)
-	await get_tree().create_timer(1.5).timeout
+	await get_tree().create_timer(hold).timeout
 	Transition.change_scene("res://scenes/journey_select/JourneySelect.tscn")
 
 
@@ -3744,13 +5540,19 @@ func _update_modal_round(
 		lbl = modal.find_child("RoundLabel", true, false) as Label
 	if lbl:
 		lbl.text = (
-			(
-				"Round %d / %d — %s  (%s → h264)"
-				% [round_num, total, round_name, codec.to_upper()]
-			)
-			if total > 0
-			else "%s  (%s → h264)" % [round_name, codec.to_upper()]
+			"Round %d / %d — %s  (%s → h264)" % [round_num, total, round_name, codec.to_upper()]
 		)
+
+
+# Sets the modal's headline to an arbitrary string. _update_modal_round formats a round-specific
+# line ("Round 2 / 5 — …"); an image bake isn't a round, so it needs its own label rather than
+# faking round numbers.
+func _update_modal_label(modal: Control, text: String) -> void:
+	if modal == null:
+		return
+	var lbl: Label = modal.find_child("RoundLabel", true, false) as Label
+	if lbl:
+		lbl.text = text
 
 
 func _update_modal_progress(
@@ -3773,15 +5575,6 @@ func _update_modal_progress(
 func _format_time(seconds: float) -> String:
 	var s: int = int(seconds)
 	return "%02d:%02d" % [s / 60, s % 60]
-
-
-# Sets the modal's secondary label to a plain message (no codec suffix).
-func _update_modal_label(modal: Control, text: String) -> void:
-	if modal == null:
-		return
-	var lbl: Label = modal.find_child("RoundLabel", true, false) as Label
-	if lbl:
-		lbl.text = text
 
 
 # Updates the modal bar + status line for a byte-based file copy.
@@ -3822,52 +5615,144 @@ func _copy_image_deduped(
 	return candidate_fname
 
 
-# Assigns a source file for this save. Returns {rel, copy, fingerprint}:
-#   • Already under the journey folder (and untrimmed) → keep that relative path;
-#     `copy` is true only the first time that rel is seen this save (staging still
-#     needs the bytes). No content/m_* rename.
-#   • External import, or any pending trim → fingerprint pool under content/m_<fp>.<ext>
-#     (trim joins the fingerprint so different windows don't collide).
-# `ext` is the destination extension for the hashed pool path (mp4 when
-# transcoding; otherwise the source / channel suffix). Ignored for keep-as-is.
+# Assigns a source file to the shared content pool for this save. Returns
+# {rel, copy, fingerprint}: `rel` is the journey-root-relative pooled path
+# (content/m_<fp>.<ext>), `copy` is true only the FIRST time this source is seen —
+# the caller does the actual transcode/copy then and skips it on repeats. `ext`
+# is the destination extension (mp4 for transcoded video, else the source ext).
+# The pending segments join the fingerprint, so the same source cut differently
+# by two rounds pools to two files while identical cuts still share one.
+# Mirrors JourneyData.plan_media_pool's first-sighting logic with a live map.
 func _assign_pooled_media(
-	src: String, ext: String, trim_in: int = 0, trim_out: int = 0
+	src: String, ext: String, segments: Array = [], variant: String = ""
 ) -> Dictionary:
-	# Named folders / existing journey-relative media: preserve layout on re-save.
-	if trim_in == 0 and trim_out == 0 and _original_journey_folder != "":
-		var keep_rel: String = JourneyData.rel_under_journey(src, _original_journey_folder)
-		if keep_rel != "":
-			var is_keep_new: bool = not _pooled_media.has(keep_rel)
-			if is_keep_new:
-				_pooled_media[keep_rel] = keep_rel
-			return {"rel": keep_rel, "copy": is_keep_new, "fingerprint": keep_rel}
-
-	var abs_src: String = _resolve_media_abs(src)
-	var fp: String = JourneyData.media_fingerprint(abs_src if abs_src != "" else src, trim_in, trim_out)
-	var rel: String = JourneyData.pooled_media_rel(fp, ext)
+	var fp: String = JourneyData.media_fingerprint(src, segments, variant)
+	var rel: String = JourneyData.pooled_media_rel(fp, ext, src)
 	var is_new: bool = not _pooled_media.has(fp)
 	if is_new:
 		_pooled_media[fp] = rel
 	return {"rel": _pooled_media[fp], "copy": is_new, "fingerprint": fp}
 
 
-# Absolute readable path for a media source: globalize, else join under the
-# journey being edited (journey.json stores journey-relative paths).
-func _resolve_media_abs(src: String) -> String:
+# ── Animated images (GIF) ────────────────────────────────────────────────────
+
+
+# Converts a GIF into something the runtime can actually display and pools it into content/,
+# beside the journey's other A/V. Returns {handled, rel}: handled=false means `src` isn't a GIF and
+# the caller should store it its normal way; rel is journey-root-relative, or "" if conversion
+# failed outright.
+#
+# Godot has NO GIF decoder, so a GIF can never ship as-is — an animated one becomes a looping
+# H.264, a single-frame one a PNG. `force_static` is for surfaces that accept GIFs but must not
+# animate (the journey cover: it sits in the catalogue grid, where N animating cards would cost
+# real frames for no gain).
+func _store_gif_source(
+	src: String, abs_dir: String, cap: Vector2i, force_static: bool = false, modal: Control = null
+) -> Dictionary:
+	if src == "" or not MediaPoolService.is_animated_source(src):
+		return {"handled": false, "rel": ""}
+
+	# Already exactly what the bake would produce (a baked image from a PRIOR save — a baked GIF is
+	# now an .mp4)? Pool it verbatim instead of re-encoding. This is the fix for "converts every
+	# save": once baked, the source qualifies, so a re-save is a fast copy like the content pool's
+	# other .mp4s. force_static wants a still, so it skips this and extracts a frame.
+	#
+	# The test is is_baked_animation, NOT "is it H.264?" — ordinary clips are H.264 too, and
+	# copying those through shipped their audio and their untruncated length.
+	if not force_static and MediaPoolService.is_baked_animation(src, cap):
+		return {"handled": true, "rel": _pool_small_file(src, abs_dir, "mp4")}
+
+	var animated: bool = not force_static and MediaPoolService.probe_is_animated(src)
+	if animated:
+		var rel: String = await _bake_gif_pooled(src, abs_dir, cap, true, modal)
+		if rel != "":
+			return {"handled": true, "rel": rel}
+		# A CANCELLED bake is not a failed one: falling back to a still here would quietly hand the
+		# author a static image instead of honouring the cancel. Abort the save the same way a
+		# failed copy does — surfaced at the caller's next checkpoint.
+		if _transcode_cancel:
+			_save_aborted = true
+			_save_abort_error = {
+				"result": {"ok": false, "reason": CAUSE_CANCELLED, "detail": src},
+				"item": src.get_file(),
+			}
+			return {"handled": true, "rel": ""}
+		# Genuine failure — fall back to the first frame rather than dropping the image entirely.
+		push_warning(
+			"JourneyBuilder: animation bake failed for '%s' — using its first frame." % src
+		)
+	return {"handled": true, "rel": await _bake_gif_pooled(src, abs_dir, cap, false, modal)}
+
+
+# Stores a journey IMAGE (storyboard background / dialogue line, fork card, cover) and returns its
+# journey-root-relative path, or "" when the source is empty or conversion failed.
+#
+# Two stores, by design: an ordinary image is copied verbatim into media/ (journey images), while a
+# GIF is baked into content/ beside the journey's other A/V — it becomes video, and Godot could
+# never display it as a GIF anyway. `cap` bounds the bake; `force_static` forbids animating.
+func _store_journey_image(
+	src: String,
+	abs_dir: String,
+	abs_media_dir: String,
+	file_base: String,
+	copied_images: Dictionary,
+	cap: Vector2i,
+	modal: Control = null,
+	force_static: bool = false
+) -> String:
 	if src == "":
 		return ""
-	var abs: String = ProjectSettings.globalize_path(src)
-	if FileAccess.file_exists(abs):
-		return abs
-	if _original_journey_folder != "":
-		var joined: String = (
-			ProjectSettings.globalize_path(_original_journey_folder).rstrip("/\\")
-			+ "/"
-			+ src.replace("\\", "/").lstrip("/")
+	var gif: Dictionary = await _store_gif_source(src, abs_dir, cap, force_static, modal)
+	if gif["handled"]:
+		return str(gif["rel"])  # already journey-root-relative ("content/…"), or "" if it failed
+	var ext: String = src.get_extension().to_lower()
+	var f: String = _copy_image_deduped(
+		src, abs_media_dir, "%s.%s" % [file_base, ext], copied_images
+	)
+	return ("media/" + f) if f != "" else ""
+
+
+# One pooled bake. The size cap joins the fingerprint (see JourneyData.media_fingerprint): the same
+# GIF at the same cap pools to one file, at different caps to different files. Returns "" on
+# failure, without caching the fingerprint — a retry must not inherit a missing file.
+func _bake_gif_pooled(
+	src: String, abs_dir: String, cap: Vector2i, animated: bool, modal: Control = null
+) -> String:
+	var kind: String = "anim" if animated else "still"
+	# No segments: an image is never cut — the size cap is what discriminates the pooled file.
+	var pool: Dictionary = _assign_pooled_media(
+		src, "mp4" if animated else "png", [], "%s:%dx%d" % [kind, cap.x, cap.y]
+	)
+	if not pool["copy"]:
+		return pool["rel"]  # already baked this source+cap during this save
+
+	var dst: String = abs_dir + "/" + str(pool["rel"])
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dst).get_base_dir())
+
+	var ok: bool
+	if animated:
+		# A real encode — drive the same modal the round transcodes use, and honour the same
+		# cancel flag, so a long bake shows progress instead of looking like a freeze.
+		_update_modal_label(modal, "Converting image: %s" % src.get_file())
+		var res: Dictionary = await MediaPoolService.bake_animation(
+			src,
+			dst,
+			cap.x,
+			cap.y,
+			func(frac: float, cur: float, tot: float, spd: String) -> void:
+				_update_modal_progress(modal, frac, cur, tot, spd),
+			func() -> bool: return _transcode_cancel
 		)
-		if FileAccess.file_exists(joined):
-			return joined
-	return abs
+		ok = bool(res["ok"])
+		if bool(res["truncated"]):
+			_anim_truncated.append(src.get_file())
+	else:
+		ok = MediaPoolService.extract_first_frame(src, dst, cap.x, cap.y)  # one frame: instant
+
+	if not ok:
+		_pooled_media.erase(pool["fingerprint"])
+		return ""
+	return str(pool["rel"])
 
 
 # Pools a small file (funscript / axis / vib / boss image) into content/ via the
@@ -3880,36 +5765,27 @@ func _resolve_media_abs(src: String) -> String:
 # callers never pass trim for images). A copy failure sets _save_aborted
 # (surfaced at the next checkpoint), like the other _copy_file sites.
 func _pool_small_file(
-	src: String, abs_dir: String, ext_override: String = "", trim_in: int = 0, trim_out: int = 0
+	src: String, abs_dir: String, ext_override: String = "", segments: Array = []
 ) -> String:
 	if src == "":
 		return ""
-	var abs_src: String = _resolve_media_abs(src)
 	var ext: String = ext_override if ext_override != "" else src.get_extension()
-	var pool: Dictionary = _assign_pooled_media(src, ext, trim_in, trim_out)
+	var pool: Dictionary = _assign_pooled_media(src, ext, segments)
 	if pool["copy"]:
-		var dst: String = abs_dir + "/" + pool["rel"]
-		_ensure_parent_dir(dst)
-		if trim_in > 0 or trim_out > 0:
-			_write_trimmed_funscript(abs_src if abs_src != "" else src, dst, trim_in, trim_out)
+		if segments.is_empty():
+			_copy_file(src, abs_dir + "/" + pool["rel"])
 		else:
-			_copy_file(abs_src if abs_src != "" else src, dst)
+			_write_edl_funscript(src, abs_dir + "/" + pool["rel"], segments)
 	return pool["rel"]
 
 
-# Ensures parent folders exist for a destination path under the staging journey.
-func _ensure_parent_dir(dst: String) -> void:
-	var parent: String = dst.get_base_dir()
-	if parent != "" and not DirAccess.dir_exists_absolute(parent):
-		DirAccess.make_dir_recursive_absolute(parent)
-
-
-# Writes `src` to `dst` with its actions trimmed to [trim_in, trim_out] and
-# rebased to t=0 (JourneyData.trim_funscript_json; other metadata preserved).
-# An unparseable source is copied verbatim instead — storing the full script
-# beats losing it, and the video bake proceeds regardless. Failure semantics
-# match _copy_file (sets _save_aborted for the next checkpoint).
-func _write_trimmed_funscript(src: String, dst: String, trim_in: int, trim_out: int) -> void:
+# Writes `src` to `dst` with its actions rebuilt from the round's segments — each window cut,
+# rebased and laid end to end (JourneyData.edl_funscript_json; other metadata preserved). This
+# is the one funscript writer: a trim is a single segment, a loop is a repeated one.
+# An unparseable source is copied verbatim instead — storing the full script beats losing it,
+# and the video bake proceeds regardless. Failure semantics match _copy_file (sets
+# _save_aborted for the next checkpoint).
+func _write_edl_funscript(src: String, dst: String, segments: Array) -> void:
 	var f: FileAccess = FileAccess.open(src, FileAccess.READ)
 	if f == null:
 		printerr("JourneyBuilder: cannot read: " + src)
@@ -3923,12 +5799,10 @@ func _write_trimmed_funscript(src: String, dst: String, trim_in: int, trim_out: 
 	f.close()
 	var parser: JSON = JSON.new()
 	if parser.parse(text) != OK or not (parser.data is Dictionary):
-		printerr("JourneyBuilder: funscript unparseable, copying untrimmed: " + src)
+		printerr("JourneyBuilder: funscript unparseable, copying uncut: " + src)
 		_copy_file(src, dst)
 		return
-	var trimmed: Dictionary = JourneyData.trim_funscript_json(
-		parser.data as Dictionary, trim_in, trim_out
-	)
+	var built: Dictionary = JourneyData.edl_funscript_json(parser.data as Dictionary, segments)
 	var out_f: FileAccess = FileAccess.open(dst, FileAccess.WRITE)
 	if out_f == null:
 		printerr("JourneyBuilder: cannot write: " + dst)
@@ -3938,7 +5812,7 @@ func _write_trimmed_funscript(src: String, dst: String, trim_in: int, trim_out: 
 			"item": dst.get_file(),
 		}
 		return
-	out_f.store_string(JSON.stringify(trimmed))
+	out_f.store_string(JSON.stringify(built))
 	out_f.close()
 
 
@@ -4234,6 +6108,55 @@ func _collect_journey_meta_issues(issues: Array) -> void:
 				}
 			)
 		)
+	_collect_custom_item_issues(issues)
+
+
+# Custom items must have a name; a modifier must carry at least one effect (a key needs none); an
+# item image, if set, must still exist. Blocks save — a nameless/effectless item is unusable.
+func _collect_custom_item_issues(issues: Array) -> void:
+	for it: Dictionary in _journey_items:
+		var iname: String = str(it.get("name", "")).strip_edges()
+		var label: String = "Custom item '%s'" % iname if iname != "" else "Custom item"
+		if iname == "":
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_ITEM_INVALID,
+						"item": "Custom item",
+						"detail": "A custom item has no name.",
+						"hint": "Give every custom item a name in the Custom Items panel.",
+					}
+				)
+			)
+		if (
+			str(it.get("category", "modifier")) == "modifier"
+			and (it.get("effects", []) as Array).is_empty()
+		):
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_ITEM_INVALID,
+						"item": label,
+						"detail": "This modifier item has no effects — using it would do nothing.",
+						"hint": "Add at least one effect, or switch its type to Key.",
+					}
+				)
+			)
+		var img: String = str(it.get("image", ""))
+		if img != "" and not _save_source_exists(img):
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_MISSING_SOURCE,
+						"item": label,
+						"detail": "Item image no longer exists at: %s" % img,
+						"hint": "Re-add the item image, or remove it.",
+					}
+				)
+			)
 
 
 # Graph-editor presave validation. Per GRAPH_EDITOR_OVERHAUL.md §10/§12, deep structural
@@ -4264,87 +6187,71 @@ func _collect_presave_issues_graph() -> Array:
 			)
 		)
 
-	var round_num: int = 0
-	var sb_num: int = 0
-	var fork_num: int = 0
+	# Per-type ordinals (shared with GraphView) so "Storyboard 4" in an error points at the node the
+	# graph also labels 4.
+	var ordinals: Dictionary = JourneyGraph.type_ordinals(nodes)
 	for id: String in nodes:
 		var n: Dictionary = nodes[id]
 		var data: Dictionary = n.get("data", {})
+		var ordinal: int = int(ordinals.get(id, 0))
 		match str(n.get("type", "")):
 			"round":
-				round_num += 1
-				_save_check_round(data, "Round %d" % round_num, issues)
+				_save_check_round(data, "Round %d" % ordinal, issues)
 			"storyboard":
-				sb_num += 1
-				_save_check_storyboard(data, "Storyboard %d" % sb_num, issues)
+				_save_check_storyboard(data, "Storyboard %d" % ordinal, issues)
 			"fork":
-				fork_num += 1
-				_save_check_fork_graph(n, "Fork %d" % fork_num, issues)
-			"cooldown":
-				_save_check_cooldown(data, "Cooldown", issues)
-			"cutscene":
-				pass  # never requires funscript; missing video is soft-only (live badge)
+				_save_check_fork_graph(n, "Fork %d" % ordinal, issues)
+			"loop_end":
+				_save_check_loop(id, data, "Loop %d" % ordinal, issues)
+			"loop_start":
+				_save_check_loop_start(id, "Loop %d" % ordinal, issues)
 
 	# Structural graph validation (L4): block on graphs the runtime can't cleanly play — a missing
-	# start, an edge to a deleted node, a disallowed cycle, or an unreachable
+	# start, an edge to a deleted node, a cycle (the DAG walk would loop forever), or an unreachable
 	# node. Unreachable nodes block so a saved journey never carries media that's never played (a
 	# storage concern): the author must wire the orphan into the flow or delete it before saving.
-	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model):
-		match str(gi.get("kind", "")):
-			"no_start":
-				(
-					issues
-					. append(
-						{
-							"cause": CAUSE_NO_START,
-							"item": "Journey",
-							"detail": "The journey has no valid start node.",
-							"hint":
-							"Reopen the journey, or add a node — the first node becomes the start.",
-						}
-					)
-				)
-			"dangling":
-				(
-					issues
-					. append(
-						{
-							"cause": CAUSE_DANGLING_EDGE,
-							"item": _graph_issue_label(str(gi.get("id", ""))),
-							"detail": "A connection points to a node that no longer exists.",
-							"hint":
-							"Re-wire that connection to a current node — its target may have been deleted.",
-						}
-					)
-				)
-			"cycle":
-				(
-					issues
-					. append(
-						{
-							"cause": CAUSE_CYCLE,
-							"item": _graph_issue_label(str(gi.get("id", ""))),
-							"detail":
-							"This node is part of a disallowed loop (round↔round softlock). Loops that return to a fork hub are allowed.",
-							"hint": "Remove the back-edge between non-fork nodes, or return to a fork instead.",
-						}
-					)
-				)
-			"unreachable":
-				(
-					issues
-					. append(
-						{
-							"cause": CAUSE_UNREACHABLE,
-							"item": _graph_issue_label(str(gi.get("id", ""))),
-							"detail":
-							"This node can't be reached from the start, so it would never play — and its media would bloat the saved journey.",
-							"hint":
-							"Wire it into the flow, or enter it via a round's Release Jump target (EP/fail paths). Or delete it.",
-						}
-					)
-				)
+	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model, _journey_finish_node):
+		var m: Dictionary = _structural_issue_to_presave(gi)
+		if not m.is_empty():
+			issues.append(m)
 	return issues
+
+
+# Maps one JourneyGraph.validate_graph issue to a presave-issue dict (shared by the base + rendition
+# collectors). Returns {} for an unknown kind.
+func _structural_issue_to_presave(gi: Dictionary) -> Dictionary:
+	match str(gi.get("kind", "")):
+		"no_start":
+			return {
+				"cause": CAUSE_NO_START,
+				"item": "Journey",
+				"detail": "The journey has no valid start node.",
+				"hint": "Reopen the journey, or add a node — the first node becomes the start.",
+			}
+		"dangling":
+			return {
+				"cause": CAUSE_DANGLING_EDGE,
+				"item": _graph_issue_label(str(gi.get("id", ""))),
+				"detail": "A connection points to a node that no longer exists.",
+				"hint":
+				"Re-wire that connection to a current node — its target may have been deleted.",
+			}
+		"cycle":
+			return {
+				"cause": CAUSE_CYCLE,
+				"item": _graph_issue_label(str(gi.get("id", ""))),
+				"detail": "This node is part of a loop — a journey must flow forward (no cycles).",
+				"hint": "Remove the connection that loops back to an earlier node.",
+			}
+		"unreachable":
+			return {
+				"cause": CAUSE_UNREACHABLE,
+				"item": _graph_issue_label(str(gi.get("id", ""))),
+				"detail":
+				"This node can't be reached from the start, so it would never play — and its media would bloat the saved journey.",
+				"hint": "Connect it into the flow (wire an earlier node to it), or delete it.",
+			}
+	return {}
 
 
 # Readable label for a node id, used by the structural validation messages.
@@ -4366,12 +6273,10 @@ func _graph_issue_label(node_id: String) -> String:
 		"fork":
 			var fn: String = str(d.get("title", "")).strip_edges()
 			return 'Fork "%s"' % fn if fn != "" else "A fork"
-		"cooldown":
-			var cn: String = str(d.get("name", "")).strip_edges()
-			return 'Cooldown "%s"' % cn if cn != "" else "A cooldown"
-		"cutscene":
-			var csn: String = str(d.get("name", "")).strip_edges()
-			return 'Cutscene "%s"' % csn if csn != "" else "A cutscene"
+		"loop_start":
+			return "A Loop Start"
+		"loop_end":
+			return "A Loop End"
 	return "A node"
 
 
@@ -4379,8 +6284,186 @@ func _graph_issue_label(node_id: String) -> String:
 # _save_check_fork — ≥2 choices, a Sacrifice fork needs ≥1 free choice, and each choice needs a
 # name (the player sees it on the choice screen). Structural edge validity (cycles / dangling) is
 # handled separately by JourneyGraph.validate_graph; cycles are also prevented at wire time.
+# Loop End validation (L4). First the PAIRING: the End's loop_to must point at its Loop Start, or it
+# can't replay (a broken pair — e.g. the Start was deleted). Then SATISFIABILITY: a loop that jumps back
+# must have at least one exit condition its BODY can satisfy, or the player loops forever (a soft-lock).
+# Body = nodes on a path from the Start back to the End. Per condition: a fixed "after N loops" always
+# exits; counter ≥ N needs a net-positive body bump; flag needs a body set_flags; item needs a body award.
+# ANY → block when none can be met; ALL → block when any can't. No conditions ⇒ the body plays once and
+# continues (harmless), so it isn't checked.
+func _save_check_loop(loop_id: String, data: Dictionary, ctx: String, issues: Array) -> void:
+	var loop_to: String = str(data.get("loop_to", "")).strip_edges()
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var paired: bool = (
+		loop_to != ""
+		and nodes.has(loop_to)
+		and str((nodes[loop_to] as Dictionary).get("type", "")) == "loop_start"
+	)
+	if not paired:
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_LOOP_UNPAIRED,
+					"item": ctx,
+					"detail":
+					"This Loop End isn't paired with a Loop Start, so it has nothing to replay.",
+					"hint":
+					"Delete it and drop a fresh Loop from the canvas menu — the pair is created linked.",
+				}
+			)
+		)
+		return
+	var conds: Array = data.get("loop_conditions", [])
+	if conds.is_empty():
+		return
+	var body: Dictionary = _loop_body_effects(loop_to, loop_id)
+	var combine_all: bool = str(data.get("loop_combine", "any")) == "all"
+	var unsatisfiable: Array = []  # labels of conditions the body can never satisfy
+	var any_satisfiable: bool = false
+	for cv: Dictionary in conds:
+		if _loop_condition_satisfiable(cv, body):
+			any_satisfiable = true
+		else:
+			unsatisfiable.append(_loop_condition_label(cv))
+	var blocked: bool = (not unsatisfiable.is_empty()) if combine_all else (not any_satisfiable)
+	if not blocked:
+		return
+	var detail: String
+	if combine_all:
+		detail = (
+			"This loop exits only when ALL conditions are met, but its body can never satisfy: %s. The player would loop forever."
+			% ", ".join(PackedStringArray(unsatisfiable))
+		)
+	else:
+		detail = "None of this loop's exit conditions can be satisfied by its body, so the player would loop forever."
+	(
+		issues
+		. append(
+			{
+				"cause": CAUSE_LOOP_UNSATISFIABLE,
+				"item": ctx,
+				"detail": detail,
+				"hint":
+				"Add a fixed 'after N loops' exit, or make a body node set the flag / grant the item / raise the counter the exit needs.",
+			}
+		)
+	)
+
+
+# Loop Start validation: a Start with no Loop End looping back to it is an orphan — it plays as a
+# do-nothing passthrough and only clutters the graph. Require a matching End (the pair is created linked,
+# so this only trips when the End was deleted).
+func _save_check_loop_start(start_id: String, ctx: String, issues: Array) -> void:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	for nid: String in nodes.keys():
+		var n: Dictionary = nodes[nid]
+		if (
+			str(n.get("type", "")) == "loop_end"
+			and str((n.get("data", {}) as Dictionary).get("loop_to", "")) == start_id
+		):
+			return  # paired
+	(
+		issues
+		. append(
+			{
+				"cause": CAUSE_LOOP_UNPAIRED,
+				"item": ctx,
+				"detail": "This Loop Start has no Loop End looping back to it.",
+				"hint":
+				"Delete it, or drop a fresh Loop from the canvas menu for a linked Start + End pair.",
+			}
+		)
+	)
+
+
+# The cumulative effects the loop body can produce: net counter deltas, flags it can set, items it can
+# award. Body = nodes reachable from loop_to that can also reach the loop (the replayed stretch). Fork
+# choice effects (on the out-edges) are folded in optimistically — the player may take the best choice.
+func _loop_body_effects(loop_to: String, loop_id: String) -> Dictionary:
+	var nodes: Dictionary = _graph_model.get("nodes", {})
+	var forward: Dictionary = JourneyGraph.reachable_ids(_graph_model, loop_to)
+	var counters: Dictionary = {}
+	var flags: Dictionary = {}
+	var items: Dictionary = {}
+	for nid: String in forward.keys():
+		if not JourneyGraph.reachable_ids(_graph_model, str(nid)).has(loop_id):
+			continue  # not on a path back to the loop → not part of the replayed body
+		var n: Dictionary = nodes.get(nid, {})
+		_accumulate_loop_effects(n.get("data", {}), counters, flags, items)
+		if str(n.get("type", "")) == "fork":
+			for e: Dictionary in n.get("out", []):
+				_accumulate_loop_effects(e, counters, flags, items)
+	return {"counters": counters, "flags": flags, "items": items}
+
+
+# Folds one effect-bearing dict (a node's data, or a fork choice edge) into the running body totals:
+# set_counters summed, set_flags / award_item unioned.
+func _accumulate_loop_effects(
+	d: Dictionary, counters: Dictionary, flags: Dictionary, items: Dictionary
+) -> void:
+	var sc: Dictionary = JourneyData.clean_counter_deltas(d.get("set_counters", {}))
+	for k: String in sc.keys():
+		counters[k] = int(counters.get(k, 0)) + int(sc[k])
+	for f: Variant in JourneyData.clean_flag_list(d.get("set_flags", [])):
+		flags[str(f)] = true
+	var aw: String = str(d.get("award_item", "")).strip_edges()
+	if aw != "":
+		items[aw] = true
+
+
+# Whether the loop body can ever satisfy one exit condition. repeats always exits; a ≥ counter needs a
+# threshold ≤ 0 (met on arrival) or a net-positive body bump; a ≤ counter (count-down) needs a
+# net-negative body bump to drive it down (counters aren't floored, so a downward trend reaches any
+# threshold); flag / item need a body that sets / grants it.
+func _loop_condition_satisfiable(c: Dictionary, body: Dictionary) -> bool:
+	match str(c.get("kind", "repeats")):
+		"repeats":
+			return true
+		"counter":
+			var thr: int = int(c.get("threshold", 0))
+			var delta: int = int((body["counters"] as Dictionary).get(str(c.get("counter", "")), 0))
+			if str(c.get("cmp", "gte")) == "lte":
+				return delta < 0
+			return thr <= 0 or delta > 0
+		"flag":
+			return (body["flags"] as Dictionary).has(str(c.get("flag", "")))
+		"item":
+			return (body["items"] as Dictionary).has(str(c.get("item", "")))
+	return true  # unknown kind → don't block
+
+
+func _loop_condition_label(c: Dictionary) -> String:
+	match str(c.get("kind", "repeats")):
+		"counter":
+			var op: String = "≤" if str(c.get("cmp", "gte")) == "lte" else "≥"
+			return (
+				"counter '%s' %s %d" % [str(c.get("counter", "?")), op, int(c.get("threshold", 0))]
+			)
+		"flag":
+			return "flag '%s' set" % str(c.get("flag", "?"))
+		"item":
+			return "has item '%s'" % str(c.get("item", "?"))
+		"repeats":
+			return "after %d loops" % int(c.get("count", 1))
+	return "condition"
+
+
 func _save_check_fork_graph(node: Dictionary, ctx: String, issues: Array) -> void:
 	var edges: Array = node.get("out", [])
+	var fork_audio: String = str((node.get("data", {}) as Dictionary).get("audio", ""))
+	if fork_audio != "" and not _save_source_exists(fork_audio):
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": ctx,
+					"detail": "Fork audio clip no longer exists at: %s" % fork_audio,
+					"hint": "Re-add the fork audio, or remove it.",
+				}
+			)
+		)
 	if edges.size() < 2:
 		(
 			issues
@@ -4436,35 +6519,22 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 	var name: String = (round_data.get("name", "") as String).strip_edges()
 	var label: String = '%s "%s"' % [ctx, name] if name != "" else ctx
 
-	# A pending trim must be a real window (out after in) that starts inside the
-	# content — a start past the end would bake a near-empty video with an empty
-	# funscript. The funscript's length is the cheap duration proxy here; an
-	# out-point past the end stays fine (ffmpeg simply stops at the end).
-	var trim_in: int = int(round_data.get("trim_start_ms", 0))
-	var trim_out: int = int(round_data.get("trim_end_ms", 0))
-	if trim_out > 0 and trim_in >= trim_out:
-		(
-			issues
-			. append(
-				{
-					"cause": CAUSE_TRIM_INVALID,
-					"item": label,
-					"detail":
-					(
-						"Trim start (%s) is at or past trim end (%s)."
-						% [_audit_mmss(trim_in), _audit_mmss(trim_out)]
-					),
-					"hint": "Fix the trim window in the round editor, or clear the trim.",
-				}
-			)
+	# Every segment must be a real window starting inside the content — a start past the end
+	# bakes a near-empty video with an empty funscript. The funscript's length is the cheap
+	# duration proxy; an out-point past the end is fine (ffmpeg stops at the end). Only the
+	# first offender is reported — a ×30 repeat of a bad window would emit thirty copies.
+	var segments: Array = JourneyData.normalize_segments(round_data)
+	var fs_len: int = int(
+		JourneyData.read_funscript_stats(str(round_data.get("funscript_path", ""))).get(
+			"length_ms", 0
 		)
-	elif trim_in > 0:
-		var fs_len: int = int(
-			JourneyData.read_funscript_stats(str(round_data.get("funscript_path", ""))).get(
-				"length_ms", 0
-			)
-		)
-		if fs_len > 0 and trim_in >= fs_len:
+	)
+	for i: int in segments.size():
+		var seg: Dictionary = segments[i]
+		var s_in: int = int(seg.get("in_ms", 0))
+		var s_out: int = int(seg.get("out_ms", 0))
+		var pos: String = "Segment %d" % (i + 1) if segments.size() > 1 else "The trim"
+		if s_out > 0 and s_in >= s_out:
 			(
 				issues
 				. append(
@@ -4473,13 +6543,31 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 						"item": label,
 						"detail":
 						(
-							"Trim start (%s) is past the end of the content (%s)."
-							% [_audit_mmss(trim_in), _audit_mmss(fs_len)]
+							"%s starts (%s) at or past its end (%s)."
+							% [pos, _audit_mmss(s_in), _audit_mmss(s_out)]
 						),
-						"hint": "Lower the trim start in the round editor, or clear the trim.",
+						"hint": "Fix the segment in the round editor, or remove it.",
 					}
 				)
 			)
+			break
+		if s_in > 0 and fs_len > 0 and s_in >= fs_len:
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_TRIM_INVALID,
+						"item": label,
+						"detail":
+						(
+							"%s starts (%s) past the end of the content (%s)."
+							% [pos, _audit_mmss(s_in), _audit_mmss(fs_len)]
+						),
+						"hint": "Lower the segment's start in the round editor, or remove it.",
+					}
+				)
+			)
+			break
 
 	# Names are display-only now (see short-folder slug scheme). Any character
 	# is fine — only empty names need to be flagged, since the name is the
@@ -4503,10 +6591,22 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 		_save_check_pool_entries(round_data, label, issues)
 		return
 
-	# Funscript is optional (WIP layout / cooldown-only / story rounds). If a path
-	# is set it must still resolve on disk.
+	# Required: funscript.
 	var fs: String = round_data.get("funscript_path", "")
-	if fs != "" and not _save_source_exists(fs):
+	if fs == "":
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": label,
+					"detail": "No funscript file selected.",
+					"hint":
+					"Drag a .funscript or .json file into the Funscript field for this round.",
+				}
+			)
+		)
+	elif not _save_source_exists(fs):
 		(
 			issues
 			. append(
@@ -4536,7 +6636,7 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 			)
 		)
 
-	# Secondary axis scripts (flat + dual Restim kits).
+	# Secondary axis scripts.
 	var axis_scripts: Dictionary = round_data.get("axis_scripts", {})
 	for axis: String in axis_scripts:
 		var p: String = axis_scripts[axis]
@@ -4552,28 +6652,6 @@ func _save_check_round(round_data: Dictionary, ctx: String, issues: Array) -> vo
 					}
 				)
 			)
-	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(round_data)
-	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-		var slot_map: Dictionary = ras[slot] as Dictionary
-		for axis: String in slot_map:
-			var p: String = str(slot_map[axis])
-			if p != "" and not _save_source_exists(p):
-				(
-					issues
-					. append(
-						{
-							"cause": CAUSE_MISSING_SOURCE,
-							"item": label,
-							"detail":
-							(
-								"Restim %s/%s funscript no longer exists at: %s"
-								% [slot, axis, p]
-							),
-							"hint":
-							"Re-drag the funscript in Extra Axes (slot %s)." % slot.to_upper(),
-						}
-					)
-				)
 
 	# Vibrator-channel scripts.
 	var vib_scripts: Dictionary = round_data.get("vib_scripts", {})
@@ -4675,54 +6753,22 @@ func _save_check_pool_source(path: String, kind: String, elabel: String, issues:
 		)
 
 
-# Cooldown node: days must be ≥ 1. No media required.
-func _save_check_cooldown(cd_data: Dictionary, ctx: String, issues: Array) -> void:
-	var days: int = int(cd_data.get("days", 0))
-	if days < 1:
+func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> void:
+	# A storyboard must have at least one dialogue line — an empty one has nothing to show or advance
+	# through (and would hang under auto-advance). Blocks save; also drives the ⚠ node badge.
+	var lines: Array = sb_data.get("lines", [])
+	if lines.is_empty():
 		(
 			issues
 			. append(
 				{
-					"cause": CAUSE_BAD_NAME,
+					"cause": CAUSE_STORYBOARD_EMPTY,
 					"item": ctx,
-					"detail": "Cooldown days must be at least 1.",
-					"hint": "Set Lockout Days in the cooldown editor.",
+					"detail": "This storyboard has no dialogue lines.",
+					"hint": "Add at least one line, or delete the storyboard node.",
 				}
 			)
 		)
-
-
-# Soft cutscene warning for the live node badge only (does not block save).
-func _soft_check_cutscene(cut_data: Dictionary, issues: Array) -> void:
-	var vid: String = str(cut_data.get("video_path", "")).strip_edges()
-	if vid == "":
-		issues.append({"detail": "No video selected (WIP — still savable)."})
-	elif not _save_source_exists(vid):
-		issues.append({"detail": "Video no longer exists at: %s" % vid})
-
-
-# Pools a cutscene node's video into content/ (same pipeline as rounds, no funscript).
-func _save_cutscene_node_media(
-	saved_data: Dictionary, data_in: Dictionary, abs_dir: String, modal: Control
-) -> Dictionary:
-	var vid_src: String = str(data_in.get("video_path", ""))
-	if vid_src == "":
-		saved_data["video_path"] = ""
-		return saved_data
-	var display: String = str(saved_data.get("name", "")).strip_edges()
-	if display == "":
-		display = "Cutscene"
-	var subject: String = 'Cutscene "%s"' % display
-	var vres: Dictionary = await _pool_video_into(
-		vid_src, abs_dir, modal, display, subject, 0, 0, 0, 0
-	)
-	if not bool(vres.get("ok", false)):
-		return {}
-	saved_data["video_path"] = str(vres.get("rel", ""))
-	return saved_data
-
-
-func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> void:
 	var default_img: String = sb_data.get("image", "")
 	if default_img != "" and not _save_source_exists(default_img):
 		(
@@ -4736,7 +6782,19 @@ func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> 
 				}
 			)
 		)
-	var lines: Array = sb_data.get("lines", [])
+	var bgm: String = str(sb_data.get("bgm", ""))
+	if bgm != "" and not _save_source_exists(bgm):
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_MISSING_SOURCE,
+					"item": ctx,
+					"detail": "Background music no longer exists at: %s" % bgm,
+					"hint": "Re-add the background music, or remove it.",
+				}
+			)
+		)
 	for li in lines.size():
 		var line: Dictionary = lines[li]
 		var img: String = line.get("image", "")
@@ -4749,6 +6807,19 @@ func _save_check_storyboard(sb_data: Dictionary, ctx: String, issues: Array) -> 
 						"item": "%s, Line %d" % [ctx, li + 1],
 						"detail": "Speaker image no longer exists at: %s" % img,
 						"hint": "Re-drag the speaker image into this line, or remove it.",
+					}
+				)
+			)
+		var aud: String = str(line.get("audio", ""))
+		if aud != "" and not _save_source_exists(aud):
+			(
+				issues
+				. append(
+					{
+						"cause": CAUSE_MISSING_SOURCE,
+						"item": "%s, Line %d" % [ctx, li + 1],
+						"detail": "Audio clip no longer exists at: %s" % aud,
+						"hint": "Re-add the audio for this line, or remove it.",
 					}
 				)
 			)

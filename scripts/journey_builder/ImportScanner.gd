@@ -6,52 +6,150 @@ extends RefCounted
 ## so it's unit-tested directly (tests/import_scanner_test.gd). JourneyBuilder owns the graph-node
 ## creation that consumes build_rounds(); BuilderSidePanel uses autofill_round_siblings for single drops.
 
-# Funscript filename suffixes — Restim kit from restim.ini + SSR + vib. See RestimAxisKit.
-static func script_suffixes() -> PackedStringArray:
-	var out: PackedStringArray = RestimAxisKit.all_script_suffixes()
-	for s: String in [".vib1", "_vib1", ".vibe1", "_vibe1", ".vib2", "_vib2", ".vibe2", "_vibe2"]:
-		if not out.has(s):
-			out.append(s)
-	return out
+# Funscript filename suffixes that mark a secondary axis or a vibrator channel. Kept in sync with
+# detect_funscript_axis / detect_vib_channel — used to strip the suffix so "scene1", "scene1_L1",
+# "scene1.vib1" all share a round key during bulk import.
+const SCRIPT_SUFFIXES: Array[String] = [
+	"_l1",
+	".l1",
+	"_l2",
+	".l2",
+	"_r0",
+	".r0",
+	"_r1",
+	".r1",
+	"_r2",
+	".r2",
+	"_surge",
+	".surge",
+	"_sway",
+	".sway",
+	"_twist",
+	".twist",
+	"_roll",
+	".roll",
+	"_pitch",
+	".pitch",
+	".vib1",
+	"_vib1",
+	".vibe1",
+	"_vibe1",
+	".vib2",
+	"_vib2",
+	".vibe2",
+	"_vibe2",
+	# restim / E-Stim Full position aliases (alpha→L0 main, beta→L1) …
+	".alpha",
+	"_alpha",
+	".beta",
+	"_beta",
+	# … and the e-stim parameter scripts (restim-only). Longer names listed before the plain
+	# vib1/vib2 endings above are safe: strip/detect use exact-tail ends_with, no prefix overlap.
+	".volume",
+	"_volume",
+	".carrier_frequency",
+	"_carrier_frequency",
+	".pulse_frequency",
+	"_pulse_frequency",
+	".pulse_width",
+	"_pulse_width",
+	".pulse_interval_random",
+	"_pulse_interval_random",
+	".pulse_rise_time",
+	"_pulse_rise_time",
+	".vib1_frequency",
+	"_vib1_frequency",
+	".vib1_strength",
+	"_vib1_strength",
+	".vib1_random",
+	"_vib1_random",
+	".vib2_frequency",
+	"_vib2_frequency",
+	".vib2_strength",
+	"_vib2_strength",
+	".vib1_left_right_bias",
+	"_vib1_left_right_bias",
+	".vib1_up_down_bias",
+	"_vib1_up_down_bias",
+	".vib2_left_right_bias",
+	"_vib2_left_right_bias",
+	".vib2_up_down_bias",
+	"_vib2_up_down_bias",
+	".vib2_random",
+	"_vib2_random",
+]
 
 
-# Current Options Restim slot labels (for filename tag routing).
-static func current_restim_labels() -> PackedStringArray:
-	return PackedStringArray(
-		[SettingsService.get_restim_label("a"), SettingsService.get_restim_label("b")]
-	)
-
-
-static func _resolve_labels(label_a: String, label_b: String) -> PackedStringArray:
-	if label_a != "" or label_b != "":
-		return PackedStringArray([label_a, label_b])
-	return current_restim_labels()
-
-
-# Infers the axis_scripts key from a funscript filename.
-# Returns "L0" for the unmarked main stroke script.
-# Restim kit names (alpha, beta, e1, volume, …) come from restim.ini funscript_names.
-static func detect_funscript_axis(
-	path: String, label_a: String = "", label_b: String = ""
-) -> String:
-	var labels: PackedStringArray = _resolve_labels(label_a, label_b)
+# Infers the T-code axis from a funscript filename. Checks T-code axis-code suffixes first (_L1, .L1)
+# then human-readable names (_surge, .pitch, …). Returns "L0" if no axis marker (main stroke script).
+static func detect_funscript_axis(path: String) -> String:
 	var stem: String = path.get_file().get_basename().to_lower()
-	var restim: String = RestimAxisKit.detect_axis(stem, labels[0], labels[1])
-	if restim != "":
-		return restim
+	var axis_codes: Dictionary = {
+		"_l1": "L1",
+		".l1": "L1",
+		"_l2": "L2",
+		".l2": "L2",
+		"_r0": "R0",
+		".r0": "R0",
+		"_r1": "R1",
+		".r1": "R1",
+		"_r2": "R2",
+		".r2": "R2",
+	}
+	for suffix: String in axis_codes:
+		if stem.ends_with(suffix):
+			return axis_codes[suffix]
+	var name_codes: Dictionary = {
+		"_surge": "L1",
+		".surge": "L1",
+		"_sway": "L2",
+		".sway": "L2",
+		"_twist": "R0",
+		".twist": "R0",
+		"_roll": "R1",
+		".roll": "R1",
+		"_pitch": "R2",
+		".pitch": "R2",
+		# restim position aliases: alpha = main stroke (L0), beta = the L1 axis.
+		"_alpha": "L0",
+		".alpha": "L0",
+		"_beta": "L1",
+		".beta": "L1",
+	}
+	for suffix: String in name_codes:
+		if stem.ends_with(suffix):
+			return name_codes[suffix]
 	return "L0"
 
 
-# Returns {slot, axis} for Restim dual kits, or {} for L0 / vib / unknown.
-# slot is "a", "b", or "shared".
-static func detect_funscript_slotted_axis(
-	path: String, label_a: String = "", label_b: String = ""
-) -> Dictionary:
+# Infers a restim (E-Stim Full) parameter axis from a funscript filename, e.g. "scene.volume" → "V0",
+# "scene.carrier_frequency" → "C0". These have no serial/motion equivalent and stream to restim only.
+# Returns "" when the filename carries no e-stim parameter suffix. Checked BEFORE detect_funscript_axis
+# during import (those names would otherwise fall through to the L0 main-script default).
+static func detect_estim_axis(path: String) -> String:
 	var stem: String = path.get_file().get_basename().to_lower()
-	if detect_vib_channel(path) != "":
-		return {}
-	var labels: PackedStringArray = _resolve_labels(label_a, label_b)
-	return RestimAxisKit.detect_slotted_axis(stem, labels[0], labels[1])
+	var codes: Dictionary = {
+		"volume": "V0",
+		"carrier_frequency": "C0",
+		"pulse_frequency": "P0",
+		"pulse_width": "P1",
+		"pulse_interval_random": "P2",
+		"pulse_rise_time": "P3",
+		"vib1_frequency": "V1",
+		"vib1_strength": "V2",
+		"vib1_random": "V3",
+		"vib2_frequency": "V4",
+		"vib2_strength": "V5",
+		"vib1_left_right_bias": "V6",
+		"vib1_up_down_bias": "V7",
+		"vib2_left_right_bias": "V8",
+		"vib2_up_down_bias": "V9",
+		"vib2_random": "W1",
+	}
+	for name: String in codes:
+		if stem.ends_with("." + name) or stem.ends_with("_" + name):
+			return codes[name]
+	return ""
 
 
 # Returns "vib1" or "vib2" when the filename carries a recognised vibrator-script suffix
@@ -69,26 +167,19 @@ static func detect_vib_channel(path: String) -> String:
 
 # The file's basename with any recognised axis/vib suffix removed, so a secondary-axis or vib script
 # groups with its main round during bulk import. Preserves the original casing of the stem.
-static func strip_script_suffix(
-	path: String, label_a: String = "", label_b: String = ""
-) -> String:
+static func strip_script_suffix(path: String) -> String:
 	var stem: String = path.get_file().get_basename()
 	var low: String = stem.to_lower()
-	for s: String in [".vib1", "_vib1", ".vibe1", "_vibe1", ".vib2", "_vib2", ".vibe2", "_vibe2"]:
+	for s: String in SCRIPT_SUFFIXES:
 		if low.ends_with(s):
 			return stem.substr(0, stem.length() - s.length())
-	var labels: PackedStringArray = _resolve_labels(label_a, label_b)
-	return RestimAxisKit.strip_suffix(stem, labels[0], labels[1])
+	return stem
 
 
 # Round grouping key: directory + base name (suffix stripped), lowercased — so a video and its scripts
 # in one folder pair up, while same-named files in different folders stay separate rounds.
-static func round_group_key(
-	path: String, label_a: String = "", label_b: String = ""
-) -> String:
-	return (
-		"%s/%s" % [path.get_base_dir(), strip_script_suffix(path, label_a, label_b)]
-	).to_lower()
+static func round_group_key(path: String) -> String:
+	return ("%s/%s" % [path.get_base_dir(), strip_script_suffix(path)]).to_lower()
 
 
 # Any one real path from an import group (video, then funscript, then an axis, then a vib), or "".
@@ -98,28 +189,21 @@ static func group_anchor_path(g: Dictionary) -> String:
 		return g["video"]
 	if g["funscript"] != "":
 		return g["funscript"]
-	var ras: Dictionary = g.get("restim_axis", JourneyData.empty_restim_axis_scripts())
-	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-		for a: String in (ras[slot] as Dictionary).values():
-			return a
 	for a: String in (g["axis"] as Dictionary).values():
 		return a
 	for v: String in (g["vib"] as Dictionary).values():
 		return v
+	# .get(): "estim" is a later addition, so callers built before it (and the pure unit tests)
+	# legitimately pass groups without the key.
+	for e: String in (g.get("estim", {}) as Dictionary).values():
+		return e
 	return ""
 
 
 # Creates an empty import group for `key` (preserving first-seen order) if absent.
 static func ensure_import_group(groups: Dictionary, order: Array, key: String) -> void:
 	if not groups.has(key):
-		groups[key] = {
-			"video": "",
-			"funscript": "",
-			"axis": {},
-			"restim_axis": JourneyData.empty_restim_axis_scripts(),
-			"vib": {},
-			"name": "",
-		}
+		groups[key] = {"video": "", "funscript": "", "axis": {}, "vib": {}, "estim": {}, "name": ""}
 		order.append(key)
 
 
@@ -158,18 +242,10 @@ static func collect_files_recursive(dir: String, out: PackedStringArray) -> void
 
 # Scans `dir` for every funscript whose base name (suffix stripped) matches `base`, classifying each
 # into the main stroke script, a secondary axis, or a vib channel — reusing the same suffix detection
-# as drag-routing. Returns {"funscript": String, "axis": Dictionary, "restim_axis": Dictionary,
-# "vib": Dictionary}; first match wins per slot.
-static func find_sibling_scripts(
-	dir: String, base: String, label_a: String = "", label_b: String = ""
-) -> Dictionary:
-	var result: Dictionary = {
-		"funscript": "",
-		"axis": {},
-		"restim_axis": JourneyData.empty_restim_axis_scripts(),
-		"vib": {},
-	}
-	var labels: PackedStringArray = _resolve_labels(label_a, label_b)
+# as drag-routing. Returns {"funscript": String, "axis": Dictionary, "vib": Dictionary}; first match
+# wins per slot.
+static func find_sibling_scripts(dir: String, base: String) -> Dictionary:
+	var result: Dictionary = {"funscript": "", "axis": {}, "vib": {}, "estim": {}}
 	var base_low: String = base.to_lower()
 	var d: DirAccess = DirAccess.open(dir)
 	if d == null:
@@ -182,31 +258,22 @@ static func find_sibling_scripts(
 			and fname.get_extension().to_lower() in JourneyData.FUNSCRIPT_EXTENSIONS
 		):
 			var full: String = "%s/%s" % [dir, fname]
-			if strip_script_suffix(full, labels[0], labels[1]).to_lower() == base_low:
+			if strip_script_suffix(full).to_lower() == base_low:
 				var vib_ch: String = detect_vib_channel(full)
+				var estim_ax: String = detect_estim_axis(full)
 				if vib_ch != "":
 					if not result["vib"].has(vib_ch):
 						result["vib"][vib_ch] = full
+				elif estim_ax != "":
+					if not result["estim"].has(estim_ax):
+						result["estim"][estim_ax] = full
 				else:
-					var slotted: Dictionary = detect_funscript_slotted_axis(
-						full, labels[0], labels[1]
-					)
-					if slotted.is_empty():
-						var stem_low: String = full.get_file().get_basename().to_lower()
-						if RestimAxisKit.has_kit_axis_tag(stem_low):
-							pass  # orphaned label tag — not main L0
-						elif result["funscript"] == "":
+					var axis: String = detect_funscript_axis(full)
+					if axis == "L0":
+						if result["funscript"] == "":
 							result["funscript"] = full
-					else:
-						var slot: String = str(slotted["slot"])
-						var axis: String = str(slotted["axis"])
-						if RestimAxisKit.should_autofill(axis):
-							var slot_map: Dictionary = result["restim_axis"][slot] as Dictionary
-							if not slot_map.has(axis):
-								slot_map[axis] = full
-							# Flat axis map = shared only (legacy / serial).
-							if slot == "shared" and not result["axis"].has(axis):
-								result["axis"][axis] = full
+					elif not result["axis"].has(axis):
+						result["axis"][axis] = full
 		fname = d.get_next()
 	d.list_dir_end()
 	return result
@@ -224,15 +291,12 @@ static func find_sibling_video(dir: String, base: String) -> String:
 # Fills any EMPTY slots of `round_data` (main funscript, video, secondary axes, vib channels) from
 # same-named files sitting next to `anchor_path` on disk. Never overwrites a slot the author already
 # set. Returns true if anything was filled. Used by the bulk importer and the single-round drop.
-static func autofill_round_siblings(
-	round_data: Dictionary, anchor_path: String, label_a: String = "", label_b: String = ""
-) -> bool:
-	var labels: PackedStringArray = _resolve_labels(label_a, label_b)
+static func autofill_round_siblings(round_data: Dictionary, anchor_path: String) -> bool:
 	var dir: String = anchor_path.get_base_dir()
-	var base: String = strip_script_suffix(anchor_path, labels[0], labels[1])
+	var base: String = strip_script_suffix(anchor_path)
 	var changed: bool = false
 
-	var scan: Dictionary = find_sibling_scripts(dir, base, labels[0], labels[1])
+	var scan: Dictionary = find_sibling_scripts(dir, base)
 
 	if (round_data.get("funscript_path", "") as String) == "" and scan["funscript"] != "":
 		round_data["funscript_path"] = scan["funscript"]
@@ -243,19 +307,12 @@ static func autofill_round_siblings(
 			round_data["video_path"] = sv
 			changed = true
 
-	JourneyData.ensure_restim_axis_scripts(round_data)
-	var ras: Dictionary = round_data["restim_axis_scripts"] as Dictionary
-	var scan_ras: Dictionary = scan["restim_axis"] as Dictionary
-	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-		var dest: Dictionary = ras[slot] as Dictionary
-		var src: Dictionary = scan_ras[slot] as Dictionary
-		for axis: String in src:
-			if not dest.has(axis):
-				dest[axis] = src[axis]
-				changed = true
-
-	# Keep flat axis_scripts aligned with shared.
-	round_data["axis_scripts"] = (ras["shared"] as Dictionary).duplicate(true)
+	if not round_data.has("axis_scripts"):
+		round_data["axis_scripts"] = {}
+	for axis: String in scan["axis"]:
+		if not (round_data["axis_scripts"] as Dictionary).has(axis):
+			round_data["axis_scripts"][axis] = scan["axis"][axis]
+			changed = true
 
 	if not round_data.has("vib_scripts"):
 		round_data["vib_scripts"] = {}
@@ -264,78 +321,26 @@ static func autofill_round_siblings(
 			round_data["vib_scripts"][ch] = scan["vib"][ch]
 			changed = true
 
-	return changed
-
-
-# Library-shaped autofill (Randomizer entries): empty funscript_src / restim_axis_src / vib_src
-# filled from siblings next to video_src. Never overwrites set slots.
-# Returns { changed, funscript_src, restim_axis_src, vib_src }.
-static func autofill_src_siblings(
-	video_src: String,
-	funscript_src: String = "",
-	restim_axis_src: Dictionary = {},
-	vib_src: Dictionary = {},
-	label_a: String = "",
-	label_b: String = ""
-) -> Dictionary:
-	var labels: PackedStringArray = _resolve_labels(label_a, label_b)
-	var ras: Dictionary = JourneyData.coerce_restim_axis_scripts(
-		{"restim_axis_scripts": restim_axis_src, "axis_scripts": {}}
-	)
-	var vib: Dictionary = vib_src.duplicate(true)
-	var fs: String = funscript_src
-	var changed: bool = false
-	if video_src == "" or not FileAccess.file_exists(ProjectSettings.globalize_path(video_src)):
-		return {
-			"changed": false,
-			"funscript_src": fs,
-			"restim_axis_src": ras,
-			"vib_src": vib,
-		}
-
-	var dir: String = video_src.get_base_dir()
-	var base: String = strip_script_suffix(video_src, labels[0], labels[1])
-	var scan: Dictionary = find_sibling_scripts(dir, base, labels[0], labels[1])
-
-	if fs == "" and scan["funscript"] != "":
-		fs = scan["funscript"]
-		changed = true
-
-	var scan_ras: Dictionary = scan["restim_axis"] as Dictionary
-	for slot: String in JourneyData.RESTIM_AXIS_SLOTS:
-		var dest: Dictionary = ras[slot] as Dictionary
-		var src: Dictionary = scan_ras[slot] as Dictionary
-		for axis: String in src:
-			if not dest.has(axis):
-				dest[axis] = src[axis]
-				changed = true
-
-	for ch: String in scan["vib"]:
-		if not vib.has(ch):
-			vib[ch] = scan["vib"][ch]
+	if not round_data.has("estim_scripts"):
+		round_data["estim_scripts"] = {}
+	for eax: String in scan["estim"]:
+		if not (round_data["estim_scripts"] as Dictionary).has(eax):
+			round_data["estim_scripts"][eax] = scan["estim"][eax]
 			changed = true
 
-	return {
-		"changed": changed,
-		"funscript_src": fs,
-		"restim_axis_src": ras,
-		"vib_src": vib,
-	}
+	return changed
 
 
 # Groups dropped files by folder + base name (a video + its matched scripts → one round) and builds
 # each group's round data: the round template + the group's media, then any missing siblings autofilled
 # from disk. A group needs a video to become a round; funscript-only groups are counted in
 # skipped_no_video. Returns { "rounds": Array[Dictionary], "skipped_no_video": int } in first-seen order.
-static func build_rounds(
-	files: PackedStringArray, label_a: String = "", label_b: String = ""
-) -> Dictionary:
-	var labels: PackedStringArray = _resolve_labels(label_a, label_b)
-	var groups: Dictionary = {}  # round_key -> {video, funscript, axis:{}, restim_axis, vib:{}, name}
+static func build_rounds(files: PackedStringArray) -> Dictionary:
+	var groups: Dictionary = {}  # round_key -> {video, funscript, axis:{}, vib:{}, name}
 	var order: Array = []  # round_keys in first-seen order
 	for f: String in files:
 		var ext: String = f.get_extension().to_lower()
-		var key: String = round_group_key(f, labels[0], labels[1])
+		var key: String = round_group_key(f)
 		if ext in JourneyData.VIDEO_EXTENSIONS:
 			ensure_import_group(groups, order, key)
 			groups[key]["video"] = f
@@ -344,24 +349,19 @@ static func build_rounds(
 		elif ext in JourneyData.FUNSCRIPT_EXTENSIONS:
 			ensure_import_group(groups, order, key)
 			var vib_ch: String = detect_vib_channel(f)
+			var estim_ax: String = detect_estim_axis(f)
 			if vib_ch != "":
 				groups[key]["vib"][vib_ch] = f
+			elif estim_ax != "":
+				groups[key]["estim"][estim_ax] = f
 			else:
-				var slotted: Dictionary = detect_funscript_slotted_axis(f, labels[0], labels[1])
-				if slotted.is_empty():
-					var stem_low: String = f.get_file().get_basename().to_lower()
-					if RestimAxisKit.has_kit_axis_tag(stem_low):
-						pass  # orphaned label tag — not main L0
-					else:
-						groups[key]["funscript"] = f
-						if groups[key]["name"] == "":
-							groups[key]["name"] = f.get_file().get_basename()
-				elif RestimAxisKit.should_autofill(str(slotted["axis"])):
-					var slot: String = str(slotted["slot"])
-					var axis: String = str(slotted["axis"])
-					(groups[key]["restim_axis"][slot] as Dictionary)[axis] = f
-					if slot == "shared":
-						groups[key]["axis"][axis] = f
+				var axis: String = detect_funscript_axis(f)
+				if axis == "L0":
+					groups[key]["funscript"] = f
+					if groups[key]["name"] == "":
+						groups[key]["name"] = f.get_file().get_basename()
+				else:
+					groups[key]["axis"][axis] = f
 
 	var rounds: Array = []
 	var skipped_no_video: int = 0
@@ -374,16 +374,12 @@ static func build_rounds(
 		data["name"] = (g["name"] as String) if (g["name"] as String) != "" else key
 		data["funscript_path"] = g["funscript"]
 		data["video_path"] = g["video"]
-		data["restim_axis_scripts"] = (g["restim_axis"] as Dictionary).duplicate(true)
-		data["axis_scripts"] = (
-			(g["restim_axis"]["shared"] as Dictionary).duplicate(true)
-			if (g["restim_axis"] as Dictionary).has("shared")
-			else (g["axis"] as Dictionary).duplicate(true)
-		)
+		data["axis_scripts"] = g["axis"]
 		data["vib_scripts"] = g["vib"]
+		data["estim_scripts"] = g["estim"]
 		var anchor: String = group_anchor_path(g)
 		if anchor != "":
-			autofill_round_siblings(data, anchor, labels[0], labels[1])
+			autofill_round_siblings(data, anchor)
 		if str(data.get("video_path", "")) == "":
 			skipped_no_video += 1
 			continue

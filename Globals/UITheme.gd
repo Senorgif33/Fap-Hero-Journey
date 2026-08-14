@@ -12,6 +12,98 @@ extends Node
 #     hbox.add_child(UITheme.make_icon_btn("↑", false, UITheme.PURPLE_MID))
 # ---------------------------------------------------------------------------
 
+# ── Readability ────────────────────────────────────────────────────────────
+# Distinct from Options → UI SCALE, which resizes the whole interface (layout included) via
+# content_scale_factor. These grow TEXT only, where long-form reading happens.
+
+const TOOLTIP_BASE_FONT_SIZE: int = 16  # Godot's default theme size for TooltipLabel
+
+
+# Font size for narrative text — fork prose, boss intro cards, storyboard dialogue. Pass the
+# design size; the player's STORY TEXT setting scales it. Chrome (HUD, buttons, toasts) keeps
+# its literal size, so a large setting doesn't reflow the whole game.
+func story_font_size(base: int) -> int:
+	return maxi(1, roundi(base * SettingsService.get_story_text_scale()))
+
+
+# Tooltips can't take a per-label override — Godot renders them from the `TooltipLabel` theme
+# type — so this puts a Theme on the Window carrying only that font size. Everything else falls
+# through to the default theme, so nothing else changes appearance.
+func apply_tooltip_scale() -> void:
+	var w: Window = get_window()
+	if w == null:
+		return
+	var t: Theme = w.theme if w.theme != null else Theme.new()
+	t.set_font_size(
+		"font_size",
+		"TooltipLabel",
+		maxi(1, roundi(TOOLTIP_BASE_FONT_SIZE * SettingsService.get_tooltip_text_scale()))
+	)
+	w.theme = t
+
+
+# ── Glyph fallback fonts ─────────────────────────────────────────────────────
+# The UI's button/label "icons" are Unicode GLYPHS (⑂ ✎ ✕ ▶ ◆ 🎲 …), not images. Godot's default font
+# carries no symbols/emoji, so absent a bundled fallback those glyphs are supplied by whatever fonts the
+# user's OS happens to have — which varies, so some players (even on Windows) get tofu boxes (□) where an
+# icon should be. We append these bundled fonts as FALLBACKS on the default font: the Latin typeface is
+# unchanged, and only otherwise-missing glyphs pull from them. Drop the .ttf files in res://assets/fonts/
+# (see the README there). Missing files no-op — nothing breaks, you just keep depending on the OS.
+const GLYPH_FALLBACK_FONTS: Array[String] = [
+	"res://assets/fonts/NotoSansSymbols2-Regular.ttf",  # monochrome symbols: ⑂ ✎ ✕ ⚔ ✂ ★ ⬆ ⬇ ⚙ …
+	"res://assets/fonts/NotoColorEmoji.ttf",  # colour emoji: 📂 🔥 🎲 🎭 🏁 …
+]
+
+
+func _ready() -> void:
+	apply_tooltip_scale()
+	_install_glyph_fallbacks()
+
+
+# Appends the bundled symbol/emoji fonts to the DEFAULT font's fallback chain, so glyph "icons" render
+# the same on every machine instead of depending on the player's installed fonts. Runs once at startup,
+# before any UI is built. Warns (and no-ops) if the default font can't take fallbacks — in which case set
+# Project Settings → gui/theme/custom_font to a FontFile carrying these fallbacks instead. Skips any font
+# file not yet added to the project.
+func _install_glyph_fallbacks() -> void:
+	var base: Font = ThemeDB.fallback_font
+	if not (base is FontFile):
+		push_warning("UITheme: default font isn't a FontFile; glyph fallbacks not installed.")
+		return
+	var fonts: Array[Font] = []
+	for path: String in GLYPH_FALLBACK_FONTS:
+		if ResourceLoader.exists(path):
+			var f: Resource = load(path)
+			if f is Font:
+				fonts.append(f as Font)
+	if not fonts.is_empty():
+		(base as FontFile).fallbacks = fonts
+
+
+# Word-wraps tooltip text by inserting newlines — Godot's default tooltip does NOT autowrap, so
+# a long one runs off screen. Existing newlines are preserved (each line wrapped independently),
+# and a string already under the limit is returned unchanged, so short tooltips are untouched.
+# Char-based rather than pixel-based on purpose: a tooltip has no parent to measure against.
+func wrap_tip(text: String, max_chars: int = 54) -> String:
+	var out: PackedStringArray = []
+	for para: String in text.split("\n"):
+		if para.length() <= max_chars:
+			out.append(para)
+			continue
+		var line: String = ""
+		for word: String in para.split(" "):
+			if line == "":
+				line = word
+			elif line.length() + 1 + word.length() <= max_chars:
+				line += " " + word
+			else:
+				out.append(line)
+				line = word
+		if line != "":
+			out.append(line)
+	return "\n".join(out)
+
+
 # ── Palette ────────────────────────────────────────────────────────────────
 
 # Backgrounds
@@ -232,6 +324,15 @@ func style_spin_box(spin: SpinBox) -> void:
 	var le: LineEdit = spin.get_line_edit()
 	if le != null:
 		style_line_edit(le)
+		# Commit typed text when focus leaves, not only on Enter — otherwise clicking away
+		# from a field silently discards the edit. Deliberately NOT update_on_text_changed:
+		# that re-clamps on every keystroke, so a field with min_value > 1 rewrites the text
+		# mid-type ("1" → "2" → next digit gives "20").
+		le.focus_exited.connect(func() -> void: spin.apply())
+		# Also commit on teardown. focus_exited alone isn't enough: clicking the graph canvas
+		# doesn't take focus, so the field keeps it — and selecting a node then rebuilds the
+		# side panel, freeing a still-focused spin box with its edit uncommitted.
+		spin.tree_exiting.connect(func() -> void: spin.apply())
 
 
 # TextEdit styling (multi-line).
@@ -259,9 +360,19 @@ func style_text_edit(text_edit: TextEdit) -> void:
 
 # OptionButton (dropdown) styling.
 func style_option_button(option_button: OptionButton) -> void:
-	option_button.add_theme_color_override("font_color", WHITE_SOFT)
-	option_button.add_theme_color_override("font_hover_color", PURPLE_BRIGHT)
-	option_button.add_theme_font_size_override("font_size", 14)
+	_apply_dropdown_style(option_button)
+
+
+# Same dark, purple-bordered dropdown look for a MenuButton (e.g. the MultiSelectDropdown component).
+func style_menu_button(menu_button: MenuButton) -> void:
+	_apply_dropdown_style(menu_button)
+
+
+# The shared dropdown look — applies to any Button (OptionButton / MenuButton) via Button-level overrides.
+func _apply_dropdown_style(btn: Button) -> void:
+	btn.add_theme_color_override("font_color", WHITE_SOFT)
+	btn.add_theme_color_override("font_hover_color", PURPLE_BRIGHT)
+	btn.add_theme_font_size_override("font_size", 14)
 	var normal_style: StyleBoxFlat = StyleBoxFlat.new()
 	normal_style.bg_color = PURPLE_DARK
 	normal_style.border_color = PURPLE_MID
@@ -274,12 +385,12 @@ func style_option_button(option_button: OptionButton) -> void:
 	normal_style.content_margin_top = 8
 	normal_style.content_margin_bottom = 8
 	normal_style.set_corner_radius_all(CORNER_RADIUS)
-	option_button.add_theme_stylebox_override("normal", normal_style)
+	btn.add_theme_stylebox_override("normal", normal_style)
 	var hover_style: StyleBoxFlat = normal_style.duplicate()
 	hover_style.border_color = PURPLE_BRIGHT
-	option_button.add_theme_stylebox_override("hover", hover_style)
-	option_button.add_theme_stylebox_override("pressed", hover_style)
-	option_button.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	btn.add_theme_stylebox_override("hover", hover_style)
+	btn.add_theme_stylebox_override("pressed", hover_style)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 
 
 # Read-only tag chip: a small rounded pill, `text` in `accent`, on a near-opaque
@@ -338,7 +449,10 @@ func make_separator_style(alpha: float = 1.0) -> StyleBoxFlat:
 # Standard panel size is 720×520. Pass `panel_size` to override (e.g. a wider
 # error modal listing many issues, or a narrower confirmation prompt).
 func build_centered_modal(
-	title: String, accent: Color, panel_size: Vector2i = Vector2i(720, 520)
+	title: String,
+	accent: Color,
+	panel_size: Vector2i = Vector2i(720, 520),
+	backdrop_alpha: float = 0.85
 ) -> Dictionary:
 	var modal: Control = Control.new()
 	modal.anchor_right = 1.0
@@ -346,7 +460,7 @@ func build_centered_modal(
 	modal.mouse_filter = Control.MOUSE_FILTER_STOP
 
 	var backdrop: ColorRect = ColorRect.new()
-	backdrop.color = Color(0.0, 0.0, 0.0, 0.85)
+	backdrop.color = Color(0.0, 0.0, 0.0, backdrop_alpha)
 	backdrop.anchor_right = 1.0
 	backdrop.anchor_bottom = 1.0
 	modal.add_child(backdrop)

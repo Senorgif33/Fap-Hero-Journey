@@ -31,6 +31,17 @@ const DEFAULT_OUTPUT_MODE: String = "buttplug"
 const DEFAULT_SERIAL_PORT: String = ""
 const DEFAULT_SERIAL_BAUD: int = 115200
 const DEFAULT_SERIAL_AUTO: bool = false
+
+# ── restim (e-stim, network T-code over WebSocket) ──
+# Address is split into server + path so the endpoint path can't be missed. The restim
+# in this workspace routes T-code on /tcode; a user on a build expecting /ws can edit it.
+const DEFAULT_RESTIM_SERVER: String = "ws://127.0.0.1:12346"
+const DEFAULT_RESTIM_PATH: String = "/tcode"
+const DEFAULT_RESTIM_AUTO: bool = false
+# Per-axis manual value (percent 0–100) for each of the 18 "E-Stim Full" axes. Motion
+# axes (L0/L1/C0/P0/V1/V2) use this only as a fallback when the round has no matching
+# funscript; the rest always send this value. Default 0 mirrors the profile's DefaultValue.
+const DEFAULT_RESTIM_AXIS: int = 0
 const DEFAULT_RANGE_MIN: int = 0
 const DEFAULT_RANGE_MAX: int = 100
 const DEFAULT_HOME_POSITION: int = 50
@@ -38,23 +49,18 @@ const DEFAULT_HOME_EASE_MS: int = 2000
 const DEFAULT_LATENCY_OFFSET_MS: int = 0
 const DEFAULT_VIBE_INTENSITY: int = 100
 const DEFAULT_MAX_STROKE_SPEED: int = 0  # 0 = unlimited (units/sec)
+# Serial (T-code) stroke smoothing: the interval FunscriptPlayer streams with, as a multiple of the
+# output tick. >1 keeps the OSR gliding toward a fresh target instead of finishing early and
+# dwelling. Best value varies by device/firmware, so it's tunable. See FunscriptPlayer._PhysicsProcess.
+const DEFAULT_SERIAL_INTERP_FACTOR: float = 1.6
 
 # ── Device routing (one stroker + per-actuator Buttplug vibe/constrict routes) ──
 # Actuator id: "<name>#<occurrence>:<linear|vibrate|constrict>:<channel>". Stroke target is
-# such an id (a Buttplug linear) or a backend sentinel: "serial", "restim", or "handy".
-# Serial / Restim are single T-code sinks and are NOT part of the per-actuator mapping
-# (Buttplug-only, by design).
+# such an id (a Buttplug linear) or the sentinel "serial". Serial stays a single T-code device
+# and is NOT part of the per-actuator mapping (Buttplug-only, by design).
 const DEFAULT_STROKE_TARGET: String = ""
 const DEFAULT_VIBRATION_ROUTES: Dictionary = {}  # { actuator_id: "vibe1"|"vibe2"|"stroke" }
 const DEFAULT_CONSTRICT_ROUTES: Dictionary = {}  # { actuator_id: true }
-
-# Restim (e-stim / FOC via T-code websocket). Dual slots; path MUST be /tcode (Restim Preferences → Network).
-const DEFAULT_RESTIM_URL: String = "ws://127.0.0.1:12346/tcode"  # legacy single-URL default → slot a
-const DEFAULT_RESTIM_URL_A: String = "ws://127.0.0.1:12346/tcode"
-const DEFAULT_RESTIM_URL_B: String = "ws://127.0.0.1:12347/tcode"
-const DEFAULT_RESTIM_AUTO: bool = false
-const DEFAULT_RESTIM_LABEL_A: String = "Restim A"
-const DEFAULT_RESTIM_LABEL_B: String = "Restim B"
 
 # Constrict auto state machine (activity-driven squeeze). WHICH actuators = constrict_routes above;
 # these globals tune the level transitions. Activity is the stroke speed in funscript units/sec.
@@ -72,6 +78,20 @@ const DEFAULT_CONSTRICT_HOLD_ON_PAUSE: bool = true
 const DEFAULT_HUD_HIDE_DELAY: float = 3.0  # seconds
 const DEFAULT_UI_SCALE: float = 1.0  # Window.content_scale_factor multiplier
 const DEFAULT_BEAT_BAR_ENABLED: bool = false
+const DEFAULT_ROUND_TIMER_ENABLED: bool = false  # opt-in, like the beat bar
+const DEFAULT_BUILDER_ANIMATED_BG: bool = true  # animated builder backdrop; off = plain black canvas
+const DEFAULT_BEAT_BAR_SHAPE: String = "heart"  # see BeatBar.SHAPES
+# Readability scales, separate from UI_SCALE (which resizes the whole interface, layout and all).
+# These grow TEXT only, in the two places long-form reading actually happens.
+const DEFAULT_STORY_TEXT_SCALE: float = 1.0  # fork / boss / storyboard prose
+const DEFAULT_TOOLTIP_TEXT_SCALE: float = 1.0  # every tooltip, builder included
+# Fraction of the funscript clip-editor's resizable area given to the video pane (the rest goes to
+# the curve graph below it). Authors drag the divider to taste; the choice persists. See
+# FunscriptPreview's VSplitContainer.
+const DEFAULT_PREVIEW_VIDEO_SPLIT: float = 0.68
+# Fraction of the clip-editor's WIDTH given to the left column (video + graph + playback controls);
+# the rest is the segment-timeline column on the right. Draggable + persisted, like the video split.
+const DEFAULT_PREVIEW_COLUMNS_SPLIT: float = 0.68
 const DEFAULT_FILLER_ENABLED: bool = false
 const DEFAULT_FILLER_HALF_CYCLE: int = 2000
 const DEFAULT_FILLER_LO: int = 0
@@ -82,8 +102,6 @@ const DEFAULT_AUTO_TRANSCODE: bool = true
 const DEFAULT_UPDATE_CHECK: bool = true  # check GitHub for a newer build on launch
 const DEFAULT_UI_SOUND_ENABLED: bool = true  # click/hover feedback blips
 const DEFAULT_UI_SOUND_VOLUME: float = 0.6  # linear, 0–1
-const DEFAULT_IGNORE_JOURNEY_COOLDOWNS: bool = false  # dev: skip calendar lockouts
-const DEFAULT_DEV_CHEATS: bool = false  # in-run → complete / ↑ skip + cooldown Continue
 
 var _config: ConfigFile = ConfigFile.new()
 
@@ -91,7 +109,6 @@ var _config: ConfigFile = ConfigFile.new()
 func _ready() -> void:
 	# A missing file is fine — getters fall back to the canonical defaults.
 	_config.load(SETTINGS_PATH)
-	_migrate_restim_settings()
 
 	# Apply boot-time audio / display settings.
 	AudioServer.set_bus_volume_db(0, linear_to_db(get_master_volume()))
@@ -152,23 +169,33 @@ func get_serial_auto_connect() -> bool:
 	return bool(_config.get_value("serial", "auto_connect", DEFAULT_SERIAL_AUTO))
 
 
-# slot: "a" | "b". Bare get_restim_url() returns slot a (legacy callers).
-func get_restim_url(slot: String = "a") -> String:
-	if slot == "b":
-		return str(_config.get_value("restim", "url_b", DEFAULT_RESTIM_URL_B))
-	return str(_config.get_value("restim", "url_a", DEFAULT_RESTIM_URL_A))
+# Player-side scale on every sensory (visual/audio) effect, 0.1–1.0. Multiplies the author's
+# per-round intensity, so it softens without overriding which effects a round uses. Defaults
+# below 1.0 — the catalog maxima were tuned harsher than most players want.
+func get_sensory_strength() -> float:
+	return clampf(float(_config.get_value("display", "sensory_strength", 0.50)), 0.1, 1.0)
 
 
-func get_restim_auto_connect(slot: String = "a") -> bool:
-	if slot == "b":
-		return bool(_config.get_value("restim", "auto_connect_b", DEFAULT_RESTIM_AUTO))
-	return bool(_config.get_value("restim", "auto_connect_a", DEFAULT_RESTIM_AUTO))
+func set_sensory_strength(value: float) -> void:
+	_config.set_value("display", "sensory_strength", clampf(value, 0.1, 1.0))
 
 
-func get_restim_label(slot: String = "a") -> String:
-	if slot == "b":
-		return str(_config.get_value("restim", "label_b", DEFAULT_RESTIM_LABEL_B))
-	return str(_config.get_value("restim", "label_a", DEFAULT_RESTIM_LABEL_A))
+# ── restim ──
+func get_restim_server() -> String:
+	return str(_config.get_value("restim", "server", DEFAULT_RESTIM_SERVER))
+
+
+func get_restim_path() -> String:
+	return str(_config.get_value("restim", "path", DEFAULT_RESTIM_PATH))
+
+
+func get_restim_auto_connect() -> bool:
+	return bool(_config.get_value("restim", "auto_connect", DEFAULT_RESTIM_AUTO))
+
+
+# Manual value (percent 0–100) for one E-Stim Full axis, e.g. "V0", "P1", "C0".
+func get_restim_axis(axis: String) -> int:
+	return int(_config.get_value("restim", "axis_%s" % axis, DEFAULT_RESTIM_AXIS))
 
 
 func get_range_min() -> int:
@@ -179,8 +206,8 @@ func get_range_max() -> int:
 	return int(_config.get_value("device", "range_max", DEFAULT_RANGE_MAX))
 
 
-# Per-axis range for the secondary positional axes (T-code L1/L2/R0/R1/R2/E1–E4).
-# Each axis has its own [min,max] travel window; the stroke axis uses range_min/range_max.
+# Per-axis range for the secondary positional axes (T-code L1/L2/R0/R1/R2). Each
+# axis has its own [min,max] travel window; the stroke axis uses range_min/range_max.
 func get_axis_range_min(axis: String) -> int:
 	return int(_config.get_value("device", "axis_%s_range_min" % axis, DEFAULT_RANGE_MIN))
 
@@ -207,6 +234,20 @@ func get_vibe_intensity() -> int:
 
 func get_max_stroke_speed() -> int:
 	return int(_config.get_value("device", "max_stroke_speed", DEFAULT_MAX_STROKE_SPEED))
+
+
+# Serial stroke smoothing factor, clamped to a sane band (a value < 1 would make the OSR finish each
+# move early and step; too high softens/lags the motion).
+func get_serial_interp_factor() -> float:
+	return clampf(
+		float(_config.get_value("device", "serial_interp_factor", DEFAULT_SERIAL_INTERP_FACTOR)),
+		1.0,
+		4.0
+	)
+
+
+func set_serial_interp_factor(value: float) -> void:
+	_config.set_value("device", "serial_interp_factor", clampf(value, 1.0, 4.0))
 
 
 # ── Device routing ──
@@ -316,6 +357,90 @@ func get_beat_bar_enabled() -> bool:
 	return bool(_config.get_value("display", "beat_bar_enabled", DEFAULT_BEAT_BAR_ENABLED))
 
 
+# Shows time left in the round on the HUD bar. Off by default so the HUD doesn't change under
+# existing players; it hides with the rest of the HUD under a Fog effect.
+func get_round_timer_enabled() -> bool:
+	return bool(_config.get_value("display", "round_timer_enabled", DEFAULT_ROUND_TIMER_ENABLED))
+
+
+func set_round_timer_enabled(value: bool) -> void:
+	_config.set_value("display", "round_timer_enabled", value)
+
+
+# Animated backdrop in the journey builder. On by default; off gives a plain black canvas (less motion /
+# GPU load). Read when the builder opens.
+func get_builder_animated_bg_enabled() -> bool:
+	return bool(_config.get_value("display", "builder_animated_bg", DEFAULT_BUILDER_ANIMATED_BG))
+
+
+func set_builder_animated_bg_enabled(value: bool) -> void:
+	_config.set_value("display", "builder_animated_bg", value)
+
+
+# Multiplies the font size of narrative text — fork titles/descriptions, boss intro cards,
+# storyboard dialogue. Layout is unchanged, so very large values can crowd a card; 2.0 is the
+# practical ceiling.
+func get_story_text_scale() -> float:
+	return clampf(
+		float(_config.get_value("display", "story_text_scale", DEFAULT_STORY_TEXT_SCALE)), 1.0, 2.0
+	)
+
+
+func set_story_text_scale(value: float) -> void:
+	_config.set_value("display", "story_text_scale", clampf(value, 1.0, 2.0))
+
+
+# Multiplies tooltip font size app-wide (applied via UITheme.apply_tooltip_scale).
+func get_tooltip_text_scale() -> float:
+	return clampf(
+		float(_config.get_value("display", "tooltip_text_scale", DEFAULT_TOOLTIP_TEXT_SCALE)),
+		1.0,
+		2.0
+	)
+
+
+func set_tooltip_text_scale(value: float) -> void:
+	_config.set_value("display", "tooltip_text_scale", clampf(value, 1.0, 2.0))
+
+
+# Marker shape on the beat bar — "heart" / "orb" / "diamond" / "star" (BeatBar.SHAPES).
+# Unknown values fall back to the default rather than drawing nothing.
+func get_beat_bar_shape() -> String:
+	return str(_config.get_value("display", "beat_bar_shape", DEFAULT_BEAT_BAR_SHAPE))
+
+
+func set_beat_bar_shape(value: String) -> void:
+	_config.set_value("display", "beat_bar_shape", value)
+
+
+# Video-vs-graph split of the clip editor, clamped to a usable band so a saved value can never
+# hide either pane entirely (the graph also enforces its own pixel minimum at layout time).
+func get_preview_video_split() -> float:
+	return clampf(
+		float(_config.get_value("builder", "preview_video_split", DEFAULT_PREVIEW_VIDEO_SPLIT)),
+		0.2,
+		0.9
+	)
+
+
+func set_preview_video_split(value: float) -> void:
+	_config.set_value("builder", "preview_video_split", clampf(value, 0.2, 0.9))
+
+
+# Left-column (video/graph) share of the clip editor's width, clamped so neither the video nor the
+# timeline column can be dragged uselessly small.
+func get_preview_columns_split() -> float:
+	return clampf(
+		float(_config.get_value("builder", "preview_columns_split", DEFAULT_PREVIEW_COLUMNS_SPLIT)),
+		0.4,
+		0.85
+	)
+
+
+func set_preview_columns_split(value: float) -> void:
+	_config.set_value("builder", "preview_columns_split", clampf(value, 0.4, 0.85))
+
+
 func get_filler_enabled() -> bool:
 	return bool(_config.get_value("storyboard_filler", "enabled", DEFAULT_FILLER_ENABLED))
 
@@ -400,18 +525,6 @@ func get_ui_sound_volume() -> float:
 	return float(_config.get_value("audio", "ui_sound_volume", DEFAULT_UI_SOUND_VOLUME))
 
 
-# When true, Journey Select Resume ignores cooldown_until (authoring / QA).
-func get_ignore_journey_cooldowns() -> bool:
-	return bool(
-		_config.get_value("debug", "ignore_journey_cooldowns", DEFAULT_IGNORE_JOURNEY_COOLDOWNS)
-	)
-
-
-# When true, GameLoop enables → complete / ↑ skip and cooldown-banner Continue.
-func get_dev_cheats_enabled() -> bool:
-	return bool(_config.get_value("debug", "dev_cheats", DEFAULT_DEV_CHEATS))
-
-
 # ── Setters ─────────────────────────────────────────────────────────────────
 # Setters mutate the in-memory config only. Call save() to persist.
 
@@ -456,89 +569,21 @@ func set_serial_auto_connect(value: bool) -> void:
 	_config.set_value("serial", "auto_connect", value)
 
 
-func set_restim_url(slot_or_value: Variant, value: Variant = null) -> void:
-	# Legacy: set_restim_url(url) → slot a. New: set_restim_url(slot, url).
-	var slot: String = "a"
-	var url: String = ""
-	if value == null:
-		url = str(slot_or_value)
-	else:
-		slot = str(slot_or_value)
-		url = str(value)
-	url = ensure_restim_tcode_path(url.strip_edges())
-	if slot == "b":
-		_config.set_value("restim", "url_b", url)
-	else:
-		_config.set_value("restim", "url_a", url)
-		_config.set_value("restim", "url", url)  # keep legacy key in sync
+# ── restim ──
+func set_restim_server(value: String) -> void:
+	_config.set_value("restim", "server", value)
 
 
-func set_restim_auto_connect(slot_or_value: Variant, value: Variant = null) -> void:
-	var slot: String = "a"
-	var enabled: bool = false
-	if value == null:
-		enabled = bool(slot_or_value)
-	else:
-		slot = str(slot_or_value)
-		enabled = bool(value)
-	if slot == "b":
-		_config.set_value("restim", "auto_connect_b", enabled)
-	else:
-		_config.set_value("restim", "auto_connect_a", enabled)
-		_config.set_value("restim", "auto_connect", enabled)
+func set_restim_path(value: String) -> void:
+	_config.set_value("restim", "path", value)
 
 
-func set_restim_label(slot: String, value: String) -> void:
-	var label: String = value.strip_edges()
-	if slot == "b":
-		_config.set_value("restim", "label_b", label if label != "" else DEFAULT_RESTIM_LABEL_B)
-	else:
-		_config.set_value("restim", "label_a", label if label != "" else DEFAULT_RESTIM_LABEL_A)
+func set_restim_auto_connect(value: bool) -> void:
+	_config.set_value("restim", "auto_connect", value)
 
 
-# One-time: legacy restim/url + auto_connect → slot-a keys when url_a is absent.
-# Also append /tcode when a saved host:port URL has no path (Restim rejects other paths).
-func _migrate_restim_settings() -> void:
-	var has_a: bool = _config.has_section_key("restim", "url_a")
-	if not has_a and _config.has_section_key("restim", "url"):
-		_config.set_value("restim", "url_a", str(_config.get_value("restim", "url", DEFAULT_RESTIM_URL_A)))
-	if not _config.has_section_key("restim", "auto_connect_a") and _config.has_section_key(
-		"restim", "auto_connect"
-	):
-		_config.set_value(
-			"restim",
-			"auto_connect_a",
-			bool(_config.get_value("restim", "auto_connect", DEFAULT_RESTIM_AUTO))
-		)
-	if not _config.has_section_key("restim", "url_b"):
-		_config.set_value("restim", "url_b", DEFAULT_RESTIM_URL_B)
-	var changed: bool = false
-	for key: String in ["url", "url_a", "url_b"]:
-		if not _config.has_section_key("restim", key):
-			continue
-		var raw: String = str(_config.get_value("restim", key, ""))
-		var fixed: String = ensure_restim_tcode_path(raw)
-		if fixed != raw:
-			_config.set_value("restim", key, fixed)
-			changed = true
-	if changed:
-		save()
-
-
-## Restim only accepts the /tcode websocket path; host:port alone is a 404 close.
-func ensure_restim_tcode_path(url: String) -> String:
-	var u: String = url.strip_edges()
-	if u == "" or u.contains("/tcode"):
-		return u
-	while u.ends_with("/"):
-		u = u.substr(0, u.length() - 1)
-	var scheme_end: int = u.find("://")
-	if scheme_end < 0:
-		return u + "/tcode"
-	var rest: String = u.substr(scheme_end + 3)
-	if rest.contains("/"):
-		return u  # custom non-tcode path — leave alone
-	return u + "/tcode"
+func set_restim_axis(axis: String, value: int) -> void:
+	_config.set_value("restim", "axis_%s" % axis, value)
 
 
 func set_range_min(value: int) -> void:
@@ -664,12 +709,42 @@ func set_ui_sound_volume(value: float) -> void:
 	_config.set_value("audio", "ui_sound_volume", value)
 
 
-func set_ignore_journey_cooldowns(value: bool) -> void:
-	_config.set_value("debug", "ignore_journey_cooldowns", value)
+# ── Last browse directory (file pickers reopen where you left off) ──────────
 
 
-func set_dev_cheats_enabled(value: bool) -> void:
-	_config.set_value("debug", "dev_cheats", value)
+# The folder the most recent file/folder picker landed in. Media pickers (media import, cover,
+# image export, randomizer) seed from this and update it on selection, so browsing reopens where
+# you were instead of the OS default. Options' storage/ffmpeg pickers opt out on purpose — they
+# open at their own configured path, which is more useful than a generic recent folder.
+func get_last_browse_dir() -> String:
+	return str(_config.get_value("paths", "last_browse_dir", ""))
+
+
+func set_last_browse_dir(value: String) -> void:
+	_config.set_value("paths", "last_browse_dir", value)
+
+
+# Seeds `dialog` at the last-used folder (if it still exists) and remembers the next folder picked.
+# Call right after creating a FileDialog, before popup(). Works for file / files / dir modes and
+# native dialogs; connecting all three selection signals is harmless for the ones a mode doesn't emit.
+func remember_browse_dir(dialog: FileDialog) -> void:
+	var last: String = get_last_browse_dir()
+	if last != "" and DirAccess.dir_exists_absolute(last):
+		dialog.current_dir = last
+	dialog.file_selected.connect(func(p: String) -> void: _store_browse_dir(p.get_base_dir()))
+	dialog.dir_selected.connect(func(p: String) -> void: _store_browse_dir(p))
+	dialog.files_selected.connect(
+		func(ps: PackedStringArray) -> void:
+			if not ps.is_empty():
+				_store_browse_dir(ps[0].get_base_dir())
+	)
+
+
+func _store_browse_dir(dir: String) -> void:
+	if dir == "" or not DirAccess.dir_exists_absolute(dir):
+		return
+	set_last_browse_dir(dir)
+	save()
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────

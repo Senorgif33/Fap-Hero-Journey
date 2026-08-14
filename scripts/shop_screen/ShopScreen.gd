@@ -16,6 +16,7 @@ signal map_requested  # player tapped the header "◇ MAP" button (GameLoop owns
 
 var _offered_ids: Array = []
 var _purchased: Dictionary = {}  # id -> true
+var _purchase_toast: PanelContainer = null  # the transient "added to inventory" banner (latest only)
 var _price_mult: float = 1.0  # per-shop price multiplier from journey config
 
 # Wrapping grid that replaces the scene's fixed 3-wide CardsRow at runtime so a
@@ -23,6 +24,13 @@ var _price_mult: float = 1.0  # per-shop price multiplier from journey config
 var _cards_flow: HFlowContainer = null
 
 var show_map_button: bool = true  # GameLoop clears this when the journey hides the map
+
+# Auto-advance countdown (journey opt-in). GameLoop sets auto_advance_secs before setup(); when >0 the
+# shop auto-continues after that many seconds (so a player can't linger to "rest"). Mirrors ForkScreen.
+var auto_advance_secs: int = 0
+var _time_left: float = 0.0
+var _timer_active: bool = false
+var _countdown_lbl: Label = null
 
 
 func _ready() -> void:
@@ -91,6 +99,9 @@ func setup(shop_data: Dictionary) -> void:
 		_animate_card_in(card, min(stagger, 12) * 0.04)
 		stagger += 1
 
+	if auto_advance_secs > 0:
+		_start_countdown()
+
 
 # Fades + scales a freshly-added card in. Waits one frame so the flow container
 # has assigned the card its size before the pivot is computed.
@@ -120,6 +131,54 @@ func _pulse_card(card: Control) -> void:
 	tween.tween_property(card, "scale", Vector2.ONE, 0.16).set_ease(Tween.EASE_IN_OUT).set_trans(
 		Tween.TRANS_CUBIC
 	)
+
+
+# A clear, held confirmation banner when an item is bought — the card pulse + the button flip to
+# "OWNED" are easy to miss, so this slides a green banner down from the top for ~2s. Only the latest
+# shows (a fresh purchase replaces the previous banner).
+func _show_purchase_toast(item_name: String) -> void:
+	if is_instance_valid(_purchase_toast):
+		_purchase_toast.queue_free()
+	var toast: PanelContainer = PanelContainer.new()
+	toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var s: StyleBoxFlat = StyleBoxFlat.new()
+	s.bg_color = Color(
+		UITheme.PANEL_BG_DEEP.r, UITheme.PANEL_BG_DEEP.g, UITheme.PANEL_BG_DEEP.b, 0.95
+	)
+	s.border_color = UITheme.SUCCESS
+	s.set_border_width_all(2)
+	s.set_corner_radius_all(8)
+	s.set_content_margin_all(12)
+	toast.add_theme_stylebox_override("panel", s)
+	var lbl: Label = Label.new()
+	lbl.text = "✓  %s  ADDED TO INVENTORY" % item_name.to_upper()
+	lbl.add_theme_color_override("font_color", UITheme.SUCCESS)
+	lbl.add_theme_font_size_override("font_size", 16)
+	toast.add_child(lbl)
+	_purchase_toast = toast
+	add_child(toast)
+	await get_tree().process_frame  # let it size before we place/animate it
+	if not is_instance_valid(toast):
+		return
+	var rest_y: float = 24.0
+	var hidden_y: float = -toast.size.y - 8.0
+	toast.position = Vector2((size.x - toast.size.x) / 2.0, hidden_y)
+	toast.modulate.a = 0.0
+	var tin: Tween = create_tween().set_parallel(true)
+	tin.tween_property(toast, "position:y", rest_y, 0.28).set_trans(Tween.TRANS_BACK).set_ease(
+		Tween.EASE_OUT
+	)
+	tin.tween_property(toast, "modulate:a", 1.0, 0.2)
+	await tin.finished
+	await get_tree().create_timer(2.0).timeout
+	if not is_instance_valid(toast):
+		return
+	var tout: Tween = create_tween().set_parallel(true)
+	tout.tween_property(toast, "position:y", hidden_y, 0.25).set_ease(Tween.EASE_IN)
+	tout.tween_property(toast, "modulate:a", 0.0, 0.25)
+	await tout.finished
+	if is_instance_valid(toast):
+		toast.queue_free()
 
 
 # Brief scale tick on the coin badge whenever the balance changes.
@@ -170,6 +229,17 @@ func _make_card(id: String, data: Dictionary) -> Control:
 	col.add_theme_constant_override("separation", 8)
 	col.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	inner.add_child(col)
+
+	# Optional custom-item icon at the top of the card (still image; absent for built-in items).
+	var icon_path: String = str(data.get("image", ""))
+	if icon_path != "":
+		var icon: JourneyImage = JourneyImage.new()
+		icon.custom_minimum_size = Vector2(0, 88)
+		col.add_child(icon)
+		if not icon.show_path(
+			icon_path, TextureRect.EXPAND_IGNORE_SIZE, TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		):
+			icon.queue_free()
 
 	# Category badge
 	var category: String = data.get("category", "modifier")
@@ -258,6 +328,7 @@ func _on_buy_pressed(id: String, buy: Button, card: PanelContainer) -> void:
 	_purchased[id] = true
 	_update_buy_button(id, buy, card)
 	_pulse_card(card)
+	_show_purchase_toast(str(data.get("name", id)))
 
 
 func _on_balance_changed(_balance: int) -> void:
@@ -348,6 +419,50 @@ func _on_continue_pressed() -> void:
 	tween.chain().tween_callback(func() -> void: emit_signal("closed"))
 
 
+# ── Auto-advance countdown (journey opt-in; mirrors ForkScreen) ──────────────
+func _start_countdown() -> void:
+	_add_countdown_label()
+	_time_left = float(auto_advance_secs)
+	_timer_active = true
+	_update_countdown_label()
+
+
+func _process(delta: float) -> void:
+	# GameLoop toggles set_process() while the map viewer is open, so this pauses there.
+	if not _timer_active:
+		return
+	_time_left -= delta
+	if _time_left <= 0.0:
+		_timer_active = false
+		if not _continue.disabled:
+			_on_continue_pressed()  # auto-continue — same exit as pressing Continue
+		return
+	_update_countdown_label()
+
+
+# A small countdown pinned top-centre so the ticking clock is visible above the panel.
+func _add_countdown_label() -> void:
+	_countdown_lbl = Label.new()
+	_countdown_lbl.anchor_left = 0.5
+	_countdown_lbl.anchor_right = 0.5
+	_countdown_lbl.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_countdown_lbl.offset_top = 18
+	_countdown_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_countdown_lbl.add_theme_font_size_override("font_size", 15)
+	_countdown_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_countdown_lbl)
+
+
+func _update_countdown_label() -> void:
+	if _countdown_lbl == null:
+		return
+	var secs: int = int(ceil(_time_left))
+	_countdown_lbl.text = "AUTO-CONTINUE IN %d" % secs
+	_countdown_lbl.add_theme_color_override(
+		"font_color", UITheme.ERROR_SOFT if secs <= 5 else UITheme.DARK_TEXT
+	)
+
+
 # --------------------------------------------------------------------------
 # Layout
 # --------------------------------------------------------------------------
@@ -359,6 +474,8 @@ func _apply_layout() -> void:
 
 	_backdrop.anchor_right = 1.0
 	_backdrop.anchor_bottom = 1.0
+	# Opaque so the paused round's frozen last frame doesn't bleed through behind the shop.
+	_backdrop.color = Color(0.0, 0.0, 0.0, 1.0)
 
 	_panel.anchor_left = 0.07
 	_panel.anchor_right = 0.93
@@ -380,7 +497,15 @@ func _apply_layout() -> void:
 	_cards_flow.alignment = FlowContainer.ALIGNMENT_CENTER
 	_cards_flow.add_theme_constant_override("h_separation", 16)
 	_cards_flow.add_theme_constant_override("v_separation", 16)
-	cards_scroll.add_child(_cards_flow)
+	# A small horizontal inset so a full row's rightmost card border isn't clipped by the scroll's edge
+	# (or the vertical scrollbar when the grid overflows and needs to scroll).
+	var cards_margin: MarginContainer = MarginContainer.new()
+	cards_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cards_margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cards_margin.add_theme_constant_override("margin_left", 14)
+	cards_margin.add_theme_constant_override("margin_right", 14)
+	cards_margin.add_child(_cards_flow)
+	cards_scroll.add_child(cards_margin)
 
 	var row_idx: int = _cards_row.get_index()
 	_vbox.add_child(cards_scroll)

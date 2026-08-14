@@ -20,6 +20,10 @@ const SLIDE_TIME: float = 0.18
 # until the inventory list rebuilds (cleared in _refresh).
 var _activating: bool = false
 
+# Journey "stats" block at the bottom: the player-visible counters and their values. Built in code
+# (the scene predates counters); kept live via GameState.CounterChanged while the panel is open.
+var _stats_box: VBoxContainer = null
+
 
 func _ready() -> void:
 	# The backdrop and root cover the full viewport for slide animation only —
@@ -31,14 +35,47 @@ func _ready() -> void:
 	_apply_theme()
 	_close_btn.pressed.connect(close)
 	InventoryService.InventoryChanged.connect(_refresh)
-	InventoryService.UnlockedChanged.connect(_refresh)
-	CoinService.BalanceChanged.connect(_on_balance_changed)
+	# Counters live in GameState, not InventoryService — refresh the stats block on its own signal so
+	# an open panel updates when a counter changes.
+	GameState.CounterChanged.connect(func(_n: String, _v: int, _d: int) -> void: _refresh_stats())
+	_stats_box = VBoxContainer.new()
+	_stats_box.add_theme_constant_override("separation", 4)
+	_vbox.add_child(_stats_box)  # below the item scroll
 	_refresh()
+	_refresh_stats()
 	_slide_in()
 
 
-func _on_balance_changed(_balance: int) -> void:
-	_refresh()
+# Rebuilds the journey-stats list from the counters the author marked player-visible
+# (GameState.Journey.shown_counters); hidden entirely when the journey surfaces none.
+func _refresh_stats() -> void:
+	if _stats_box == null:
+		return
+	for c in _stats_box.get_children():
+		c.queue_free()
+
+	var shown: Array = GameState.Journey.get("shown_counters", [])
+	if shown.is_empty():
+		return
+
+	var hdr: Label = Label.new()
+	hdr.text = "STATS"
+	UITheme.style_label(hdr, UITheme.PURPLE_BRIGHT, 12, true)
+	_stats_box.add_child(HSeparator.new())
+	_stats_box.add_child(hdr)
+
+	for name: Variant in shown:
+		var row: HBoxContainer = HBoxContainer.new()
+		var n_lbl: Label = Label.new()
+		n_lbl.text = str(name).to_upper()
+		n_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		UITheme.style_label(n_lbl, UITheme.WHITE_SOFT, 12, false)
+		row.add_child(n_lbl)
+		var v_lbl: Label = Label.new()
+		v_lbl.text = str(GameState.CounterValue(str(name)))
+		UITheme.style_label(v_lbl, UITheme.PURPLE_BRIGHT, 12, true)
+		row.add_child(v_lbl)
+		_stats_box.add_child(row)
 
 
 func _input(event: InputEvent) -> void:
@@ -71,38 +108,21 @@ func _refresh() -> void:
 	for child in _item_list.get_children():
 		child.queue_free()
 
-	var ppu: bool = InventoryService.UnlockPayPerUse
-	var unlocked_ids: Array = InventoryService.GetUnlockedIds() if ppu else []
 	var items: Array = InventoryService.GetItems()
-	var has_any: bool = not unlocked_ids.is_empty() or not items.is_empty()
-	_empty_lbl.visible = not has_any
-	_scroll.visible = has_any
+	_empty_lbl.visible = items.is_empty()
+	_scroll.visible = not items.is_empty()
 
-	# PPU: unlocked modifiers — pay price to activate (no inventory charge).
-	if ppu:
-		for id_v in unlocked_ids:
-			var id: String = str(id_v)
-			var data: Dictionary = InventoryService.GetItemData(id)
-			if data.is_empty():
-				continue
-			_item_list.add_child(_make_unlocked_row(id, data))
-
-	# Held charges — utilities always; modifiers too in classic mode.
 	for i in items.size():
 		var data: Dictionary = items[i]
-		_item_list.add_child(_make_charge_row(i, data))
+		_item_list.add_child(_make_item_row(i, data))
 
 
-func _make_unlocked_row(id: String, data: Dictionary) -> Control:
+func _make_item_row(slot_idx: int, data: Dictionary) -> Control:
 	var cls: Dictionary = _class_info(data.get("kind", ""))
-	var price: int = int(data.get("price", 0))
-	var can_afford: bool = CoinService.CanAfford(price)
 
 	var card: PanelContainer = PanelContainer.new()
 	card.add_theme_stylebox_override("panel", _row_stylebox(cls["color"]))
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	if not can_afford:
-		card.modulate = Color(1, 1, 1, 0.55)
 
 	var margin: MarginContainer = MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 14)
@@ -122,10 +142,15 @@ func _make_unlocked_row(id: String, data: Dictionary) -> Control:
 	var name_lbl: Label = Label.new()
 	name_lbl.text = (data.get("name", "?") as String).to_upper()
 	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Clip + ellipsis so a long (e.g. custom) item name stays within its flex width instead of forcing
+	# the row wider and running off the panel; the class tag + duration stay visible on the right.
+	name_lbl.clip_text = true
+	name_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	name_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	name_lbl.add_theme_font_size_override("font_size", 14)
 	top_row.add_child(name_lbl)
 
+	# Effect class tag — buff / debuff / modifier, colour-coded.
 	var class_lbl: Label = Label.new()
 	class_lbl.text = "%s %s" % [cls["glyph"], cls["label"]]
 	class_lbl.add_theme_color_override("font_color", cls["color"])
@@ -134,10 +159,7 @@ func _make_unlocked_row(id: String, data: Dictionary) -> Control:
 
 	var dur_lbl: Label = Label.new()
 	var dur_ms: int = data.get("duration_ms", 0)
-	if bool(data.get("round_scoped", false)):
-		dur_lbl.text = "ROUND"
-	else:
-		dur_lbl.text = "%ds" % int(dur_ms / 1000.0)
+	dur_lbl.text = "%ds" % int(dur_ms / 1000.0)
 	dur_lbl.add_theme_color_override("font_color", UITheme.DARK_TEXT)
 	dur_lbl.add_theme_font_size_override("font_size", 11)
 	top_row.add_child(dur_lbl)
@@ -150,97 +172,14 @@ func _make_unlocked_row(id: String, data: Dictionary) -> Control:
 	col.add_child(desc_lbl)
 
 	var use_lbl: Label = Label.new()
-	if can_afford:
-		use_lbl.text = "> CLICK TO ACTIVATE  ♦ %d" % price
-		use_lbl.add_theme_color_override("font_color", UITheme.AMBER)
-	else:
-		use_lbl.text = "✕ INSUFFICIENT  ♦ %d" % price
-		use_lbl.add_theme_color_override("font_color", UITheme.DANGER)
+	use_lbl.text = "> CLICK TO ACTIVATE"
+	use_lbl.add_theme_color_override("font_color", UITheme.AMBER)
 	use_lbl.add_theme_font_size_override("font_size", 10)
 	col.add_child(use_lbl)
 
+	# Let click events fall through every descendant to the card's gui_input.
 	_set_mouse_filter_recursive(margin, Control.MOUSE_FILTER_IGNORE)
-	if can_afford:
-		card.gui_input.connect(_on_unlocked_card_input.bind(card, use_lbl, id))
-	return card
-
-
-func _make_charge_row(slot_idx: int, data: Dictionary) -> Control:
-	var cls: Dictionary = _class_info(data.get("kind", ""))
-	var kind: String = data.get("kind", "")
-	var host: Node = _inventory_host()
-	var gate: String = ""
-	if host != null and host.has_method("inventory_activation_gate"):
-		gate = host.inventory_activation_gate(data)
-	var disabled: bool = gate == "disabled"
-
-	var card: PanelContainer = PanelContainer.new()
-	card.add_theme_stylebox_override("panel", _row_stylebox(cls["color"]))
-	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	if disabled:
-		card.modulate = Color(1, 1, 1, 0.4)
-
-	var margin: MarginContainer = MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 14)
-	margin.add_theme_constant_override("margin_right", 14)
-	margin.add_theme_constant_override("margin_top", 10)
-	margin.add_theme_constant_override("margin_bottom", 10)
-	card.add_child(margin)
-
-	var col: VBoxContainer = VBoxContainer.new()
-	col.add_theme_constant_override("separation", 4)
-	margin.add_child(col)
-
-	var top_row: HBoxContainer = HBoxContainer.new()
-	top_row.add_theme_constant_override("separation", 8)
-	col.add_child(top_row)
-
-	var name_lbl: Label = Label.new()
-	name_lbl.text = (data.get("name", "?") as String).to_upper()
-	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	name_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
-	name_lbl.add_theme_font_size_override("font_size", 14)
-	top_row.add_child(name_lbl)
-
-	var class_lbl: Label = Label.new()
-	class_lbl.text = "%s %s" % [cls["glyph"], cls["label"]]
-	class_lbl.add_theme_color_override("font_color", cls["color"])
-	class_lbl.add_theme_font_size_override("font_size", 10)
-	top_row.add_child(class_lbl)
-
-	var dur_lbl: Label = Label.new()
-	var dur_ms: int = data.get("duration_ms", 0)
-	if bool(data.get("round_scoped", false)):
-		dur_lbl.text = "ROUND"
-	else:
-		dur_lbl.text = "%ds" % int(dur_ms / 1000.0) if dur_ms > 0 else "HOLD"
-	dur_lbl.add_theme_color_override("font_color", UITheme.DARK_TEXT)
-	dur_lbl.add_theme_font_size_override("font_size", 11)
-	top_row.add_child(dur_lbl)
-
-	var desc_lbl: Label = Label.new()
-	desc_lbl.text = data.get("description", "")
-	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_lbl.add_theme_color_override("font_color", UITheme.DARK_TEXT)
-	desc_lbl.add_theme_font_size_override("font_size", 11)
-	col.add_child(desc_lbl)
-
-	var use_lbl: Label = Label.new()
-	if kind == "key" or kind == "cleanse":
-		use_lbl.text = "> HELD (AUTO-USE)"
-		use_lbl.add_theme_color_override("font_color", UITheme.DARK_TEXT)
-	elif disabled:
-		use_lbl.text = "✕ UNAVAILABLE"
-		use_lbl.add_theme_color_override("font_color", UITheme.DARK_TEXT)
-	else:
-		use_lbl.text = "> CLICK TO ACTIVATE"
-		use_lbl.add_theme_color_override("font_color", UITheme.AMBER)
-	use_lbl.add_theme_font_size_override("font_size", 10)
-	col.add_child(use_lbl)
-
-	_set_mouse_filter_recursive(margin, Control.MOUSE_FILTER_IGNORE)
-	if kind != "key" and kind != "cleanse" and not disabled:
-		card.gui_input.connect(_on_charge_card_input.bind(card, use_lbl, slot_idx))
+	card.gui_input.connect(_on_card_input.bind(card, use_lbl, slot_idx))
 	return card
 
 
@@ -250,10 +189,8 @@ func _class_info(kind: String) -> Dictionary:
 	match kind:
 		"score_multiplier", "coin_jackpot":
 			return {"label": "BUFF", "color": UITheme.TOXIC_GREEN, "glyph": "▲"}
-		"block", "blackout", "blackout_soft":
+		"block", "blackout":
 			return {"label": "DEBUFF", "color": UITheme.ERROR_SOFT, "glyph": "▼"}
-		"key", "cleanse", "save_now", "shave_cooldown", "skip_round":
-			return {"label": "UTILITY", "color": UITheme.PURPLE_BRIGHT, "glyph": "●"}
 		_:
 			return {"label": "MODIFIER", "color": UITheme.AMBER, "glyph": "◆"}
 
@@ -265,75 +202,19 @@ func _set_mouse_filter_recursive(node: Node, filter: int) -> void:
 		_set_mouse_filter_recursive(child, filter)
 
 
-func _on_unlocked_card_input(event: InputEvent, card: Control, use_lbl: Label, id: String) -> void:
+func _on_card_input(event: InputEvent, card: Control, use_lbl: Label, slot_idx: int) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
-			_activate_unlocked_card(card, use_lbl, id)
+			_activate_card(card, use_lbl, slot_idx)
 
 
-func _on_charge_card_input(event: InputEvent, card: Control, use_lbl: Label, slot_idx: int) -> void:
-	if event is InputEventMouseButton:
-		var mb := event as InputEventMouseButton
-		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
-			_activate_charge_card(card, use_lbl, slot_idx)
-
-
-func _activate_unlocked_card(card: Control, use_lbl: Label, id: String) -> void:
+# Plays the activation feedback — a bright flash, an "ACTIVATED" label swap, and
+# a slide-out — then actually activates the item. A panel-wide guard blocks any
+# further card clicks until the inventory list rebuilds.
+func _activate_card(card: Control, use_lbl: Label, slot_idx: int) -> void:
 	if _activating:
 		return
-	var data: Dictionary = InventoryService.GetItemData(id)
-	var price: int = int(data.get("price", 0))
-	if not CoinService.CanAfford(price):
-		return
-	var host: Node = _inventory_host()
-	if host != null and host.has_method("inventory_activation_gate"):
-		var gate: String = host.inventory_activation_gate(data)
-		if gate == "disabled":
-			return
-		if gate != "":
-			if host.has_method("_show_save_toast"):
-				host._show_save_toast(gate)
-			return
-	_activating = true
-	UISound.item_use()
-	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	use_lbl.text = "✓ ACTIVATED"
-	use_lbl.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)
-
-	var tw: Tween = create_tween()
-	tw.tween_property(card, "modulate", Color(1.8, 1.8, 1.8, 1.0), 0.09)
-	tw.tween_property(card, "modulate:a", 0.0, 0.24).set_ease(Tween.EASE_IN)
-	(
-		tw
-		. parallel()
-		. tween_property(card, "position:x", card.position.x + 90.0, 0.24)
-		. set_ease(Tween.EASE_IN)
-		. set_trans(Tween.TRANS_CUBIC)
-	)
-	var dur_override: int = -1
-	if host != null and host.has_method("inventory_duration_override_ms"):
-		dur_override = int(host.inventory_duration_override_ms(data))
-	tw.tween_callback(
-		func() -> void: InventoryService.ActivateUnlocked(id, dur_override)
-	)
-
-
-func _activate_charge_card(card: Control, use_lbl: Label, slot_idx: int) -> void:
-	if _activating:
-		return
-	var data: Dictionary = InventoryService.PeekItem(slot_idx)
-	if data.is_empty():
-		return
-	var host: Node = _inventory_host()
-	if host != null and host.has_method("inventory_activation_gate"):
-		var gate: String = host.inventory_activation_gate(data)
-		if gate == "disabled":
-			return
-		if gate != "":
-			if host.has_method("_show_save_toast"):
-				host._show_save_toast(gate)
-			return
 	_activating = true
 	UISound.item_use()
 	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -352,22 +233,8 @@ func _activate_charge_card(card: Control, use_lbl: Label, slot_idx: int) -> void
 		. set_ease(Tween.EASE_IN)
 		. set_trans(Tween.TRANS_CUBIC)
 	)
-	var dur_override: int = -1
-	if host != null and host.has_method("inventory_duration_override_ms"):
-		dur_override = int(host.inventory_duration_override_ms(data))
 	# Activate once the card has visually left — InventoryChanged → _refresh().
-	tw.tween_callback(
-		func() -> void: InventoryService.ActivateItem(slot_idx, dur_override)
-	)
-
-
-func _inventory_host() -> Node:
-	var n: Node = get_parent()
-	while n != null:
-		if n.has_method("inventory_activation_gate"):
-			return n
-		n = n.get_parent()
-	return null
+	tw.tween_callback(func() -> void: InventoryService.ActivateItem(slot_idx))
 
 
 # --------------------------------------------------------------------------
