@@ -113,6 +113,7 @@ var _dragging_frame: int = -1  # the frame being moved (by its header), or -1
 var _frame_drag_moved: bool = false
 var _frame_drag_started: bool = false
 var _frame_drag_node_ids: Array = []  # nodes captured inside the frame at drag start
+var _frame_drag_comment_indices: Array = []  # sticky-notes inside the frame at drag start — move with it
 var _resizing_frame: int = -1  # the frame being resized (by its corner grip), or -1
 var _frame_resize_started: bool = false
 var _drag_collapse_to: String = ""  # plain-press on a multi-selected node → collapse to it on release-no-move
@@ -322,6 +323,9 @@ func _layout_graph() -> void:
 	for ci: int in comments.size():
 		var cc: Control = _make_comment(ci, comments[ci])
 		cc.position = (comments[ci] as Dictionary).get("pos", Vector2.ZERO)
+		# A note inside a collapsed group hides with it (still positioned + tracked, so it moves with a
+		# group drag and reappears on expand — kept in _comment_ctrls so its index stays aligned).
+		cc.visible = not _comment_in_collapsed_group(comments[ci])
 		_canvas.add_child(cc)
 		_comment_ctrls.append(cc)
 	# Per-type ordinals so a node can show its number (e.g. "STORYBOARD 4") matching save-error text.
@@ -935,6 +939,11 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 	# Map mode: nodes ignore the mouse so clicks pass through to pan/zoom.
 	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE if map_mode else Control.MOUSE_FILTER_STOP
 
+	# The full name on hover, since the label may be trimmed. Only when the node has no warning of its
+	# own to explain — that text is the more urgent thing to read, and it owns the same tooltip.
+	if not map_mode and str(item.get("warning", "")) == "" and primary != "":
+		panel.tooltip_text = primary
+
 	# Selected nodes get a heavier border via _node_stylebox.
 	var is_selected: bool = _current_layout_node_id in _selected_ids
 	panel.add_theme_stylebox_override("panel", _node_stylebox(accent, is_selected, is_terminal))
@@ -999,7 +1008,10 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 	primary_lbl.text = primary
 	primary_lbl.add_theme_color_override("font_color", UITheme.WHITE_SOFT)
 	primary_lbl.add_theme_font_size_override("font_size", 13)
-	primary_lbl.clip_text = true
+	# Ellipsis rather than a hard clip: a name cut mid-word with no mark reads as the name itself, so an
+	# author cannot tell "Trading with the Comn" from a typo. The panel already stops the mouse in the
+	# editor, so the full text is one hover away.
+	primary_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	primary_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(primary_lbl)
 
@@ -1007,7 +1019,7 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 	secondary_lbl.text = secondary
 	secondary_lbl.add_theme_color_override("font_color", UITheme.DARK_TEXT)
 	secondary_lbl.add_theme_font_size_override("font_size", 10)
-	secondary_lbl.clip_text = true
+	secondary_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	secondary_lbl.uppercase = true
 	secondary_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(secondary_lbl)
@@ -1034,7 +1046,10 @@ func _make_node(item: Dictionary, is_terminal: bool = false) -> Control:
 func _node_stylebox(accent: Color, selected: bool, terminal: bool = false) -> StyleBoxFlat:
 	var s: StyleBoxFlat = StyleBoxFlat.new()
 	s.bg_color = Color(0.04, 0.0, 0.06, 0.96)
-	s.border_color = accent
+	# Selection is WHITE, not more of the node's own colour. Every node type already glows in its accent
+	# — two amber storyboards side by side both looked lit, and the selected one was only slightly more
+	# so. A colour no node owns is unambiguous at any zoom.
+	s.border_color = UITheme.WHITE_SOFT if selected else accent
 	# Border: thicker when selected; slightly heavier than default when terminal.
 	var w: int = 3 if selected else (2 if terminal else 1)
 	s.border_width_left = w
@@ -1046,7 +1061,7 @@ func _node_stylebox(accent: Color, selected: bool, terminal: bool = false) -> St
 	s.corner_radius_bottom_left = 6
 	s.corner_radius_bottom_right = 6
 	if selected:
-		s.shadow_color = Color(accent.r, accent.g, accent.b, 0.50)
+		s.shadow_color = Color(UITheme.WHITE_SOFT, 0.35)
 		s.shadow_size = 8
 	elif terminal:
 		# Warm amber glow to signal "this is where the run ends".
@@ -1128,6 +1143,13 @@ func _type_label(item: Dictionary) -> String:
 			var n2: String = item.get("title", "")
 			return n2 if n2 != "" else "Shop"
 		"storyboard":
+			# The author's title first, exactly as a round uses its name. Falling back to the first
+			# SPEAKER was a guess that read as a character list rather than as a map — every scene the
+			# same character opens looked identical, which is the whole problem a title solves. Kept as
+			# the fallback so an untitled storyboard still says something.
+			var sb_title: String = str(item.get("name", "")).strip_edges()
+			if sb_title != "":
+				return sb_title
 			var first_speaker: String = ""
 			var lines: Array = item.get("lines", [])
 			if lines.size() > 0:
@@ -1807,6 +1829,8 @@ func _on_frame_header_gui_input(event: InputEvent, idx: int) -> void:
 					if g.get("collapsed", false)
 					else _nodes_in_frame_rect(g.get("rect", Rect2()))
 				)
+				# Notes inside the frame ride along too, like the nodes.
+				_frame_drag_comment_indices = _comments_in_frame_rect(g.get("rect", Rect2()))
 				get_viewport().set_input_as_handled()
 
 
@@ -1828,6 +1852,27 @@ func _nodes_in_frame_rect(rect: Rect2) -> Array:
 		if rect.has_point(pos + half):
 			ids.append(id)
 	return ids
+
+
+# Sticky-note indices sitting inside `rect` — captured when a frame drag begins so notes move with the
+# group just like the nodes do.
+func _comments_in_frame_rect(rect: Rect2) -> Array:
+	var indices: Array = []
+	var comments: Array = _graph_model.get("comments", [])
+	for ci: int in comments.size():
+		if rect.has_point((comments[ci] as Dictionary).get("pos", Vector2.ZERO)):
+			indices.append(ci)
+	return indices
+
+
+# True when a note sits inside any COLLAPSED group's (full) rect — it hides with the group. The rect keeps
+# its expanded size while collapsed, and a group drag moves the note with it, so containment stays correct.
+func _comment_in_collapsed_group(comment: Dictionary) -> bool:
+	var pos: Vector2 = comment.get("pos", Vector2.ZERO)
+	for g: Dictionary in _graph_model.get("groups", []):
+		if bool(g.get("collapsed", false)) and (g.get("rect", Rect2()) as Rect2).has_point(pos):
+			return true
+	return false
 
 
 func _handle_frame_drag(event: InputEvent) -> void:
@@ -1853,6 +1898,13 @@ func _handle_frame_drag(event: InputEvent) -> void:
 				n["pos"] = (n.get("pos", Vector2.ZERO) as Vector2) + delta
 				if _node_ctrls.has(id):
 					(_node_ctrls[id] as Control).position = n["pos"]
+		var comments: Array = _graph_model.get("comments", [])
+		for ci: int in _frame_drag_comment_indices:
+			if ci < comments.size():
+				var c: Dictionary = comments[ci]
+				c["pos"] = (c.get("pos", Vector2.ZERO) as Vector2) + delta
+				if ci < _comment_ctrls.size():
+					(_comment_ctrls[ci] as Control).position = c["pos"]
 		_frame_drag_moved = true
 		get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton:
@@ -1870,7 +1922,14 @@ func _handle_frame_drag(event: InputEvent) -> void:
 						(nodes[id] as Dictionary)["pos"] = GraphLayout.snap(
 							(nodes[id] as Dictionary).get("pos", Vector2.ZERO)
 						)
+				var rel_comments: Array = _graph_model.get("comments", [])
+				for ci: int in _frame_drag_comment_indices:
+					if ci < rel_comments.size():
+						(rel_comments[ci] as Dictionary)["pos"] = GraphLayout.snap(
+							(rel_comments[ci] as Dictionary).get("pos", Vector2.ZERO)
+						)
 			_frame_drag_node_ids = []
+			_frame_drag_comment_indices = []
 			_selected_ids = []
 			refresh()
 			frame_clicked.emit(idx)

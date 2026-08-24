@@ -233,6 +233,11 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		"map_fog": bool(data.get("MapFog", false)),
 		# Fog reveal depth: ghost levels shown ahead of the visited trail (< 0 = whole structure ghosted).
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
+		# Shop economy: false (default) = classic buy-charge / free activate;
+		# true = unlock modifiers free in shop, pay price per mid-round activation.
+		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
+		# Mystery preview: blur the previewer's totals + flow until the player discovers nodes.
+		"mystery_preview": bool(data.get("MysteryPreview", false)),
 		# Auto-advance countdown on storyboards / interactive forks (journey opt-in; absent → off).
 		# Separate durations; the fork field falls back to the earlier single AutoAdvanceSecs key.
 		"auto_advance_enabled": bool(data.get("AutoAdvanceEnabled", false)),
@@ -456,7 +461,11 @@ static func parse_graph(path: String, folder: String) -> Dictionary:
 		result["total_rounds"] = JourneyGraph.longest_round_path(graph, str(graph["start"]))
 		var totals: Dictionary = _graph_node_totals(graph)
 		result["total_actions"] = totals["actions"]
-		result["total_length_ms"] = totals["length_ms"]
+		# Prefer the saved EXPECTED single-playthrough runtime — the builder's balance audit resolves loop
+		# repeats, fork path-selection and pool picks into one number. Fall back to the node-length sum for
+		# journeys saved before it existed (0 = not stored).
+		var est_ms: int = int(data.get("EstimatedDurationMs", 0))
+		result["total_length_ms"] = est_ms if est_ms > 0 else int(totals["length_ms"])
 		result["comments"] = _parse_comments(data)  # editor-only sticky notes; runtime ignores them
 		result["groups"] = _parse_groups(data)  # editor-only group frames; runtime ignores them
 		return result
@@ -515,14 +524,34 @@ static func _journey_items_resolved(data: Dictionary, base: String) -> Array:
 	var items: Array = JourneyData.parse_journey_items(data.get("Items", []))
 	for it: Dictionary in items:
 		var img: String = str(it.get("image", ""))
-		if (
-			img != ""
-			and not (
-				img.begins_with("res://") or img.begins_with("user://") or img.is_absolute_path()
-			)
-		):
+		if img != "" and not _is_resolved_path(img):
 			it["image"] = base.path_join(img)
+		if str(it.get("category", "")) == "override":
+			_resolve_override_scripts(it.get("scripts", {}), base)
 	return items
+
+
+# True when a path is already absolute (res:// / user:// / OS-absolute) and must NOT be joined onto the
+# journey base — only pooled content/ rels are relative.
+static func _is_resolved_path(p: String) -> bool:
+	return p.begins_with("res://") or p.begins_with("user://") or p.is_absolute_path()
+
+
+# Resolves an override item's funscript bundle (main + axes + vibes) from pooled content/ rels to
+# absolute paths, in place, so GameLoop's bundle loader can read them directly. Mirrors the item-icon
+# and cast-portrait resolution.
+static func _resolve_override_scripts(scripts: Dictionary, base: String) -> void:
+	var main_path: String = str(scripts.get("main", ""))
+	if main_path != "" and not _is_resolved_path(main_path):
+		scripts["main"] = base.path_join(main_path)
+	for axis_name: Variant in scripts.get("axes", {}):
+		var axis_path: String = str(scripts["axes"][axis_name])
+		if axis_path != "" and not _is_resolved_path(axis_path):
+			scripts["axes"][axis_name] = base.path_join(axis_path)
+	for channel: Variant in scripts.get("vibes", {}):
+		var vib_path: String = str(scripts["vibes"][channel])
+		if vib_path != "" and not _is_resolved_path(vib_path):
+			scripts["vibes"][channel] = base.path_join(vib_path)
 
 
 # Storyboard cast — parsed to runtime (snake-case) with every portrait's relative pooled path resolved
@@ -560,6 +589,11 @@ static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dicti
 		"map_backdrops": _parse_map_backdrops(data.get("MapBackdrops", []), path),
 		"map_fog": bool(data.get("MapFog", false)),
 		"map_fog_reveal": int(data.get("MapFogReveal", 1)),
+		# Shop economy: false (default) = classic buy-charge / free activate;
+		# true = unlock modifiers free in shop, pay price per mid-round activation.
+		"unlock_pay_per_use": bool(data.get("UnlockPayPerUse", false)),
+		# Mystery preview: blur the previewer's totals + flow until the player discovers nodes.
+		"mystery_preview": bool(data.get("MysteryPreview", false)),
 		"auto_advance_enabled": bool(data.get("AutoAdvanceEnabled", false)),
 		"auto_advance_storyboard_secs": int(data.get("AutoAdvanceStoryboardSecs", 20)),
 		"auto_advance_fork_secs":
@@ -645,10 +679,43 @@ static func _graph_node_totals(graph: Dictionary) -> Dictionary:
 	var length: int = 0
 	for id: String in graph.get("nodes", {}):
 		var n: Dictionary = graph["nodes"][id]
-		if n.get("type", "") == "round":
-			actions += int((n.get("data", {}) as Dictionary).get("action_count", 0))
-			length += int((n.get("data", {}) as Dictionary).get("length_ms", 0))
+		if n.get("type", "") != "round":
+			continue
+		var data: Dictionary = n.get("data", {})
+		# A pool round has no funscript of its own — the runtime rolls one entry by weight — so it would
+		# otherwise contribute 0. Count its weighted-AVERAGE entry instead, its expected length.
+		if str(data.get("round_type", "normal")) == "pool":
+			var pa: Dictionary = _pool_avg_totals(data.get("pool_entries", []))
+			actions += int(pa["actions"])
+			length += int(pa["length_ms"])
+		else:
+			actions += int(data.get("action_count", 0))
+			length += int(data.get("length_ms", 0))
 	return {"actions": actions, "length_ms": length}
+
+
+# Weighted-average action count + length across a pool round's entries (the expected value, since the
+# runtime rolls ONE by weight). Entries carry their own action_count / length_ms from save time.
+static func _pool_avg_totals(entries: Array) -> Dictionary:
+	var act_wsum: float = 0.0
+	var len_wsum: float = 0.0
+	var wtotal: float = 0.0
+	for e: Dictionary in entries:
+		var w: float = float(maxi(1, int(e.get("weight", 1))))
+		var ms: int = int(e.get("length_ms", 0))
+		var cnt: int = int(e.get("action_count", 0))
+		# Pool entries don't store their stats in journey.json — read them from the funscript (already
+		# resolved to an absolute path by from_json/resolve_paths before this runs).
+		if ms <= 0:
+			var st: Dictionary = JourneyData.read_funscript_stats(str(e.get("funscript_path", "")))
+			ms = int(st.get("length_ms", 0))
+			cnt = int(st.get("count", 0))
+		act_wsum += cnt * w
+		len_wsum += ms * w
+		wtotal += w
+	if wtotal <= 0.0:
+		return {"actions": 0, "length_ms": 0}
+	return {"actions": int(act_wsum / wtotal), "length_ms": int(len_wsum / wtotal)}
 
 
 # Catalogue sequence for a Format-2 (graph) journey's detail modal — reconstructs an approximate
@@ -669,7 +736,7 @@ static func _graph_catalogue_sequence(graph: Dictionary) -> Dictionary:
 	for id: String in leftover:
 		if not visited.has(id):
 			visited[id] = true
-			_append_node(nodes[id], lists, extra)
+			_append_node(id, nodes[id], lists, extra)
 			extra += 1
 	return lists
 
@@ -718,6 +785,7 @@ static func _walk_level(
 				)
 			(lists["forks"] as Array).append(
 				{
+					"id": id,
 					"title": (n.get("data", {}) as Dictionary).get("title", ""),
 					"paths": paths,
 					"after_order": pos - 1
@@ -725,7 +793,7 @@ static func _walk_level(
 			)
 			id = merge
 		else:
-			_append_node(n, lists, pos)
+			_append_node(id, n, lists, pos)
 			if ntype == "round" or ntype == "storyboard":
 				pos += 1
 			id = str((out[0] as Dictionary).get("to", "")) if not out.is_empty() else ""
@@ -735,28 +803,44 @@ static func _walk_level(
 # Appends a round / shop / storyboard node to a level's lists. `pos` is this numbered item's index:
 # rounds/storyboards use it as their `order`; a shop (a between-item marker) anchors to `pos - 1` so
 # it renders just after the preceding numbered item without consuming a number.
-static func _append_node(n: Dictionary, lists: Dictionary, pos: int) -> void:
+static func _append_node(node_id: String, n: Dictionary, lists: Dictionary, pos: int) -> void:
 	var d: Dictionary = n.get("data", {})
 	match str(n.get("type", "")):
 		"round":
+			# A pool round's own funscript is empty (the runtime rolls an entry) — show the weighted-average
+			# entry so its per-round row reflects its expected length/actions instead of 0.
+			var acts: int = int(d.get("action_count", 0))
+			var ms: int = int(d.get("length_ms", 0))
+			if str(d.get("round_type", "normal")) == "pool":
+				var pa: Dictionary = _pool_avg_totals(d.get("pool_entries", []))
+				acts = int(pa["actions"])
+				ms = int(pa["length_ms"])
 			(
 				(lists["rounds"] as Array)
 				. append(
 					{
+						"id": node_id,
 						"name": d.get("name", ""),
 						"round_type": d.get("round_type", "normal"),
 						"coins": int(d.get("coins", 0)),
-						"action_count": int(d.get("action_count", 0)),
-						"length_ms": int(d.get("length_ms", 0)),
+						"action_count": acts,
+						"length_ms": ms,
 						"order": pos,
 					}
 				)
 			)
 		"shop":
-			(lists["shops"] as Array).append({"title": d.get("title", ""), "after_order": pos - 1})
+			(lists["shops"] as Array).append(
+				{"id": node_id, "title": d.get("title", ""), "after_order": pos - 1}
+			)
 		"storyboard":
 			(lists["storyboards"] as Array).append(
-				{"lines": d.get("lines", []), "coins": int(d.get("coins", 0)), "order": pos}
+				{
+					"id": node_id,
+					"lines": d.get("lines", []),
+					"coins": int(d.get("coins", 0)),
+					"order": pos
+				}
 			)
 
 

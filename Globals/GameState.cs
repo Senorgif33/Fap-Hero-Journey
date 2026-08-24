@@ -1,4 +1,4 @@
-using Godot;
+﻿using Godot;
 using Godot.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -236,16 +236,27 @@ public partial class GameState : Node
     // Whether a run flag is currently set (used by flag-conditional fork resolution).
     public bool HasFlag(string name) => _flags.Contains(name);
 
-    // Mid-round flag write (Release stamp_flag / punish success). Idempotent.
+    // Mid-round flag write (Release stamp_flag / punish success / boss outcomes). Idempotent.
+    // Public because ApplyFlags is private and item/node wrappers would misdescribe the call site.
     public void SetFlag(string name)
     {
-        if (name != "")
+        if (!string.IsNullOrEmpty(name))
             _flags.Add(name);
     }
 
     // The current value of a named counter (0 if never set) — read by counter-conditional forks and
     // the HUD.
     public int CounterValue(string name) => _counters.TryGetValue(name, out var v) ? v : 0;
+
+    // Absolute set, for INTERNAL bookkeeping that happens to want save persistence — the boss
+    // encounter's accumulated damage is the case this exists for. Deliberately does not emit
+    // CounterChanged: that signal drives author-facing reactions, and a health bar ticking during a
+    // fight is not a counter the author wrote or expects anything to hang off.
+    public void SetCounterValue(string name, int value)
+    {
+        if (!string.IsNullOrEmpty(name))
+            _counters[name] = value;
+    }
 
     // Records a clip a no-repeat pool round drew, so later copies of that pool skip it.
     public void MarkPoolClipPlayed(string videoPath)

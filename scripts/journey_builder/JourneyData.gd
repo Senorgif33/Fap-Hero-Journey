@@ -486,6 +486,17 @@ static func effect_param_specs(kind: String) -> Array:
 					"step": 5
 				}
 			]
+		"score_add":
+			return [
+				{
+					"key": "amount",
+					"label": "Score added",
+					"ctl": "coins",
+					"min": 0,
+					"max": 1000000,
+					"step": 10
+				}
+			]
 		"interest":
 			return [
 				{
@@ -643,6 +654,31 @@ static func normalize_effect_round(src: Dictionary) -> Dictionary:
 	}
 
 
+static func normalize_release_round(src: Dictionary) -> Dictionary:
+	var modes: Array[String] = [
+		"stamp_flag",
+		"fail_jump",
+		"timed_window",
+		"loop_until_clean",
+		"punish_polarity",
+	]
+	var mode: String = str(src.get("release_mode", "stamp_flag")).strip_edges().to_lower()
+	if not (mode in modes):
+		mode = "stamp_flag"
+	return {
+		"release_enabled": bool(src.get("release_enabled", false)),
+		"release_mode": mode,
+		"release_flag": str(src.get("release_flag", "")).strip_edges(),
+		"release_jump_to": str(src.get("release_jump_to", "")).strip_edges(),
+		"release_deadline_ms": maxi(0, int(src.get("release_deadline_ms", 0))),
+		"release_score_hit": int(src.get("release_score_hit", 0)),
+		"release_score_miss": int(src.get("release_score_miss", 0)),
+		"release_remove_on_press": bool(src.get("release_remove_on_press", true)),
+		"release_invert": bool(src.get("release_invert", false)),
+		"release_disabled_if_flag": str(src.get("release_disabled_if_flag", "")).strip_edges(),
+	}
+
+
 # ── Round serialization ──────────────────────────────────────────────────────
 
 
@@ -682,6 +718,9 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			# (JourneyGraph._migrate_checkpoint_flags) and stripped from the round below with the
 			# other legacy keys, so a re-save never carries it.
 			out["is_warmup"] = bool(data.get("is_warmup", false))
+			out["items_blocked"] = bool(
+				data.get("items_blocked", data.get("skills_blocked", false))
+			)
 			out["boss_tagline"] = str(data.get("boss_tagline", ""))
 			_fill_default(out, "boss_modifiers", [])  # lowercase {kind,…}; deep-copied pass-through
 			# Effect-round fields, migrated from any legacy cursed/blessed schema. Drop the retired
@@ -699,6 +738,7 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			]:
 				out.erase(legacy)
 			out.merge(normalize_effect_round(data), true)
+			out.merge(normalize_release_round(data), true)
 			_prune_orphan_overrides(out)  # drop tuning for effects no longer ticked
 			# Pool round ("encounter"): a list of media-set entries, one weighted-picked
 			# at runtime. Only pool rounds carry the list; media inside is pooled later by
@@ -716,6 +756,16 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 				out.erase("pool_entries")
 				out.erase("show_encounter")
 				out.erase("no_repeat")
+			# Boss timeline (the authored encounter). Normalized through its own model so the saved
+			# shape is canonical, and dropped entirely when it would do nothing — an empty block on
+			# every round in every journey is pure noise on disk. Its media paths are rewritten to
+			# pooled rels later, by _save_round_node_media, like the rest of the round's media.
+			if out.has("timeline"):
+				var timeline: Dictionary = RoundTimeline.normalize(out["timeline"] as Dictionary)
+				if RoundTimeline.is_empty(timeline):
+					out.erase("timeline")
+				else:
+					out["timeline"] = timeline
 		"shop":
 			out["title"] = str(data.get("title", ""))
 			out["mode"] = str(data.get("mode", "pool"))
@@ -728,6 +778,9 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 			# image + lines are overwritten by _save_storyboard_node_media.
 			out["coins"] = int(data.get("coins", 0))
 			out["item"] = str(data.get("item", ""))
+			# An organisational label for the builder's graph. Never shown to a player — a storyboard's
+			# on-screen content is its lines, and this is only how an author tells twelve of them apart.
+			out["name"] = str(data.get("name", ""))
 		"fork":
 			out["title"] = str(data.get("title", ""))
 			out["description"] = str(data.get("description", ""))
@@ -742,6 +795,22 @@ static func coerce_node_save_data(type: String, data: Dictionary) -> Dictionary:
 		"checkpoint":
 			# A save point between rounds — its only field is the banner label.
 			out["name"] = str(data.get("name", ""))
+			# Dropped on the way out, so a journey authored before checkpoints auto-saved stops carrying
+			# it after its first re-save. It rewarded pressing CONTINUE instead of taking the break, and
+			# there is no longer a break to skip: reaching the checkpoint saves either way.
+			out.erase("continue_reward")
+		"cooldown":
+			out["name"] = str(data.get("name", ""))
+			out["days"] = maxi(1, int(data.get("days", 1)))
+			out.erase("funscript_path")
+		"cutscene":
+			out["name"] = str(data.get("name", ""))
+			out["video_path"] = str(data.get("video_path", ""))
+			out["items_blocked"] = bool(data.get("items_blocked", true))
+			out["award_item"] = str(data.get("award_item", ""))
+			out["coins"] = int(data.get("coins", 0))
+			out["is_checkpoint"] = bool(data.get("is_checkpoint", false))
+			out.erase("funscript_path")
 	# Counter deltas can ride on ANY node type (a round bumps "belt", a storyboard bumps "arousal"),
 	# so normalize them here rather than per type. Cleaned to {name:int}; dropped entirely when empty
 	# so the schema stays lean (mirrors how set_flags only appears when non-empty).
@@ -921,7 +990,7 @@ static func new_node_id() -> String:
 # gating, never manually used). Stored in the journey meta; loaded into InventoryService each run.
 # Effects are resolved {kind, params} dicts — the same shape built-in items use — so the C# runtime
 # consumes them directly. Ids are minted once and preserved so award/shop/gate references survive edits.
-const ITEM_CATEGORIES: Array = ["modifier", "key"]
+const ITEM_CATEGORIES: Array = ["modifier", "key", "override"]
 const ITEM_DEFAULT_DURATION_MS: int = 30000
 
 
@@ -945,6 +1014,32 @@ static func coerce_journey_item(item: Dictionary) -> Dictionary:
 	if str(item.get("image", "")) != "":
 		out["Image"] = str(item.get("image", ""))
 	if category == "key":
+		return out
+	# The use sound rides EVERY usable category, so it is written before the per-category branches
+	# below return. Only when set: an item without one keeps the standard click, and writing a blank
+	# would put a dead key in every saved journey.
+	if str(item.get("sound", "")) != "":
+		out["Sound"] = str(item.get("sound", ""))
+		out["SoundVolume"] = clampf(float(item.get("sound_volume", 1.0)), 0.0, 1.0)
+	if category == "override":
+		# An override carries a funscript BUNDLE (main + axes + vibes); the save has already rewritten the
+		# paths to pooled content/ rels. DurationMs is the derived clip length (0 when unknown — the runtime
+		# bundle recomputes it), kept for shop display. It can ALSO carry an effects bundle (applied while it
+		# plays), same shape a modifier uses.
+		out["ImmuneToEffects"] = bool(item.get("immune_to_effects", false))
+		out["DurationMs"] = maxi(0, int(item.get("duration_ms", 0)))
+		out["Scripts"] = _coerce_override_scripts(item.get("scripts", {}))
+		var override_effects: Array = []
+		for e: Variant in item.get("effects", []):
+			if e is Dictionary:
+				override_effects.append((e as Dictionary).duplicate(true))
+		out["Effects"] = override_effects
+		var override_trim: Dictionary = item.get("trim", {})
+		if not override_trim.is_empty():
+			out["Trim"] = {
+				"InMs": int(override_trim.get("in_ms", 0)),
+				"OutMs": int(override_trim.get("out_ms", 0))
+			}
 		return out
 	out["DurationMs"] = maxi(0, int(item.get("duration_ms", ITEM_DEFAULT_DURATION_MS)))
 	var effects_out: Array = []
@@ -987,6 +1082,26 @@ static func parse_journey_item(raw: Dictionary) -> Dictionary:
 	if category == "key":
 		item["kind"] = "key"
 		return item
+	if str(raw.get("Sound", "")) != "":
+		item["sound"] = str(raw.get("Sound", ""))
+		item["sound_volume"] = clampf(float(raw.get("SoundVolume", 1.0)), 0.0, 1.0)
+	if category == "override":
+		# No `kind` — activation is category-driven (InventoryService branches on category=="override"),
+		# so it stays manually usable (unlike a key). Scripts resolve to absolute in the scanner.
+		item["immune_to_effects"] = bool(raw.get("ImmuneToEffects", false))
+		item["duration_ms"] = int(raw.get("DurationMs", 0))
+		item["scripts"] = _parse_override_scripts(raw.get("Scripts", {}))
+		var override_effects: Array = []
+		for e: Variant in raw.get("Effects", []):
+			if e is Dictionary:
+				override_effects.append((e as Dictionary).duplicate(true))
+		item["effects"] = override_effects
+		var raw_trim: Dictionary = raw.get("Trim", {})
+		if not raw_trim.is_empty():
+			item["trim"] = {
+				"in_ms": int(raw_trim.get("InMs", 0)), "out_ms": int(raw_trim.get("OutMs", 0))
+			}
+		return item
 	item["duration_ms"] = int(raw.get("DurationMs", ITEM_DEFAULT_DURATION_MS))
 	var effects: Array = []
 	for e: Variant in raw.get("Effects", []):
@@ -1002,6 +1117,34 @@ static func parse_journey_items(raw: Array) -> Array:
 		if r is Dictionary:
 			out.append(parse_journey_item(r))
 	return out
+
+
+# Override script bundle: runtime {main, axes{name:path}, vibes{ch(int):path}} ⇄ journey.json
+# {Main, Axes{name:path}, Vibes{ch(str):path}}. Paths are pooled content/ rels on disk (the save
+# rewrites the author's sources); the scanner resolves them to absolute on load. Empty channels drop.
+static func _coerce_override_scripts(scripts: Dictionary) -> Dictionary:
+	var out: Dictionary = {"Main": str(scripts.get("main", ""))}
+	var axes: Dictionary = {}
+	for axis_name: Variant in scripts.get("axes", {}):
+		axes[str(axis_name)] = str(scripts["axes"][axis_name])
+	if not axes.is_empty():
+		out["Axes"] = axes
+	var vibes: Dictionary = {}
+	for channel: Variant in scripts.get("vibes", {}):
+		vibes[str(channel)] = str(scripts["vibes"][channel])
+	if not vibes.is_empty():
+		out["Vibes"] = vibes
+	return out
+
+
+static func _parse_override_scripts(raw: Dictionary) -> Dictionary:
+	var axes: Dictionary = {}
+	for axis_name: Variant in raw.get("Axes", {}):
+		axes[str(axis_name)] = str(raw["Axes"][axis_name])
+	var vibes: Dictionary = {}
+	for channel: Variant in raw.get("Vibes", {}):
+		vibes[int(channel)] = str(raw["Vibes"][channel])  # runtime uses int channel keys (0/1)
+	return {"main": str(raw.get("Main", "")), "axes": axes, "vibes": vibes}
 
 
 # ── Characters (the storyboard cast) ────────────────────────────────────────
@@ -1266,6 +1409,37 @@ static func stage_with_speaker(
 	return out
 
 
+# Every flag the boss encounters on a ROUND node can raise — the round's own, plus each pool entry,
+# since an entry can be its own boss carrying its own encounter. Empty for anything that is not a boss.
+#
+# Shared because three separate things need it and none of them should know the timeline's shape: the
+# builder's flag universe (so a fork can name one), the auditor's dataflow (so a fork gated on one is
+# not read as a dead branch), and its coverage pass.
+static func boss_outcome_flags(round_data: Dictionary) -> Array:
+	var out: Array = []
+	for timeline: Dictionary in boss_timelines(round_data):
+		for flag: String in RoundTimeline.outcome_flags(timeline):
+			if not out.has(flag):
+				out.append(flag)
+	return out
+
+
+# The encounters a round node can actually play: its own, plus one per pool entry — a pool round plays
+# exactly ONE of them, which is why they are kept separate rather than merged. Only encounters that name
+# at least one outcome flag come back; the rest tell a journey nothing.
+static func boss_timelines(round_data: Dictionary) -> Array:
+	var out: Array = []
+	var holders: Array = [round_data]
+	for entry: Variant in round_data.get("pool_entries", []) as Array:
+		if entry is Dictionary:
+			holders.append(entry)
+	for holder: Dictionary in holders:
+		var timeline: Variant = holder.get("timeline", {})
+		if timeline is Dictionary and not RoundTimeline.outcome_flags(timeline).is_empty():
+			out.append(timeline)
+	return out
+
+
 # Normalizes a flag list (from a comma-separated field or a saved array) to a deduped, trimmed,
 # non-empty string array. Shared by a node's "sets flags" and a fork choice's "sets flags".
 static func clean_flag_list(v: Variant) -> Array:
@@ -1408,6 +1582,19 @@ static func new_item(type: String) -> Dictionary:
 		"checkpoint":
 			# A save point between rounds — no media, no gameplay. `name` labels its banner.
 			return {"type": "checkpoint", "name": "", "node_id": new_node_id()}
+		"cooldown":
+			return {"type": "cooldown", "name": "", "days": 1, "node_id": new_node_id()}
+		"cutscene":
+			return {
+				"type": "cutscene",
+				"name": "",
+				"video_path": "",
+				"items_blocked": true,
+				"award_item": "",
+				"coins": 0,
+				"is_checkpoint": false,
+				"node_id": new_node_id(),
+			}
 		"loop_start":
 			# The top marker of a Loop pair — a no-media passthrough that names where the replayed stretch
 			# begins. Its paired Loop End jumps back here (loop_end.loop_to = this node's id).
@@ -1547,6 +1734,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 					"data":
 					{
 						"type": "storyboard",
+						"name": sb.get("name", ""),
 						"coins": sb.get("coins", 0),
 						"item": sb.get("item", ""),
 						"image": sb.get("image", ""),
@@ -1611,6 +1799,7 @@ static func parse_journey(journey: Dictionary) -> Dictionary:
 		"map_backdrops": journey.get("map_backdrops", []),
 		"map_fog": bool(journey.get("map_fog", false)),
 		"map_fog_reveal": int(journey.get("map_fog_reveal", 1)),
+		"mystery_preview": bool(journey.get("mystery_preview", false)),
 		"shown_counters": journey.get("shown_counters", []),
 		"auto_advance_enabled": bool(journey.get("auto_advance_enabled", false)),
 		"auto_advance_storyboard_secs": int(journey.get("auto_advance_storyboard_secs", 20)),
@@ -2124,6 +2313,21 @@ static func trim_action_points(points: Array, in_ms: int, out_ms: int) -> Array:
 				out.append(Vector2(end_ms - in_ms, _pos_at(a, b, end_ms)))
 				break
 	return out
+
+
+# Applies an override item's trim window {in_ms, out_ms} to one channel's actions (trimmed + rebased to 0
+# via trim_action_points). A no-op when the window isn't set or covers the whole clip, so an untrimmed
+# override is untouched. Bundle-wide: the SAME window is applied to every channel to keep them aligned, so
+# a user can lift a favourite section out of a long script instead of authoring one from scratch.
+static func apply_override_trim(actions: Array, trim: Dictionary) -> Array:
+	if actions.is_empty() or trim.is_empty():
+		return actions
+	var in_ms: int = maxi(0, int(trim.get("in_ms", 0)))
+	var out_ms: int = int(trim.get("out_ms", 0))
+	var full: int = int((actions[actions.size() - 1] as Vector2).x)
+	if in_ms <= 0 and (out_ms <= 0 or out_ms >= full):
+		return actions  # full range → nothing to cut
+	return trim_action_points(actions, in_ms, out_ms if out_ms > 0 else 0)
 
 
 # "m:ss" (or "h:mm:ss", or plain seconds) → milliseconds. Empty/garbage → 0.

@@ -43,6 +43,7 @@ const CAUSE_SRC_UNREADABLE: String = "src_unreadable"
 const CAUSE_DST_UNWRITABLE: String = "dst_unwritable"
 const CAUSE_TRANSCODE_FAILED: String = "transcode_failed"
 const CAUSE_TRIM_INVALID: String = "trim_invalid"
+const CAUSE_ENCOUNTER_INVALID: String = "encounter_invalid"
 const CAUSE_UNKNOWN_COPY_ERROR: String = "unknown_copy_error"
 # Graph-editor structural causes (L4 validation).
 const CAUSE_NO_START: String = "no_start"
@@ -112,6 +113,7 @@ var _backdrop_reposition_idx: int = -1  # editable-layer index currently in drag
 var _backdrop_tex_cache: Dictionary = {}  # path -> ImageTexture, shared by the graph push + panel thumbs
 var _journey_map_fog: bool = false  # fog of war: reveal the map as the player discovers it (map must be enabled)
 var _journey_map_fog_reveal: int = 1  # fog reveal depth: ghost levels ahead of the trail (< 0 = whole structure)
+var _journey_mystery_preview: bool = false  # blur the previewer's totals + flow until nodes are discovered
 var _journey_auto_advance_enabled: bool = false  # countdown on storyboards / interactive forks (off = players self-pace)
 var _journey_auto_advance_storyboard_secs: int = 20  # per-line storyboard countdown when enabled
 var _journey_auto_advance_fork_secs: int = 45  # fork-decision countdown when enabled
@@ -414,6 +416,12 @@ func _all_set_flags() -> Dictionary:
 			flags[str(f)] = true
 		for f: Variant in d.get("clear_flags", []):  # a cleared flag is part of the flag universe too
 			flags[str(f)] = true
+		# A boss encounter raises its own flags on the way out, and they live inside the round's timeline
+		# rather than in the node's set_flags — a fork asking "did they beat her?" is asking about one of
+		# these, so leaving them out made every such fork look like a typo and offered the author nothing
+		# to type.
+		for flag: String in JourneyData.boss_outcome_flags(d):
+			flags[flag] = true
 		for e: Dictionary in n.get("out", []):
 			for f2: Variant in e.get("set_flags", []):
 				flags[str(f2)] = true
@@ -688,12 +696,14 @@ func _on_arrange_pressed() -> void:
 	# Capture each frame's current members BEFORE the relayout, so the frame can re-wrap them after.
 	var groups: Array = _graph_model.get("groups", [])
 	var members: Array = []
+	var frame_comments: Array = []  # note indices inside each frame — so the re-fit wraps them too
 	for g: Dictionary in groups:
 		# A collapsed frame's members are frozen; an expanded one wraps whatever's currently inside.
 		if g.get("collapsed", false):
 			members.append((g.get("members", []) as Array).duplicate())
 		else:
 			members.append(_nodes_in_rect(g.get("rect", Rect2())))
+		frame_comments.append(_comments_in_rect(g.get("rect", Rect2())))
 	# Snapshot node positions so pinned notes can follow their node through the relayout.
 	var nodes: Dictionary = _graph_model.get("nodes", {})
 	var old_pos: Dictionary = {}
@@ -706,11 +716,13 @@ func _on_arrange_pressed() -> void:
 		if nid != "" and old_pos.has(nid) and nodes.has(nid):
 			var moved: Vector2 = (nodes[nid] as Dictionary).get("pos", Vector2.ZERO) - old_pos[nid]
 			c["pos"] = (c.get("pos", Vector2.ZERO) as Vector2) + moved
-	# Re-fit each (non-empty) frame around its members' new positions so nodes never end up outside it.
+	# Re-fit each (non-empty) frame around its members' new positions — plus any notes inside it — so
+	# nothing ends up outside the frame.
 	for gi: int in groups.size():
 		var ids: Array = members[gi]
-		if not ids.is_empty():
-			(groups[gi] as Dictionary)["rect"] = _frame_rect_for(_nodes_bounds(ids))
+		var cidx: Array = frame_comments[gi]
+		if not (ids.is_empty() and cidx.is_empty()):
+			(groups[gi] as Dictionary)["rect"] = _frame_rect_for(_content_bounds(ids, cidx))
 	# Collapsed frames: re-apply their space-reclaim reflow against the fresh layout (nodes AND the other
 	# frames below), so a later expand reverses against the arranged positions, not stale ones.
 	for gi: int in groups.size():
@@ -1563,6 +1575,32 @@ func _nodes_bounds(ids: Array) -> Rect2:
 	return rect
 
 
+# Sticky-note indices whose position is inside `rect` — a group's note membership.
+func _comments_in_rect(rect: Rect2) -> Array:
+	var indices: Array = []
+	var comments: Array = _graph_model.get("comments", [])
+	for ci: int in comments.size():
+		if rect.has_point((comments[ci] as Dictionary).get("pos", Vector2.ZERO)):
+			indices.append(ci)
+	return indices
+
+
+# Bounding box over a set of nodes AND a set of sticky-notes, so a group frame can wrap the notes inside it
+# too. A note uses its position + a nominal card size (width is fixed; height varies, so the approximate
+# height keeps the frame from clipping the note).
+func _content_bounds(node_ids: Array, comment_indices: Array) -> Rect2:
+	var rect: Rect2 = _nodes_bounds(node_ids)
+	var first: bool = node_ids.is_empty() or rect.size == Vector2.ZERO
+	var comments: Array = _graph_model.get("comments", [])
+	var note_size: Vector2 = Vector2(GraphView.COMMENT_WIDTH, 72.0)
+	for ci: int in comment_indices:
+		if ci >= 0 and ci < comments.size():
+			var cr: Rect2 = Rect2((comments[ci] as Dictionary).get("pos", Vector2.ZERO), note_size)
+			rect = cr if first else rect.merge(cr)
+			first = false
+	return rect
+
+
 # Node ids whose centre is inside `rect` — frame membership (mirrors GraphView._nodes_in_frame_rect).
 func _nodes_in_rect(rect: Rect2) -> Array:
 	var nodes: Dictionary = _graph_model.get("nodes", {})
@@ -2130,6 +2168,12 @@ func _input(event: InputEvent) -> void:
 	# held Delete from chain-deleting nodes.
 	if not k.pressed or k.echo:
 		return
+	# A modal owns the keyboard while it is up. _input runs BEFORE the modal's own
+	# _unhandled_key_input, so without this the canvas would act on Ctrl+C / Delete / Ctrl+Z aimed at
+	# the encounter editor — copying graph nodes while the author thought they were copying events.
+	# Same shield the OS-file-drop handler uses.
+	if _modal_shield_open():
+		return
 
 	if k.ctrl_pressed:
 		match k.keycode:
@@ -2267,6 +2311,13 @@ const BULK_IMPORT_COL_GAP: float = 360.0  # gap to the right of existing content
 # the side panel is left to the per-field DropZones; over the canvas it bulk-imports rounds, falling
 # back to accepting a lone image as the journey cover.
 func _on_viewport_files_dropped(files: PackedStringArray) -> void:
+	# With a modal open over the canvas (the custom-item editor, its list, …), the ONLY valid drop target
+	# is a per-field DropZone — and those handle themselves via their own viewport hook. So swallow the drop
+	# here: a funscript that missed the override drop zone must not fall through to bulk-import rounds (or
+	# hijack the cover) hidden behind the modal.
+	if _modal_shield_open():
+		return
+
 	# A drop onto the selected pool round's encounter drop zone wins outright — it must be
 	# offered BEFORE the folder branch below, which would otherwise bulk-import the folder as
 	# new round nodes onto the canvas. No live zone under the cursor → falls through.
@@ -2360,6 +2411,17 @@ func _handle_side_panel_drop(files: PackedStringArray) -> void:
 				_cover_path = f
 				_update_cover_preview()
 				return
+
+
+# True when a centered modal is open (build_centered_modal joins every modal to "ui_modal"). While one is
+# up it covers the canvas, so an OS file drop that isn't caught by a per-field DropZone must be ignored
+# rather than bulk-imported / treated as a cover behind the modal.
+func _modal_shield_open() -> bool:
+	for m: Node in get_tree().get_nodes_in_group("ui_modal"):
+		var c: Control = m as Control
+		if c != null and c.is_visible_in_tree():
+			return true
+	return false
 
 
 # True when a visible per-field DropZone sits under the cursor. Those zones set their own value from
@@ -2602,6 +2664,7 @@ func _load_graph(journey: Dictionary) -> void:
 	_journey_characters = (journey.get("characters", []) as Array).duplicate(true)
 	_journey_map_fog = bool(parsed.get("map_fog", false))
 	_journey_map_fog_reveal = int(parsed.get("map_fog_reveal", 1))
+	_journey_mystery_preview = bool(parsed.get("mystery_preview", false))
 	_journey_auto_advance_enabled = bool(parsed.get("auto_advance_enabled", false))
 	_journey_auto_advance_storyboard_secs = int(parsed.get("auto_advance_storyboard_secs", 20))
 	_journey_auto_advance_fork_secs = int(parsed.get("auto_advance_fork_secs", 45))
@@ -4332,6 +4395,7 @@ func _collect_rendition_presave_issues() -> Array:
 		match str(n.get("type", "")):
 			"round":
 				_save_check_round(data, "Round %d" % ordinal, issues)
+				_save_check_encounter(data, "Round %d" % ordinal, issues)
 			"storyboard":
 				_save_check_storyboard(data, "Storyboard %d" % ordinal, issues)
 			"fork":
@@ -4798,6 +4862,8 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		var img_src: String = str(saved_item.get("image", ""))
 		if img_src != "":
 			saved_item["image"] = _pool_small_file(img_src, abs_dir)
+		if str(saved_item.get("category", "")) == "override":
+			saved_item["scripts"] = _pool_override_scripts(saved_item.get("scripts", {}), abs_dir)
 		items_for_save.append(saved_item)
 
 	# Store each cast portrait through the same image path as boss/storyboard art — a still is deduped
@@ -4837,6 +4903,7 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		"MapBackdrops": _save_map_backdrops(abs_media_dir, copied_images),
 		"MapFog": _journey_map_fog,
 		"MapFogReveal": _journey_map_fog_reveal,
+		"MysteryPreview": _journey_mystery_preview,
 		"AutoAdvanceEnabled": _journey_auto_advance_enabled,
 		"AutoAdvanceStoryboardSecs": _journey_auto_advance_storyboard_secs,
 		"AutoAdvanceForkSecs": _journey_auto_advance_fork_secs,
@@ -4854,6 +4921,13 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 	result.merge(node_block)  # adds Format, Start, Nodes
 	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))
 	result["Groups"] = _serialize_groups(_graph_model.get("groups", []))
+	# Expected single-playthrough runtime — the balance audit's Monte-Carlo resolves loops (repeat counts),
+	# forks (path selection) and pools (weighted pick) into one number, so the journey previewer can show
+	# "how long it'll take" without re-auditing on the select screen. 0 (→ scanner falls back to the sum)
+	# for an empty/unauditable graph.
+	var audit: Dictionary = _run_audit()
+	var audit_dur: Dictionary = (audit.get("stats", {}) as Dictionary).get("duration_ms", {})
+	result["EstimatedDurationMs"] = int(audit_dur.get("avg", 0))
 	return result
 
 
@@ -5031,6 +5105,14 @@ func _save_round_node_media(
 		)
 		boss_rel = str(gif["rel"]) if gif["handled"] else _pool_small_file(boss_src, abs_dir)
 	saved_data["boss_image"] = boss_rel
+
+	# Boss timeline (the authored encounter): its attack funscripts, cast art and audio cues are the
+	# author's own files, so they pool into content/ like every other round asset and the saved
+	# timeline carries rels — which is what lets an encounter travel in the .fhj.
+	if saved_data.has("timeline"):
+		saved_data["timeline"] = await _pool_timeline_media(
+			saved_data["timeline"] as Dictionary, abs_dir, modal
+		)
 
 	# Video → content pool. Legacy fallback: a pre-VideoPath round carries its video
 	# only on disk; a re-save must never drop it (the swap deletes the old folder).
@@ -5786,6 +5868,53 @@ func _pool_small_file(
 	return pool["rel"]
 
 
+# Pools a boss timeline's media into content/ and returns the timeline with its paths rewritten to
+# pooled rels. Each file is pooled the way its family expects: attack scripts as funscripts, audio
+# verbatim, and cue art through the GIF/animation bake — a cue image may be an ANIMATION (the Tier-1
+# attack-animation layer), and Godot can't decode GIF, so it can never ship verbatim. The enumeration
+# and the rewrite both live in RoundTimeline, so this only has to know how to pool a file.
+func _pool_timeline_media(timeline: Dictionary, abs_dir: String, modal: Control) -> Dictionary:
+	var mapping: Dictionary = {}
+	for entry: Dictionary in RoundTimeline.media_entries(timeline):
+		var src: String = str(entry["path"])
+		var kind: String = str(entry["kind"])
+		if kind == RoundTimeline.MEDIA_FUNSCRIPT:
+			mapping[src] = _pool_small_file(src, abs_dir, "funscript")
+		elif kind == RoundTimeline.MEDIA_IMAGE:
+			var gif: Dictionary = await _store_gif_source(
+				src, abs_dir, JourneyData.ANIM_CAP_STORYBOARD, false, modal
+			)
+			mapping[src] = str(gif["rel"]) if gif["handled"] else _pool_small_file(src, abs_dir)
+		else:
+			mapping[src] = _pool_small_file(src, abs_dir)
+	return RoundTimeline.remap_media(timeline, mapping)
+
+
+# Pools an override item's funscript bundle into content/ (hash-deduped, funscript-family), rewriting the
+# author's source paths to journey-root-relative pooled rels so the saved item — and the .fhj — carry the
+# files. Empty channels are dropped. Mirrors the round's per-channel pooling, minus segments (never cut).
+func _pool_override_scripts(scripts: Dictionary, abs_dir: String) -> Dictionary:
+	var out: Dictionary = {}
+	var main_src: String = str(scripts.get("main", ""))
+	if main_src != "":
+		out["main"] = _pool_small_file(main_src, abs_dir, "funscript")
+	var axes_out: Dictionary = {}
+	for axis_name: Variant in scripts.get("axes", {}):
+		var axis_src: String = str(scripts["axes"][axis_name])
+		if axis_src != "":
+			axes_out[str(axis_name)] = _pool_small_file(axis_src, abs_dir, "funscript")
+	if not axes_out.is_empty():
+		out["axes"] = axes_out
+	var vibes_out: Dictionary = {}
+	for channel: Variant in scripts.get("vibes", {}):
+		var vib_src: String = str(scripts["vibes"][channel])
+		if vib_src != "":
+			vibes_out[str(channel)] = _pool_small_file(vib_src, abs_dir, "funscript")
+	if not vibes_out.is_empty():
+		out["vibes"] = vibes_out
+	return out
+
+
 # Writes `src` to `dst` with its actions rebuilt from the round's segments — each window cut,
 # rebased and laid end to end (JourneyData.edl_funscript_json; other metadata preserved). This
 # is the one funscript writer: a trim is a single segment, a loop is a repeated one.
@@ -6151,6 +6280,33 @@ func _collect_custom_item_issues(issues: Array) -> void:
 					}
 				)
 			)
+		if str(it.get("category", "modifier")) == "override":
+			var main_src: String = str((it.get("scripts", {}) as Dictionary).get("main", ""))
+			if main_src == "":
+				(
+					issues
+					. append(
+						{
+							"cause": CAUSE_ITEM_INVALID,
+							"item": label,
+							"detail":
+							"This override item has no main funscript — using it would do nothing.",
+							"hint": "Drop a main .funscript into the item editor.",
+						}
+					)
+				)
+			elif not _save_source_exists(main_src):
+				(
+					issues
+					. append(
+						{
+							"cause": CAUSE_MISSING_SOURCE,
+							"item": label,
+							"detail": "Override funscript no longer exists at: %s" % main_src,
+							"hint": "Re-drop the override's main funscript in the item editor.",
+						}
+					)
+				)
 		var img: String = str(it.get("image", ""))
 		if img != "" and not _save_source_exists(img):
 			(
@@ -6201,6 +6357,7 @@ func _collect_presave_issues_graph() -> Array:
 		var n: Dictionary = nodes[id]
 		var data: Dictionary = n.get("data", {})
 		var ordinal: int = int(ordinals.get(id, 0))
+		var before: int = issues.size()
 		match str(n.get("type", "")):
 			"round":
 				_save_check_round(data, "Round %d" % ordinal, issues)
@@ -6212,6 +6369,10 @@ func _collect_presave_issues_graph() -> Array:
 				_save_check_loop(id, data, "Loop %d" % ordinal, issues)
 			"loop_start":
 				_save_check_loop_start(id, "Loop %d" % ordinal, issues)
+		# Stamp the source node onto everything this node's checks just produced, so its error
+		# row in the modal can navigate straight to it on the canvas.
+		for k: int in range(before, issues.size()):
+			(issues[k] as Dictionary)["node_id"] = id
 
 	# Structural graph validation (L4): block on graphs the runtime can't cleanly play — a missing
 	# start, an edge to a deleted node, a cycle (the DAG walk would loop forever), or an unreachable
@@ -6220,6 +6381,11 @@ func _collect_presave_issues_graph() -> Array:
 	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model, _journey_finish_node):
 		var m: Dictionary = _structural_issue_to_presave(gi)
 		if not m.is_empty():
+			# validate_graph carries the offending node's id (empty for no_start) — thread it
+			# through so the row is clickable, same as the per-node checks above.
+			var nid: String = str(gi.get("id", ""))
+			if nid != "":
+				m["node_id"] = nid
 			issues.append(m)
 	return issues
 
@@ -6285,6 +6451,39 @@ func _graph_issue_label(node_id: String) -> String:
 		"loop_end":
 			return "A Loop End"
 	return "A node"
+
+
+# Boss ENCOUNTER validation, run through the timeline's own validate() — the same call that drives the
+# encounter editor's warnings, so what the editor flags is exactly what blocks the save rather than two
+# rules drifting apart.
+#
+# The round's LENGTH is passed when known. An unsaved round has none, and validate() then skips the
+# checks that need it (overlapping attacks, events past the end) while still catching the content
+# problems — an attack with no funscript, an empty cue, an effect window applying nothing. Guessing a
+# length would produce confident, wrong complaints.
+func _save_check_encounter(data: Dictionary, ctx: String, issues: Array) -> void:
+	# Only a BOSS round plays its encounter (GameLoop._load_round_timeline), so a timeline left behind on
+	# a round switched back to normal/effect is dormant data — it must not block the save.
+	if str(data.get("round_type", "normal")) != "boss":
+		return
+	var raw: Variant = data.get("timeline", {})
+	if not (raw is Dictionary) or (raw as Dictionary).is_empty():
+		return
+	for issue: Dictionary in RoundTimeline.validate(
+		raw as Dictionary, int(data.get("length_ms", 0))
+	):
+		(
+			issues
+			. append(
+				{
+					"cause": CAUSE_ENCOUNTER_INVALID,
+					"item": "%s — encounter" % ctx,
+					"detail": str(issue.get("message", "")),
+					"hint":
+					"Open the round's BUILD ENCOUNTER editor; the block is highlighted there.",
+				}
+			)
+		)
 
 
 # Graph fork authoring checks (3c-ii): a fork's choices are its out-edges. Mirrors the tree's
@@ -6868,8 +7067,18 @@ func _show_save_error_modal(title: String, headline: String, errors: Array) -> v
 	list.add_theme_constant_override("separation", 10)
 	scroll.add_child(list)
 
+	# Clicking a node-specific error closes the modal and locates that node on the canvas —
+	# the same affordance the audit report offers. Meta issues carry no node_id and stay static.
+	var jump := func(node_id: String) -> void:
+		if node_id == "" or not (_graph_model.get("nodes", {}) as Dictionary).has(node_id):
+			return
+		modal.queue_free()
+		if _graph:
+			_graph.select_graph_node(node_id)
+			_graph.center_on(node_id)
+
 	for err: Dictionary in errors:
-		list.add_child(_make_save_error_row(err))
+		list.add_child(_make_save_error_row(err, jump))
 
 	var btn_row: HBoxContainer = HBoxContainer.new()
 	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -6899,7 +7108,7 @@ func _show_save_error_modal(title: String, headline: String, errors: Array) -> v
 
 # Builds one row for a single SaveError dict. The item label is the most
 # prominent line; cause+detail explain what; hint suggests a fix.
-func _make_save_error_row(err: Dictionary) -> Control:
+func _make_save_error_row(err: Dictionary, jump: Callable = Callable()) -> Control:
 	var row: PanelContainer = PanelContainer.new()
 	var rs: StyleBoxFlat = StyleBoxFlat.new()
 	rs.bg_color = UITheme.CARD_BG
@@ -6937,6 +7146,34 @@ func _make_save_error_row(err: Dictionary) -> Control:
 		hint_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		UITheme.style_label(hint_lbl, UITheme.SEPARATOR, 11, false)
 		col.add_child(hint_lbl)
+
+	# A node-specific error becomes a clickable row that locates its node on the canvas (mirrors
+	# _audit_finding_row). Journey-meta issues — name, cover, custom items — carry no node_id and
+	# stay static. col is IGNORE so the click falls through to the PanelContainer, whose gui_input
+	# fires; the child Labels ignore mouse by default.
+	var node_id: String = str(err.get("node_id", ""))
+	if (
+		node_id != ""
+		and jump.is_valid()
+		and (_graph_model.get("nodes", {}) as Dictionary).has(node_id)
+	):
+		var locate_lbl: Label = Label.new()
+		locate_lbl.text = "↪  Click to locate this node"
+		UITheme.style_label(locate_lbl, UITheme.CYAN, 11, false)
+		col.add_child(locate_lbl)
+		col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.mouse_filter = Control.MOUSE_FILTER_STOP
+		row.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		row.tooltip_text = UITheme.wrap_tip("Click to locate this node on the canvas")
+		row.gui_input.connect(
+			func(ev: InputEvent) -> void:
+				if (
+					ev is InputEventMouseButton
+					and ev.button_index == MOUSE_BUTTON_LEFT
+					and ev.pressed
+				):
+					jump.call(node_id)
+		)
 
 	return row
 

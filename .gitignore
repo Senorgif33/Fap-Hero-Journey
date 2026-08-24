@@ -35,6 +35,13 @@ Desktop.ini
 # Local journey packs + media (not committed)
 /local/
 .godot-ci/
+/reports/
+addons/gdUnit4/GdUnitRunner.cfg
+# Inferno scaffold generators (local authoring — not public)
+scripts/dev/scaffold_erosphere_inferno.py
+scripts/dev/scaffold_erosphere_c02.py
+scripts/dev/scaffold-erosphere-inferno.ps1
+scripts/dev/restore_inferno_named_media.py
 HANDOFF.md
 export_presets.cfg
 *.md
