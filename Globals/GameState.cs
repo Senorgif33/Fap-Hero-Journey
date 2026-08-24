@@ -96,6 +96,27 @@ public partial class GameState : Node
         return true;
     }
 
+    // Mid-run teleport used by Release fail_jump / punish miss: move to `nodeId`
+    // while preserving flags, discovery, play log, counters, and RoundNumber. Lands via
+    // EnterCurrent so the target's set_flags still apply. Returns false when
+    // the id is missing (caller should not wipe the current node).
+    public bool JumpToNode(string nodeId)
+    {
+        if (nodeId == "" || !_nodes.ContainsKey(nodeId))
+            return false;
+        _currentId = nodeId;
+        EnterCurrent();
+        return true;
+    }
+
+    // Mid-round loop_until_clean: stay on the current round node without bumping
+    // RoundNumber or clearing flags. Returns false when not on a round. GameLoop
+    // reloads media after this returns true.
+    public bool RestartCurrentRound()
+    {
+        return TypeOf(_currentId) == "round";
+    }
+
     // ---------------------------------------------------------------------------
     // Walking
     // ---------------------------------------------------------------------------
@@ -215,6 +236,13 @@ public partial class GameState : Node
     // Whether a run flag is currently set (used by flag-conditional fork resolution).
     public bool HasFlag(string name) => _flags.Contains(name);
 
+    // Mid-round flag write (Release stamp_flag / punish success). Idempotent.
+    public void SetFlag(string name)
+    {
+        if (name != "")
+            _flags.Add(name);
+    }
+
     // The current value of a named counter (0 if never set) — read by counter-conditional forks and
     // the HUD.
     public int CounterValue(string name) => _counters.TryGetValue(name, out var v) ? v : 0;
@@ -264,13 +292,15 @@ public partial class GameState : Node
     // highlights the node by id. "" when the journey is done.
     public string CurrentNodeId() => _currentId;
 
-    // The current node's type ("round"/"shop"/"storyboard"/"fork"); "" when the journey is
+    // The current node's type ("round"/"shop"/"storyboard"/"fork"/"cooldown"/"cutscene"); "" when the journey is
     // done. Drives GameLoop's dispatch and the map keying.
     public string CurrentItemType() => TypeOf(_currentId);
 
     public Dictionary CurrentRound() => DataIfType("round");
     public Dictionary CurrentShop() => DataIfType("shop");
     public Dictionary CurrentStoryboard() => DataIfType("storyboard");
+    public Dictionary CurrentCooldown() => DataIfType("cooldown");
+    public Dictionary CurrentCutscene() => DataIfType("cutscene");
 
     private Dictionary DataIfType(string type)
     {

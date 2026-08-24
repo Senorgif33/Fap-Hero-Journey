@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Scaffold Erosphere Inferno Format 2 into the live Windows build pack.
+"""Scaffold Erosphere Inferno Format 2 into a repo-local build folder.
 
-Writes journey.json (+ skill_unlocks.json copy) to:
-  E:\\E-Stim\\Fap.Hero.JOURNEY.v0.6.0.-.Windows.Build\\Journeys\\Erosphere_Inferno
+Writes journey.json (+ skill_unlocks.json copy) under:
+  <repo>/local/journeys/erosphere-inferno/
 
-Canto I main path + all C01 EP subgraphs (cooldown gaps, punish sessions).
+Does **not** write to the live Journeys pack. Install with:
+  scripts/dev/scaffold-erosphere-inferno.ps1
+(which copies only those generated files into the pack).
+
+Canto I + II main path, EP subgraphs (cooldown gaps, punish sessions), Oblivion.
 Skill unlock cutscenes (with award_item) come from erosphere-inferno/skill_unlocks.json.
-Media: content/ junctions to v1 (see scripts/dev/scaffold-erosphere-inferno.ps1).
 
-Layout: if journey.json already exists, each node's pos is preserved across regen so
-Builder drag fixes are not wiped. New nodes still get scaffold placement.
+Media discovery reads the live pack (PACK_DIR) for mp4/funscript siblings so paths in
+the JSON match on-disk pack layout. This script never deletes pack files.
 
-Funscripts: round nodes scan sibling *.funscript next to the video (L0 + Restim
-axis kit). Regen never deletes funscript files on disk; it only rewrites journey.json.
+Layout: if pack or local journey.json already exists, each node's pos is preserved
+across regen so Builder drag fixes are not wiped. New nodes still get scaffold placement.
 """
 from __future__ import annotations
 
@@ -26,29 +29,58 @@ POS_ID_ALIASES: dict[str, str] = {
     "n_4dd8146052bf4e04": "inferno_C01_008",
 }
 
-# Restim kit suffixes (longest first). Mirrors RestimAxisKit.KIT + dual-slot routing.
-_KIT_AXES: tuple[str, ...] = (
-    "pulse_interval_random",
-    "pulse_frequency",
-    "pulse_rise_time",
-    "pulse_width",
-    "sensor_suppression",
-    "frequency",
-    "volume",
-    "alpha",
-    "beta",
-    "e1",
-    "e2",
-    "e3",
-    "e4",
+# E-stim parameter suffixes → restim T-code (mirrors JourneyData.ESTIM_SUFFIXES / ImportScanner).
+# Longer names first so strip/detect prefer exact tails (e.g. pulse_interval_random before volume).
+_ESTIM_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("pulse_interval_random", "P2"),
+    ("carrier_frequency", "C0"),
+    ("pulse_frequency", "P0"),
+    ("pulse_rise_time", "P3"),
+    ("vib1_left_right_bias", "V6"),
+    ("vib1_up_down_bias", "V7"),
+    ("vib2_left_right_bias", "V8"),
+    ("vib2_up_down_bias", "V9"),
+    ("vib1_frequency", "V1"),
+    ("vib1_strength", "V2"),
+    ("vib1_random", "V3"),
+    ("vib2_frequency", "V4"),
+    ("vib2_strength", "V5"),
+    ("vib2_random", "W1"),
+    ("pulse_width", "P1"),
+    ("volume", "V0"),
 )
 
+# Motion / position axis suffixes → T-code (alpha→L0 main, beta→L1). No dual A/B slots, no E1–E4.
+_AXIS_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("surge", "L1"),
+    ("sway", "L2"),
+    ("twist", "R0"),
+    ("roll", "R1"),
+    ("pitch", "R2"),
+    ("alpha", "L0"),
+    ("beta", "L1"),
+    ("l1", "L1"),
+    ("l2", "L2"),
+    ("r0", "R0"),
+    ("r1", "R1"),
+    ("r2", "R2"),
+)
+
+REPO = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(__file__).resolve().parent / "erosphere-inferno"
 UNLOCKS_PATH = DATA_DIR / "skill_unlocks.json"
-OUT_DIR = Path(
+# Stage generated JSON here (gitignored under /local/). Never write the live pack from Python.
+BUILD_DIR = REPO / "local" / "journeys" / "erosphere-inferno"
+BUILD_JSON = BUILD_DIR / "journey.json"
+# Live pack: read media + preserve positions; install step copies JSON here.
+PACK_DIR = Path(
     r"E:\E-Stim\Fap.Hero.JOURNEY.v0.6.0.-.Windows.Build\Journeys\Erosphere_Inferno"
 )
-OUT_JSON = OUT_DIR / "journey.json"
+PACK_JSON = PACK_DIR / "journey.json"
+
+# Back-compat aliases (media helpers used to key off OUT_DIR).
+OUT_DIR = PACK_DIR
+OUT_JSON = BUILD_JSON
 
 # Live pack layout: EP/Fate/unlock cutscenes under content/; main sessions under
 # Inferno_C01_001_Intro/Inferno_C01_001_Intro.mp4 (apostrophes on disk).
@@ -65,9 +97,12 @@ def _video_index() -> dict[str, str]:
     if _VIDEO_INDEX is not None:
         return _VIDEO_INDEX
     idx: dict[str, str] = {}
-    if OUT_DIR.is_dir():
-        for p in OUT_DIR.rglob("*.mp4"):
-            idx[_norm_video_key(p.name)] = p.relative_to(OUT_DIR).as_posix()
+    # Prefer live pack media; fall back to local build folder if present.
+    for root in (PACK_DIR, BUILD_DIR):
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*.mp4"):
+            idx.setdefault(_norm_video_key(p.name), p.relative_to(root).as_posix())
     _VIDEO_INDEX = idx
     return idx
 
@@ -86,21 +121,19 @@ def resolve_funscript(video_rel: str) -> str:
     if not video_rel.endswith(".mp4"):
         return ""
     cand = video_rel[:-4] + ".funscript"
-    if (OUT_DIR / cand).is_file():
-        return cand
+    for root in (PACK_DIR, BUILD_DIR):
+        if (root / cand).is_file():
+            return cand
     return ""
 
 
-def _slugify_label(label: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", label.strip().lower()).strip("-")
-    return s
-
-
-def _classify_funscript_stem(
-    stem: str, *, label_a: str = "", label_b: str = "prostate"
-) -> tuple[str, str] | None:
-    """Return (slot, axis), ('vib', vib1|vib2), or ('l0', '') for main stroke."""
+def _classify_funscript_stem(stem: str) -> tuple[str, str]:
+    """Return ('estim', T-code), ('axis', T-code), ('vib', vib1|vib2), or ('l0', '')."""
     low = stem.lower()
+    # Plain vib channels must lose to estim vib*_frequency / strength / … (longer tails).
+    for name, code in _ESTIM_SUFFIXES:
+        if low.endswith(f".{name}") or low.endswith(f"_{name}"):
+            return "estim", code
     for vib, key in (
         (".vib1", "vib1"),
         ("_vib1", "vib1"),
@@ -113,44 +146,26 @@ def _classify_funscript_stem(
     ):
         if low.endswith(vib):
             return "vib", key
-    for slot in ("a", "b"):
-        for axis in _KIT_AXES:
-            if low.endswith(f".{slot}.{axis}") or low.endswith(f"_{slot}_{axis}"):
-                return slot, axis
-    for slot, label in (("a", label_a), ("b", label_b)):
-        slug = _slugify_label(label)
-        if not slug:
-            continue
-        for axis in _KIT_AXES:
-            if low.endswith(f".{axis}-{slug}") or low.endswith(f"_{axis}_{slug}"):
-                return slot, axis
-    for axis in _KIT_AXES:
-        if low.endswith(f".{axis}") or low.endswith(f"_{axis}"):
-            if axis.startswith("pulse_") or axis == "sensor_suppression":
-                return "shared", axis
-            return "a", axis
+    for name, code in _AXIS_SUFFIXES:
+        if low.endswith(f".{name}") or low.endswith(f"_{name}"):
+            # alpha maps to L0 main stroke — treat as primary funscript, not axis_scripts.
+            if code == "L0" and name == "alpha":
+                return "l0", ""
+            return "axis", code
     return "l0", ""
 
 
-def _strip_kit_suffix(stem: str, *, label_a: str = "", label_b: str = "prostate") -> str:
-    """Strip the longest recognised axis/vib suffix so siblings share a base name."""
+def _strip_kit_suffix(stem: str) -> str:
+    """Strip the longest recognised axis/estim/vib suffix so siblings share a base name."""
     low = stem.lower()
     best = 0
     candidates: list[str] = []
-    for slot in ("a", "b"):
-        for axis in _KIT_AXES:
-            candidates.append(f".{slot}.{axis}")
-            candidates.append(f"_{slot}_{axis}")
-    for label in (label_a, label_b):
-        slug = _slugify_label(label)
-        if not slug:
-            continue
-        for axis in _KIT_AXES:
-            candidates.append(f".{axis}-{slug}")
-            candidates.append(f"_{axis}_{slug}")
-    for axis in _KIT_AXES:
-        candidates.append(f".{axis}")
-        candidates.append(f"_{axis}")
+    for name, _code in _ESTIM_SUFFIXES:
+        candidates.append(f".{name}")
+        candidates.append(f"_{name}")
+    for name, _code in _AXIS_SUFFIXES:
+        candidates.append(f".{name}")
+        candidates.append(f"_{name}")
     for vib in (".vib1", "_vib1", ".vibe1", "_vibe1", ".vib2", "_vib2", ".vibe2", "_vibe2"):
         candidates.append(vib)
     for suf in candidates:
@@ -166,50 +181,59 @@ def _norm_script_base(name: str) -> str:
     return name.lower().replace("'s_", "_s_").replace("'", "_")
 
 
-def attach_sibling_scripts(data: dict, *, label_a: str = "", label_b: str = "prostate") -> None:
-    """Fill funscript_path / restim_axis_scripts / axis_scripts / vib_scripts from disk siblings.
+def attach_sibling_scripts(data: dict) -> None:
+    """Fill funscript_path / axis_scripts / estim_scripts / vib_scripts from disk siblings.
 
     Never removes files — only writes journey.json field bindings.
+    Scans the live pack first, then the local build folder.
     """
     video_rel = str(data.get("video_path") or "")
     if not video_rel:
         return
-    video_abs = OUT_DIR / video_rel
+    root = None
+    video_abs = None
+    for candidate in (PACK_DIR, BUILD_DIR):
+        abs_path = candidate / video_rel
+        if abs_path.is_file() or abs_path.parent.is_dir():
+            root = candidate
+            video_abs = abs_path
+            break
+    if root is None or video_abs is None:
+        return
     folder = video_abs.parent
     if not folder.is_dir():
         return
-    base = _norm_script_base(
-        _strip_kit_suffix(video_abs.stem, label_a=label_a, label_b=label_b)
-    )
-    ras: dict[str, dict[str, str]] = {"a": {}, "b": {}, "shared": {}}
+    base = _norm_script_base(_strip_kit_suffix(video_abs.stem))
+    axis: dict[str, str] = {}
+    estim: dict[str, str] = {}
     vib: dict[str, str] = {}
     main_fs = str(data.get("funscript_path") or "")
 
     for p in sorted(folder.glob("*.funscript")):
         stem = p.stem
-        sib_base = _norm_script_base(
-            _strip_kit_suffix(stem, label_a=label_a, label_b=label_b)
-        )
+        sib_base = _norm_script_base(_strip_kit_suffix(stem))
         if sib_base != base:
             continue
-        rel = p.relative_to(OUT_DIR).as_posix()
-        kind = _classify_funscript_stem(stem, label_a=label_a, label_b=label_b)
-        if kind is None:
-            continue
-        slot, axis = kind
-        if slot == "l0":
+        rel = p.relative_to(root).as_posix()
+        kind, key = _classify_funscript_stem(stem)
+        if kind == "l0":
             if not main_fs:
                 main_fs = rel
             continue
-        if slot == "vib":
-            vib.setdefault(axis, rel)
+        if kind == "vib":
+            vib.setdefault(key, rel)
             continue
-        ras[slot].setdefault(axis, rel)
+        if kind == "estim":
+            estim.setdefault(key, rel)
+            continue
+        if kind == "axis":
+            axis.setdefault(key, rel)
 
     data["funscript_path"] = main_fs
-    data["restim_axis_scripts"] = ras
-    data["axis_scripts"] = dict(ras.get("shared") or {})
+    data["axis_scripts"] = axis
+    data["estim_scripts"] = estim
     data["vib_scripts"] = vib
+    data.pop("restim_axis_scripts", None)
 
 
 # Map/editor convention: y = progress (top→down); main spine on the RIGHT.
@@ -292,25 +316,35 @@ def _pos_of(nodes_by_id: dict[str, dict], nid: str) -> tuple[float, float]:
 
 
 def load_existing_positions() -> dict[str, list[float]]:
-    """Read node positions from the live pack so regen does not wipe Builder layout edits."""
-    if not OUT_JSON.is_file():
-        return {}
-    try:
-        raw = json.loads(OUT_JSON.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"warning: could not read existing positions from {OUT_JSON}: {exc}")
-        return {}
-    out: dict[str, list[float]] = {}
-    for n in raw.get("Nodes", []):
-        if not isinstance(n, dict):
+    """Read node positions so regen does not wipe Builder layout edits.
+
+    Prefers the live pack journey.json, then the local build copy.
+    """
+    for path in (PACK_JSON, BUILD_JSON):
+        if not path.is_file():
             continue
-        nid = str(n.get("id", ""))
-        pos = n.get("pos")
-        if nid == "" or not isinstance(pos, list) or len(pos) < 2:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"warning: could not read existing positions from {path}: {exc}")
             continue
-        canon = POS_ID_ALIASES.get(nid, nid)
-        out[canon] = [float(pos[0]), float(pos[1])]
-    return out
+        out: dict[str, list[float]] = {}
+        for n in raw.get("Nodes") or []:
+            if not isinstance(n, dict):
+                continue
+            nid = str(n.get("id") or "")
+            pos = n.get("pos")
+            if not nid or not isinstance(pos, list) or len(pos) < 2:
+                continue
+            try:
+                canon = POS_ID_ALIASES.get(nid, nid)
+                out[canon] = [float(pos[0]), float(pos[1])]
+            except (TypeError, ValueError):
+                continue
+        if out:
+            print(f"Preserved positions from {path} ({len(out)} nodes)")
+            return out
+    return {}
 
 
 def apply_preserved_positions(nodes: list[dict], preserved: dict[str, list[float]]) -> int:
@@ -462,7 +496,6 @@ def layout_side_branches(
     _place(nodes_by_id, "inferno_C01_006_5", X_MAIN, y_cum)
     _place(nodes_by_id, "inferno_C01_008", X_MAIN, y_cum + ROW)
     _place(nodes_by_id, "c01_008_fork", X_MAIN, y_cum + ROW * 2)
-    _place(nodes_by_id, "c01_canto2_gate", X_MAIN, y_cum + ROW * 3)
 
     # ── Anjelica bonus (bottom-right, beside the Canto II fork)
     ay = y_cum + ROW * 2
@@ -496,6 +529,9 @@ def layout_side_branches(
         _place(nodes_by_id, vid_id, X_UNLOCK, ay2)
 
     layout_freeplay(nodes_by_id)
+    from scaffold_erosphere_c02 import layout_canto_ii
+
+    layout_canto_ii(nodes_by_id)
     if resolve:
         _resolve_overlaps(nodes_by_id, locked=locked)
 
@@ -509,12 +545,16 @@ def round_node(
     length_s: float = 0.0,
     out: str | None = None,
     items_blocked: bool = False,
-    cooldown_days: int = 0,
     is_checkpoint: bool = False,
     release_jump: str | None = None,
     release_mode: str = "fail_jump",
     release_invert: bool = False,
     loop_until_clean: bool = False,
+    release_flag: str = "",
+    release_deadline_ms: int = 0,
+    release_score_hit: int = 0,
+    release_score_miss: int = 0,
+    release_disabled_if_flag: str = "",
     pos: tuple[float, float] = (0, 0),
     set_flags: list[str] | None = None,
 ) -> dict:
@@ -533,7 +573,6 @@ def round_node(
         "action_count": 0,
         "length_ms": int(round(length_s * 1000)) if length_s else 0,
         "is_checkpoint": is_checkpoint,
-        "cooldown_days": cooldown_days,
         "items_blocked": items_blocked,
         "axis_scripts": {},
         "vib_scripts": {},
@@ -558,6 +597,23 @@ def round_node(
     if loop_until_clean:
         data["release_enabled"] = True
         data["release_mode"] = "loop_until_clean"
+    if release_flag:
+        data["release_flag"] = release_flag
+    if release_deadline_ms:
+        data["release_deadline_ms"] = int(release_deadline_ms)
+    if release_score_hit:
+        data["release_score_hit"] = int(release_score_hit)
+    if release_score_miss:
+        data["release_score_miss"] = int(release_score_miss)
+    if release_disabled_if_flag:
+        data["release_disabled_if_flag"] = release_disabled_if_flag
+    # stamp_flag / timed_window without a jump target
+    if not data["release_enabled"] and (release_flag or release_deadline_ms):
+        data["release_enabled"] = True
+        if release_deadline_ms:
+            data["release_mode"] = "timed_window"
+        else:
+            data["release_mode"] = "stamp_flag"
     attach_sibling_scripts(data)
     edges = [{"to": out}] if out else []
     sx, sy = _snap_pos(pos[0], pos[1])
@@ -590,19 +646,21 @@ def shop_node(
 
 def storyboard_node(
     nid: str,
-    text: str,
+    text: str = "",
     *,
     out: str | None,
     pos: tuple[float, float],
     item: str = "",
     coins: int = 0,
     set_flags: list[str] | None = None,
+    lines: list[str] | None = None,
 ) -> dict:
+    line_texts = lines if lines is not None else ([text] if text else [])
     data: dict = {
         "coins": coins,
         "item": item,
         "image": "",
-        "lines": [{"speaker": "", "text": text, "image": ""}],
+        "lines": [{"speaker": "", "text": t, "image": ""} for t in line_texts],
     }
     if set_flags:
         data["set_flags"] = set_flags
@@ -726,11 +784,17 @@ def gap(
     return cooldown_node(nid, days, out, pos=pos, label=label)
 
 
-def fp_exit_fork(nid: str, campaign_to: str, *, pos: tuple[float, float]) -> dict:
+def fp_exit_fork(
+    nid: str,
+    campaign_to: str,
+    *,
+    pos: tuple[float, float],
+    title: str = "Fate",
+) -> dict:
     """After shared EP punish: freeplay flag → hub; else campaign landing."""
     return fork_node(
         nid,
-        "Fate",
+        title,
         [
             edge("fp_hub_1", "Return", required_flag="from_freeplay"),
             edge(campaign_to, "Continue"),
@@ -752,6 +816,43 @@ def fp_release_gate(
         out=ep_entry,
         pos=pos,
         set_flags=["from_freeplay"],
+    )
+
+
+def failed_from_gate(
+    nid: str, ep_entry: str, flag: str, *, text: str, pos: tuple[float, float]
+) -> dict:
+    """Stamp failed_from_* then enter a shared C02 EP island."""
+    return storyboard_node(
+        nid,
+        text,
+        out=ep_entry,
+        pos=pos,
+        set_flags=[flag],
+    )
+
+
+def failed_from_exit_fork(
+    nid: str,
+    returns: list[tuple[str, str, str]],
+    *,
+    default_to: str,
+    pos: tuple[float, float],
+    title: str = "Return",
+) -> dict:
+    """Conditional exit: required_flag edges first, default last."""
+    choices = [
+        edge(target, label, required_flag=flag) for flag, target, label in returns
+    ]
+    choices.append(edge(default_to, "Continue"))
+    return fork_node(
+        nid,
+        title,
+        choices,
+        pos=pos,
+        resolution="conditional",
+        cond_metric="flag",
+        default_path=len(choices) - 1,
     )
 
 
@@ -816,7 +917,15 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
     nodes.append(
         storyboard_node(
             "c01_intro_sb",
-            "Canto I — Inferno. Hold the edge. Release only when fate demands it.",
+            lines=[
+                "Welcome to Cock Hero Inferno. You are the legendary cockhero, and this journey is part of the Erosphere game universe.",
+                "Your path forward leads deeper into the Inferno. Ahead await hours of indecent content; an erotic challenge that will leave you aching… if we don't break you. 😏",
+                "Each round is a test of your stamina and virtue. We're going to work that cock. Let's see how long you last ♡",
+                "Release before we give you permission, and you'll find out exactly what happens to boys who can't resist ;)",
+                "Make it through a round without blowing your load, and you'll earn coins. Cum early, and you walk away with nothing but punishment.",
+                "Spend your coins wisely. Some items can help you survive a round without spilling. Others take the sting out of a failure, but some only work once.",
+                "How far you make it, and when you finally give in, is entirely up to you. We can't wait to see that cock throb and drip ♡",
+            ],
             out="inferno_C01_001",
             pos=(X_MAIN, y),
         )
@@ -827,12 +936,12 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
     # Coins match live pack / V1 play: 004 + 006 + 006_5 = 0; 007 + 008 each pay 15
     # so clean path (no Fate) and release path both land at 75 before the fork.
     main = [
-        ("inferno_C01_001", "Intro", "Inferno_C01_001_Intro.mp4", 15, 308.436, "inferno_C01_EP1"),
-        ("inferno_C01_002", "The Cats Part I", "Inferno_C01_002_The_Cats_Part_I.mp4", 15, 377.21, "inferno_C01_EP2"),
-        ("inferno_C01_003", "The Cats Part II", "Inferno_C01_003_The_Cats_Part_II.mp4", 15, 261.678, "inferno_C01_EP3"),
-        ("inferno_C01_004", "Virgo's Training", "Inferno_C01_004_Virgo_s_Training.mp4", 0, 470.596, "inferno_C01_EP4"),
-        ("inferno_C01_005", "Charon", "Inferno_C01_005_Charon.mp4", 15, 479.557, "inferno_C01_EP5"),
-        ("inferno_C01_006", "The Battle of River Styx", "Inferno_C01_006_The_Battle_of_River_Styx.mp4", 0, 640.564, "inferno_C01_EP6"),
+        ("inferno_C01_001", "Canto I: Intro", "Inferno_C01_001_Intro.mp4", 15, 308.436, "inferno_C01_EP1"),
+        ("inferno_C01_002", "Canto I: The Cats Part I", "Inferno_C01_002_The_Cats_Part_I.mp4", 15, 377.21, "inferno_C01_EP2"),
+        ("inferno_C01_003", "Canto I: The Cats Part II", "Inferno_C01_003_The_Cats_Part_II.mp4", 15, 261.678, "inferno_C01_EP3"),
+        ("inferno_C01_004", "Canto I: Virgo's Training", "Inferno_C01_004_Virgo_s_Training.mp4", 0, 470.596, "inferno_C01_EP4"),
+        ("inferno_C01_005", "Canto I: Charon", "Inferno_C01_005_Charon.mp4", 15, 479.557, "inferno_C01_EP5"),
+        ("inferno_C01_006", "Canto I: The Battle of River Styx", "Inferno_C01_006_The_Battle_of_River_Styx.mp4", 0, 640.564, "inferno_C01_EP6"),
     ]
     for i, (nid, name, video, coins, dur, ep) in enumerate(main):
         nxt = main[i + 1][0] if i + 1 < len(main) else "inferno_C01_006_5"
@@ -854,7 +963,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
     nodes.append(
         round_node(
             "inferno_C01_006_5",
-            "Cum or Edge",
+            "Canto I: Cum or Edge",
             "Inferno_C01_006.5_Cum_or_Edge.mp4",
             coins=0,
             length_s=63.104,
@@ -869,7 +978,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
     nodes.append(
         round_node(
             "inferno_C01_007",
-            "Fate",
+            "Canto I: Fate",
             "Inferno_C01_007_Fate.mp4",
             coins=15,
             length_s=45.921,
@@ -898,7 +1007,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
             "c01_008_fork",
             "Canto II or Anjelica's Reward",
             [
-                edge("c01_canto2_gate", "Proceed to Canto II"),
+                edge("inferno_C02_001", "Proceed to Canto II"),
                 edge("inferno_C01_009", "Dream of Anjelica (Bonus)"),
             ],
             pos=(X_MAIN, y),
@@ -906,16 +1015,6 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
     )
     fork_y = y
     y += ROW
-
-    # Placeholder Canto II gate (continues main spine down)
-    nodes.append(
-        storyboard_node(
-            "c01_canto2_gate",
-            "Canto II graph not yet authored in this scaffold. End of Canto I main path.",
-            out=None,
-            pos=(X_MAIN, y),
-        )
-    )
 
     # Anjelica branch — right of fork (bonus path; EP/punish stay left of main)
     ay = fork_y
@@ -967,7 +1066,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         ),
         cutscene_node(
             "inferno_C01_EP1_fate",
-            "EP1 Fate",
+            "Canto I: Epilogue 1 — Fate",
             "Inferno_C01_EP1_Fate.mp4",
             length_s=51.864,
             items_blocked=True,
@@ -991,7 +1090,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
             ),
             cutscene_node(
                 f"{base}_fate",
-                f"{ep} Fate",
+                f"Canto I: Epilogue {ep[-1]} — Fate",
                 f"Inferno_C01_{ep}_Fate.mp4",
                 items_blocked=True,
                 out=f"c01_{ep.lower()}_cd",
@@ -1012,7 +1111,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         ),
         cutscene_node(
             "inferno_C01_EP4_fate",
-            "EP4 Fate",
+            "Canto I: Epilogue 4 — Fate",
             "Inferno_C01_EP4_Fate.mp4",
             items_blocked=True,
             out="c01_ep4_cd1",
@@ -1023,11 +1122,11 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         sess = f"c01_ep4_s{i}"
         cd = f"c01_ep4_cd{i}"
         nxt = f"c01_ep4_cd{i + 1}" if i < 3 else "fp_exit_ep4"
-        nodes.append(gap(cd, 1, sess, pos=Z, label=f"EP4 wait {i}"))
+        nodes.append(gap(cd, 1, sess, pos=Z, label=f"Canto I: Epilogue 4 — Cooldown {i}"))
         nodes.append(
             round_node(
                 sess,
-                f"Virgo's Training (punish {i}/3)",
+                f"Punishment: Virgo's Training — Session {i} of 3",
                 "Inferno_C01_004_Virgo_s_Training.mp4",
                 coins=15,
                 length_s=470.596,
@@ -1050,7 +1149,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         ),
         cutscene_node(
             "inferno_C01_EP5_fate",
-            "EP5 Fate",
+            "Canto I: Epilogue 5 — Fate",
             "Inferno_C01_EP5_Fate.mp4",
             items_blocked=True,
             out="c01_ep5_cd1",
@@ -1062,11 +1161,11 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         cd = f"c01_ep5_cd{i}"
         nxt = f"c01_ep5_cd{i + 1}" if i < 5 else "fp_exit_ep5"
         coins = 75 if i == 5 else 0
-        nodes.append(gap(cd, 1, sess, pos=Z, label=f"EP5 wait {i}"))
+        nodes.append(gap(cd, 1, sess, pos=Z, label=f"Canto I: Epilogue 5 — Cooldown {i}"))
         nodes.append(
             round_node(
                 sess,
-                f"Charon (punish {i}/5)",
+                f"Punishment: Charon — Session {i} of 5",
                 "Inferno_C01_005_Charon.mp4",
                 coins=coins,
                 length_s=479.557,
@@ -1089,7 +1188,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         ),
         cutscene_node(
             "inferno_C01_EP6_fate",
-            "EP6 Fate",
+            "Canto I: Epilogue 6 — Fate",
             "Inferno_C01_EP6_Fate.mp4",
             items_blocked=True,
             out="c01_ep6_cd1",
@@ -1102,11 +1201,13 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         s_b = f"c01_ep6_s{i}b"
         nxt_cd = f"c01_ep6_cd{i + 1}" if i < 5 else "fp_exit_ep6"
         coins_b = 90 if i == 5 else 0
-        nodes.append(gap(cd, 2, s_a, pos=Z, label=f"EP6 wait {i}"))
+        nodes.append(
+            gap(cd, 2, s_a, pos=Z, label=f"Canto I: Epilogue 6 — Cooldown {i}")
+        )
         nodes.append(
             round_node(
                 s_a,
-                f"Charon (EP6 {i}/5)",
+                f"Punishment: Charon — Session {i} of 5",
                 "Inferno_C01_005_Charon.mp4",
                 length_s=479.557,
                 items_blocked=True,
@@ -1118,7 +1219,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         nodes.append(
             round_node(
                 s_b,
-                f"Battle Styx (EP6 {i}/5)",
+                f"Punishment: The Battle of River Styx — Session {i} of 5",
                 "Inferno_C01_006_The_Battle_of_River_Styx.mp4",
                 coins=coins_b,
                 length_s=640.564,
@@ -1141,7 +1242,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         ),
         cutscene_node(
             "inferno_C01_EP7_fate",
-            "EP7 Fate",
+            "Canto I: Epilogue 7 — Fate",
             "Inferno_C01_EP7_Fate.mp4",
             items_blocked=True,
             out="fp_hub_1",
@@ -1190,25 +1291,55 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
         fp_release_gate(
             "fp_gate_007",
             "inferno_C01_007",
-            text="Cum or Edge — you chose wrong in freeplay too. Fate still collects.",
+            text="You could not withstand Charon's full power. You have released in freeplay. Continue and learn your fate.",
             pos=Z,
         ),
-        fp_exit_fork("fp_exit_ep1", "inferno_C01_001", pos=Z),
-        fp_exit_fork("fp_exit_ep2", "inferno_C01_001", pos=Z),
-        fp_exit_fork("fp_exit_ep3", "inferno_C01_001", pos=Z),
-        fp_exit_fork("fp_exit_ep4", "inferno_C01_005", pos=Z),
-        fp_exit_fork("fp_exit_ep5", "inferno_C01_006", pos=Z),
-        fp_exit_fork("fp_exit_ep6", "inferno_C01_006_5", pos=Z),
+        fp_exit_fork(
+            "fp_exit_ep1",
+            "inferno_C01_001",
+            pos=Z,
+            title="Canto I: Epilogue 1 — Punishment Complete",
+        ),
+        fp_exit_fork(
+            "fp_exit_ep2",
+            "inferno_C01_001",
+            pos=Z,
+            title="Canto I: Epilogue 2 — Punishment Complete",
+        ),
+        fp_exit_fork(
+            "fp_exit_ep3",
+            "inferno_C01_001",
+            pos=Z,
+            title="Canto I: Epilogue 3 — Punishment Complete",
+        ),
+        fp_exit_fork(
+            "fp_exit_ep4",
+            "inferno_C01_005",
+            pos=Z,
+            title="Canto I: Epilogue 4 — Punishment Complete",
+        ),
+        fp_exit_fork(
+            "fp_exit_ep5",
+            "inferno_C01_006",
+            pos=Z,
+            title="Canto I: Epilogue 5 — Punishment Complete",
+        ),
+        fp_exit_fork(
+            "fp_exit_ep6",
+            "inferno_C01_006_5",
+            pos=Z,
+            title="Canto I: Epilogue 6 — Punishment Complete",
+        ),
     ]
 
     # Freeplay round clones (clear → hub; 006 → 006_5 → hub)
     fp_rounds = [
-        ("fp_C01_001", "Intro", "Inferno_C01_001_Intro.mp4", 15, 308.436, "fp_gate_ep1"),
-        ("fp_C01_002", "The Cats Part I", "Inferno_C01_002_The_Cats_Part_I.mp4", 15, 377.21, "fp_gate_ep2"),
-        ("fp_C01_003", "The Cats Part II", "Inferno_C01_003_The_Cats_Part_II.mp4", 15, 261.678, "fp_gate_ep3"),
-        ("fp_C01_004", "Virgo's Training", "Inferno_C01_004_Virgo_s_Training.mp4", 15, 470.596, "fp_gate_ep4"),
-        ("fp_C01_005", "Charon", "Inferno_C01_005_Charon.mp4", 15, 479.557, "fp_gate_ep5"),
-        ("fp_C01_006", "The Battle of River Styx", "Inferno_C01_006_The_Battle_of_River_Styx.mp4", 0, 640.564, "fp_gate_ep6"),
+        ("fp_C01_001", "Canto I: Intro", "Inferno_C01_001_Intro.mp4", 15, 308.436, "fp_gate_ep1"),
+        ("fp_C01_002", "Canto I: The Cats Part I", "Inferno_C01_002_The_Cats_Part_I.mp4", 15, 377.21, "fp_gate_ep2"),
+        ("fp_C01_003", "Canto I: The Cats Part II", "Inferno_C01_003_The_Cats_Part_II.mp4", 15, 261.678, "fp_gate_ep3"),
+        ("fp_C01_004", "Canto I: Virgo's Training", "Inferno_C01_004_Virgo_s_Training.mp4", 15, 470.596, "fp_gate_ep4"),
+        ("fp_C01_005", "Canto I: Charon", "Inferno_C01_005_Charon.mp4", 15, 479.557, "fp_gate_ep5"),
+        ("fp_C01_006", "Canto I: The Battle of River Styx", "Inferno_C01_006_The_Battle_of_River_Styx.mp4", 0, 640.564, "fp_gate_ep6"),
     ]
     for nid, name, video, coins, dur, gate in fp_rounds:
         out = "fp_C01_006_5" if nid == "fp_C01_006" else "fp_hub_1"
@@ -1227,7 +1358,7 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
     nodes.append(
         round_node(
             "fp_C01_006_5",
-            "Cum or Edge",
+            "Canto I: Cum or Edge",
             "Inferno_C01_006.5_Cum_or_Edge.mp4",
             coins=15,
             length_s=63.104,
@@ -1243,9 +1374,9 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
             "fp_hub_1",
             "Inferno",
             [
-                edge("fp_C01_001", "Intro"),
-                edge("fp_C01_002", "The Cats Part I"),
-                edge("fp_C01_003", "The Cats Part II"),
+                edge("fp_C01_001", "Canto I: Intro"),
+                edge("fp_C01_002", "Canto I: The Cats Part I"),
+                edge("fp_C01_003", "Canto I: The Cats Part II"),
                 edge("fp_hub_2", "More"),
             ],
             pos=Z,
@@ -1257,8 +1388,8 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
             "Inferno",
             [
                 edge("fp_hub_1", "Back"),
-                edge("fp_C01_004", "Virgo's Training"),
-                edge("fp_C01_005", "Charon"),
+                edge("fp_C01_004", "Canto I: Virgo's Training"),
+                edge("fp_C01_005", "Canto I: Charon"),
                 edge("fp_hub_3", "More"),
             ],
             pos=Z,
@@ -1270,29 +1401,44 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
             "Inferno",
             [
                 edge("fp_hub_2", "Back"),
-                edge("fp_C01_006", "The Battle of River Styx"),
+                edge("fp_C01_006", "Canto I: The Battle of River Styx"),
                 edge("inferno_C01_009", "Dream of Anjelica"),
             ],
             pos=Z,
         )
     )
 
+    # Build Canto II spine and EP islands BEFORE applying skill unlocks
+    from scaffold_erosphere_c02 import build_canto_ii_nodes
+
+    c02_nodes, _c02_y = build_canto_ii_nodes(y=y, Z=Z)
+    nodes.extend(c02_nodes)
+
     unlocks = load_skill_unlocks()
     apply_skill_unlocks(nodes, unlocks)
+
     # Scaffold layout first; then restore any positions already authored in the pack.
+    # C02 layout is scaffold-owned until stable — do not re-lock first-regen pile-ups.
+    from scaffold_erosphere_c02 import is_c02_layout_owned
+
     layout_side_branches(nodes, unlocks, resolve=False)
-    n_kept = apply_preserved_positions(nodes, preserved)
-    locked = {nid for nid in preserved if any(n["id"] == nid for n in nodes)}
+    preserved_c01 = {k: v for k, v in preserved.items() if not is_c02_layout_owned(k)}
+    n_kept = apply_preserved_positions(nodes, preserved_c01)
+    locked = {nid for nid in preserved_c01 if any(n["id"] == nid for n in nodes)}
     _resolve_overlaps({n["id"]: n for n in nodes}, locked=locked)
     if preserved:
-        print(f"Preserved layout for {n_kept}/{len(preserved)} existing node position(s)")
+        skipped = len(preserved) - len(preserved_c01)
+        print(
+            f"Preserved layout for {n_kept}/{len(preserved_c01)} existing node position(s)"
+            + (f" (skipped {skipped} C02 scaffold-owned)" if skipped else "")
+        )
 
     journey = {
         "Name": "Erosphere Inferno",
-        "Author": "Erosphere (port)",
-        "Description": "Canto I of Erosphere Inferno.",
+        "Author": "Senorgif2",
+        "Description": "Erosphere Inferno.",
         "Difficulty": "Hard",
-        "Tags": ["erosphere", "inferno", "canto-i"],
+        "Tags": ["erosphere", "inferno", "canto-i", "canto-ii"],
         "MapEnabled": True,
         "MapFog": False,
         "MapFogReveal": 1,
@@ -1307,36 +1453,51 @@ def build(*, preserved_positions: dict[str, list[float]] | None = None) -> dict:
 
 
 def main() -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    funscripts_before = {p.relative_to(OUT_DIR).as_posix() for p in OUT_DIR.rglob("*.funscript")}
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    # Ensure we never mutate pack media from this script.
+    pack_funscripts_before: set[str] = set()
+    if PACK_DIR.is_dir():
+        pack_funscripts_before = {
+            p.relative_to(PACK_DIR).as_posix() for p in PACK_DIR.rglob("*.funscript")
+        }
+
     preserved = load_existing_positions()
     data = build(preserved_positions=preserved)
-    if OUT_JSON.is_file():
-        bak = OUT_DIR / "journey.json.pre_scaffold.bak"
-        bak.write_text(OUT_JSON.read_text(encoding="utf-8"), encoding="utf-8")
-        print(f"Backup -> {bak.name}")
+    if BUILD_JSON.is_file():
+        bak = BUILD_DIR / "journey.json.pre_scaffold.bak"
+        bak.write_text(BUILD_JSON.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"Backup -> {bak}")
     payload = json.dumps(data, indent=2) + "\n"
-    OUT_JSON.write_text(payload, encoding="utf-8")
-    # Pack-local copy so the journey folder owns the unlock schedule.
-    (OUT_DIR / "skill_unlocks.json").write_text(
+    BUILD_JSON.write_text(payload, encoding="utf-8")
+    (BUILD_DIR / "skill_unlocks.json").write_text(
         UNLOCKS_PATH.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    funscripts_after = {p.relative_to(OUT_DIR).as_posix() for p in OUT_DIR.rglob("*.funscript")}
-    lost = funscripts_before - funscripts_after
-    if lost:
-        print(f"ERROR: scaffold removed {len(lost)} funscript file(s): {sorted(lost)[:5]}")
-    else:
-        print(f"Funscript files on disk unchanged ({len(funscripts_after)} files)")
+
+    if PACK_DIR.is_dir():
+        pack_funscripts_after = {
+            p.relative_to(PACK_DIR).as_posix() for p in PACK_DIR.rglob("*.funscript")
+        }
+        lost = pack_funscripts_before - pack_funscripts_after
+        if lost:
+            print(f"ERROR: pack funscripts changed/removed: {sorted(lost)[:5]}")
+        else:
+            print(
+                f"Live pack funscripts untouched ({len(pack_funscripts_after)} files)"
+            )
+
     rounds_with_axes = 0
     for n in data["Nodes"]:
         if n.get("type") != "round":
             continue
         d = n.get("data") or {}
-        ras = d.get("restim_axis_scripts") or {}
-        if any(isinstance(m, dict) and m for m in ras.values()):
+        if d.get("axis_scripts") or d.get("estim_scripts"):
             rounds_with_axes += 1
-    print(f"Wrote {OUT_JSON} ({len(data['Nodes'])} nodes; {rounds_with_axes} rounds with axis scripts)")
-    print(f"Wrote {OUT_DIR / 'skill_unlocks.json'}")
+    print(
+        f"Wrote {BUILD_JSON} ({len(data['Nodes'])} nodes; "
+        f"{rounds_with_axes} rounds with axis/estim scripts)"
+    )
+    print(f"Wrote {BUILD_DIR / 'skill_unlocks.json'}")
+    print(f"Install with: scripts/dev/scaffold-erosphere-inferno.ps1")
 
 
 if __name__ == "__main__":

@@ -11,14 +11,14 @@ func _gap_then_session_graph() -> Dictionary:
 		{
 			"gap":
 			{
-				"type": "round",
-				"data": {"name": "Cooldown Gap", "coins": 0, "cooldown_days": 1},
+				"type": "cooldown",
+				"data": {"name": "Cooldown Gap", "days": 1},
 				"out": [{"to": "session"}],
 			},
 			"session":
 			{
 				"type": "round",
-				"data": {"name": "Punish Session", "coins": 15, "cooldown_days": 0},
+				"data": {"name": "Punish Session", "coins": 15},
 				"out": [],
 			},
 		},
@@ -29,7 +29,8 @@ func _gap_then_session_graph() -> Dictionary:
 func test_cooldown_save_advances_to_next_node() -> void:
 	GameState.StartJourney(_gap_then_session_graph())
 	assert_str(GameState.CurrentNodeId()).is_equal("gap")
-	assert_int(int(GameState.CurrentRound().get("cooldown_days", 0))).is_equal(1)
+	assert_str(GameState.CurrentItemType()).is_equal("cooldown")
+	assert_int(int(GameState.CurrentCooldown().get("days", 0))).is_equal(1)
 
 	# Same contract as _on_cooldown_save_and_quit before _write_journey_save.
 	assert_bool(GameState.IsLastRound()).is_false()
@@ -38,7 +39,6 @@ func test_cooldown_save_advances_to_next_node() -> void:
 	var snap: Dictionary = GameState.CaptureSaveData()
 	assert_str(str(snap.get("current_node", ""))).is_equal("session")
 	assert_str(GameState.CurrentRound().get("name", "")).is_equal("Punish Session")
-	assert_int(int(GameState.CurrentRound().get("cooldown_days", -1))).is_equal(0)
 
 
 # Resume from that save must open the session, not the gap.
@@ -51,4 +51,3 @@ func test_cooldown_resume_loads_session_not_gap() -> void:
 	GameState.LoadFromSave(journey, snap)
 	assert_str(GameState.CurrentNodeId()).is_equal("session")
 	assert_str(GameState.CurrentRound().get("name", "")).is_equal("Punish Session")
-	assert_int(int(GameState.CurrentRound().get("cooldown_days", -1))).is_equal(0)

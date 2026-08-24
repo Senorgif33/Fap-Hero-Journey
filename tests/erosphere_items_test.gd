@@ -39,7 +39,7 @@ func test_cooldown_shave_hours() -> void:
 	).is_equal(48)
 
 
-func test_round_coerce_calendar_defaults() -> void:
+func test_round_coerce_items_blocked_default() -> void:
 	var round: Dictionary = JourneyData.coerce_node_save_data("round", {"name": "X", "coins": 1})
-	assert_int(int(round.get("cooldown_days", -1))).is_equal(0)
+	assert_bool(round.has("cooldown_days")).is_false()
 	assert_bool(bool(round.get("items_blocked", true))).is_false()

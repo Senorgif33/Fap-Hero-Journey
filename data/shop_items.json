@@ -111,7 +111,7 @@
 	{
 		"id":           "soft_touch",
 		"name":         "Soft Touch",
-		"description":  "Softens intensity for 30 seconds (Restim volume / linear stroke scale).",
+		"description":  "Softens intensity for 30 seconds (linear stroke scale).",
 		"category":     "modifier",
 		"price":        35,
 		"duration_ms":  30000,
@@ -157,7 +157,7 @@
 	{
 		"id":           "erosphere_amulet",
 		"name":         "Amulet of Sustenance",
-		"description":  "Shaves 24 hours off an active journey cooldown. Single-use.",
+		"description":  "Removes 24 hours from an active journey cooldown. Single-use.",
 		"category":     "modifier",
 		"price":        0,
 		"duration_ms":  0,
@@ -167,7 +167,7 @@
 	{
 		"id":           "erosphere_psychic_divorce",
 		"name":         "Psychic Divorce",
-		"description":  "Shaves 48 hours off an active journey cooldown.",
+		"description":  "Removes 48 hours from an active journey cooldown. Pay per use.",
 		"category":     "modifier",
 		"price":        60,
 		"duration_ms":  0,
@@ -177,7 +177,7 @@
 	{
 		"id":           "erosphere_feign_death",
 		"name":         "Feign Death",
-		"description":  "Softens intensity to 30% for the rest of the round (Restim volume / linear stroke).",
+		"description":  "Softens intensity by 70% for the rest of the round. Pay per use.",
 		"category":     "modifier",
 		"price":        40,
 		"duration_ms":  0,
@@ -188,7 +188,7 @@
 	{
 		"id":           "erosphere_blinding_light",
 		"name":         "Blinding Light",
-		"description":  "Blackout for 30 seconds with intensity softened to 60% while the dark lasts.",
+		"description":  "Blackout for 30 seconds; softens intensity by 40% while the dark lasts. Pay per use.",
 		"category":     "modifier",
 		"price":        60,
 		"duration_ms":  30000,
@@ -198,7 +198,7 @@
 	{
 		"id":           "erosphere_time_control",
 		"name":         "Time Control",
-		"description":  "Ends the current round early and advances as a clean finish. Blocked on bosses and item-gated rounds.",
+		"description":  "Skips to the end of the round. Blocked on item-gated rounds. Pay per use.",
 		"category":     "modifier",
 		"price":        40,
 		"duration_ms":  0,

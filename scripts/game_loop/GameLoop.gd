@@ -247,6 +247,21 @@ var _test_seed_counters: Dictionary = {}  # counter name -> value to pre-set
 # or when leaving via Save & Quit (a resume, not an abandon) — so the menu exit
 # doesn't also record an abandoned run.
 var _run_accounted: bool = false
+# Calendar lockout stamped when entering a dedicated cooldown node.
+# Written into the Force Save & Quit payload; 0 = no pending cooldown.
+var _pending_cooldown_until: int = 0
+# True while the cooldown Force-Quit modal is on screen (dev Continue / ↑).
+var _cooldown_banner_open: bool = false
+var _cooldown_modal: Control = null
+# True while a cutscene node is playing (no funscript/score; Skip advances).
+var _cutscene_playing: bool = false
+var _cutscene_skip_btn: Button = null
+# Release ("I came") per-round control — ReleaseLogic.gd owns the mode matrix;
+# GameLoop surfaces the button, executes outcomes, and ticks the deadline.
+var _release_cfg: Dictionary = {}
+var _release_pressed: bool = false  # set when FINISH/R pressed (for timed_window / punish_polarity checks)
+var _release_deadline_resolved: bool = false  # timed_window deadline fired → no longer penalize
+var _release_jumping: bool = false  # fail_jump in progress (guards re-entry)
 
 
 func _ready() -> void:
@@ -269,6 +284,8 @@ func _ready() -> void:
 	_auto_advance_fork_secs = int(GameState.Journey.get("auto_advance_fork_secs", 45))
 	_map_fog_reveal = int(GameState.Journey.get("map_fog_reveal", 1))
 	_shown_counters = (GameState.Journey.get("shown_counters", []) as Array)
+	# Journey-level unlock-pay-per-use economy mode — set before any inventory use (and before resume).
+	InventoryService.SetUnlockPayPerUse(bool(GameState.Journey.get("unlock_pay_per_use", false)))
 	_build_map()
 	_connect_signals()
 	# Resume vs fresh start: when the player picked Resume from the catalogue,
@@ -384,8 +401,11 @@ func _process(delta: float) -> void:
 		var len: float = _video.get_stream_length()
 		if len > 0.0:
 			_progress.value = _video.stream_position / len
-		# Keep funscript in sync with video clock
-		FunscriptPlayer.SyncTo(_video.stream_position)
+		# Keep funscript in sync with video clock (skip during cutscenes — no script)
+		if not _cutscene_playing:
+			FunscriptPlayer.SyncTo(_video.stream_position)
+		# Release deadline tick for timed_window mode
+		_tick_release_deadline()
 		# Re-fit every frame: cheap, and keeps the video covering the screen even
 		# if the viewport or UI scale changes mid-playback.
 		_fit_video_cover()
@@ -438,6 +458,10 @@ func _load_current_item() -> void:
 				_advance_from_checkpoint()  # resumed onto it → don't re-show its banner
 			else:
 				_show_checkpoint_gate()
+		"cooldown":
+			_load_current_cooldown()
+		"cutscene":
+			_load_current_cutscene()
 		"loop_start":
 			# The top marker of a Loop pair — a no-media passthrough. Advance into the body it precedes.
 			GameState.Advance()
@@ -777,7 +801,8 @@ func _begin_round(round: Dictionary, cover: Control = null) -> void:
 
 	if bool(round.get("is_warmup", false)):
 		_show_warmup_skip_button()
-	# FINISH ("I came") is available during every round when the journey opts in.
+	# FINISH ("I came") / Release: show when journey finish is enabled OR round has release_enabled.
+	_setup_release(round)
 	_show_finish_button()
 
 	var fs_path: String = round.get("funscript_path", "")
@@ -974,6 +999,273 @@ func _apply_checkpoint_continue_reward(data: Dictionary) -> void:
 # content-less node that just moves the sequence forward).
 func _advance_from_checkpoint() -> void:
 	GameState.ApplyCurrentNodeCounters()  # a checkpoint's own set_counters (rare, but authoring allows it)
+	GameState.Advance()
+	if GameState.IsSequenceDone():
+		_transition_to_end_screen()
+		return
+	await _transition_swap(func() -> void: _load_current_item())
+
+
+# ---------------------------------------------------------------------------
+# Cooldown calendar nodes
+# ---------------------------------------------------------------------------
+
+
+# Calendar lockout node — stamp cooldown_until and show Force Save & Quit.
+# No video / funscript / score. Save&Quit and Dev Continue both Advance past this node.
+func _load_current_cooldown() -> void:
+	var cd: Dictionary = GameState.CurrentCooldown().duplicate(true)
+	if cd.is_empty():
+		push_error("GameLoop: GameState has no current cooldown — returning to menu")
+		_go_to_menu()
+		return
+	_cutscene_playing = false
+	_hide_cutscene_skip()
+	var days: int = maxi(1, int(cd.get("days", 1)))
+	_round_lbl.text = "⏳  COOLDOWN  —  %s" % (cd.get("name", "") as String).to_upper()
+	_progress.value = 0.0
+	_pending_cooldown_until = JourneySaveService.stamp_cooldown_days(
+		GameState.Journey.get("folder_name", ""), days
+	)
+	_show_cooldown_banner(cd, days)
+
+
+func _show_cooldown_banner(data: Dictionary, days: int) -> void:
+	_is_overlay_open = true
+	_cooldown_banner_open = true
+	_halt_playback_for_gate()
+
+	var parts: Dictionary = UITheme.build_centered_modal(
+		"⏳  COOLDOWN  ⏳", UITheme.DANGER, Vector2i(620, 380)
+	)
+	var modal: Control = parts["modal"]
+	var vbox: VBoxContainer = parts["vbox"]
+	vbox.add_theme_constant_override("separation", 18)
+
+	var subtitle: Label = Label.new()
+	subtitle.text = (data.get("name", "") as String).to_upper()
+	UITheme.style_label(subtitle, UITheme.WHITE_SOFT, 14, true)
+	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(subtitle)
+
+	var custom_msg: String = str(data.get("message", "")).strip_edges()
+	var hint: Label = Label.new()
+	if custom_msg != "":
+		hint.text = custom_msg
+	else:
+		hint.text = (
+			(
+				"This starts a %d-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
+				% days
+			)
+			if days != 1
+			else "This starts a 1-day lockout. Save & Quit now — after the wait, Resume continues from the next round. There is no Continue."
+		)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	UITheme.style_label(hint, UITheme.PURPLE_MID, 12, false)
+	vbox.add_child(hint)
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 16)
+	vbox.add_child(btn_row)
+
+	var save_btn: Button = Button.new()
+	save_btn.text = "💾  SAVE & QUIT"
+	save_btn.custom_minimum_size = Vector2(200, 0)
+	UITheme.style_button(save_btn, UITheme.AMBER)
+	save_btn.pressed.connect(
+		func() -> void:
+			_dismiss_cooldown_banner()
+			_on_cooldown_save_and_quit()
+	)
+	btn_row.add_child(save_btn)
+
+	if (
+		SettingsService.get_ignore_journey_cooldowns()
+		or SettingsService.get_dev_cheats_enabled()
+	):
+		var cont_btn: Button = Button.new()
+		cont_btn.text = "▶  CONTINUE (DEV)"
+		cont_btn.custom_minimum_size = Vector2(200, 0)
+		UITheme.style_button(cont_btn, UITheme.PURPLE_BRIGHT)
+		cont_btn.pressed.connect(
+			func() -> void:
+				_dismiss_cooldown_banner()
+				_dev_skip_cooldown_gap()
+		)
+		btn_row.add_child(cont_btn)
+
+	add_child(modal)
+	_cooldown_modal = modal
+
+
+func _dismiss_cooldown_banner() -> void:
+	if is_instance_valid(_cooldown_modal):
+		_cooldown_modal.queue_free()
+	_cooldown_modal = null
+	_is_overlay_open = false
+	_cooldown_banner_open = false
+
+
+func _on_cooldown_save_and_quit() -> void:
+	if not GameState.IsLastRound():
+		GameState.Advance()
+	else:
+		push_warning(
+			"GameLoop: cooldown gap has no out edge — save will resume on this node"
+		)
+	_on_save_and_quit()
+
+
+# Dev/QA: leave a cooldown gap without quitting — same Advance as save, then play.
+func _dev_skip_cooldown_gap() -> void:
+	_pending_cooldown_until = 0
+	_cooldown_banner_open = false
+	if not GameState.IsLastRound():
+		GameState.Advance()
+	_show_save_toast("DEV  SKIPPED COOLDOWN")
+	_load_current_item()
+
+
+func _on_shave_cooldown_requested(hours: int) -> void:
+	if _pending_cooldown_until <= 0:
+		_show_save_toast("✕  NO ACTIVE COOLDOWN")
+		return
+	_pending_cooldown_until = maxi(0, _pending_cooldown_until - hours * 3600)
+	_show_save_toast("✓  COOLDOWN −%dh" % hours)
+
+
+# ---------------------------------------------------------------------------
+# Cutscene nodes
+# ---------------------------------------------------------------------------
+
+
+# Watch-then-advance video (EP / Fate / Credits / unlock). No FunscriptPlayer or ScoreService.
+func _load_current_cutscene() -> void:
+	var cut: Dictionary = GameState.CurrentCutscene().duplicate(true)
+	if cut.is_empty():
+		push_error("GameLoop: GameState has no current cutscene — returning to menu")
+		_go_to_menu()
+		return
+	_paused = false
+	_pause_btn.text = "|| PAUSE"
+	_progress.value = 0.0
+	_update_muffle()
+	# Stop any leftover stroke playback from a prior round, then clear the loaded
+	# script so Options Pause→Resume cannot revive it mid-cutscene.
+	FunscriptPlayer.Stop()
+	FunscriptPlayer.ClearFunscript()
+	FunscriptPlayer.ClearAxisScripts()
+	FunscriptPlayer.ClearVibScripts()
+	if _beat_bar != null:
+		_beat_bar.set_beats([])
+	_handy_stop()
+	var cname: String = (cut.get("name", "") as String).to_upper()
+	_round_lbl.text = "◈  CUTSCENE  —  %s" % cname if cname != "" else "◈  CUTSCENE"
+
+	# TODO: Add checkpoint gate support for cutscenes when needed
+	await _play_cutscene_video(cut)
+
+
+# Starts cutscene video after any checkpoint gate is cleared.
+func _play_cutscene_video(cut: Dictionary) -> void:
+	_cutscene_playing = true
+	_video.paused = false
+
+	var video_path: String = str(cut.get("video_path", ""))
+	if video_path == "":
+		push_warning("GameLoop: cutscene has no video — advancing")
+		_cutscene_playing = false
+		await _advance_after_cutscene()
+		return
+
+	_active_round_length_ms = int(cut.get("length_ms", 0))
+	_show_cutscene_skip()
+	await _load_video(video_path, false)
+
+
+func _show_cutscene_skip() -> void:
+	_hide_cutscene_skip()
+	var btn: Button = Button.new()
+	btn.text = "SKIP  ▶▶"
+	btn.anchor_left = 1.0
+	btn.anchor_right = 1.0
+	btn.anchor_top = 0.0
+	btn.anchor_bottom = 0.0
+	btn.offset_left = -110
+	btn.offset_right = -16
+	btn.offset_top = 16
+	btn.offset_bottom = 46
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.pressed.connect(_on_cutscene_skip_pressed)
+	btn.add_theme_color_override("font_color", UITheme.DARK_TEXT)
+	btn.add_theme_color_override("font_hover_color", UITheme.WHITE_SOFT)
+	btn.add_theme_color_override("font_pressed_color", UITheme.BG)
+	btn.add_theme_font_size_override("font_size", 11)
+	var sk_n: StyleBoxFlat = StyleBoxFlat.new()
+	sk_n.bg_color = Color(UITheme.DARK_TEXT.r, UITheme.DARK_TEXT.g, UITheme.DARK_TEXT.b, 0.08)
+	sk_n.border_color = UITheme.DARK_TEXT
+	sk_n.border_width_left = 1
+	sk_n.border_width_right = 1
+	sk_n.border_width_top = 1
+	sk_n.border_width_bottom = 1
+	sk_n.set_corner_radius_all(UITheme.CORNER_RADIUS)
+	sk_n.content_margin_left = 10
+	sk_n.content_margin_right = 10
+	sk_n.content_margin_top = 4
+	sk_n.content_margin_bottom = 4
+	btn.add_theme_stylebox_override("normal", sk_n)
+	var sk_h: StyleBoxFlat = sk_n.duplicate()
+	sk_h.bg_color = Color(UITheme.WHITE_SOFT.r, UITheme.WHITE_SOFT.g, UITheme.WHITE_SOFT.b, 0.15)
+	sk_h.border_color = UITheme.WHITE_SOFT
+	btn.add_theme_stylebox_override("hover", sk_h)
+	var sk_p: StyleBoxFlat = sk_n.duplicate()
+	sk_p.bg_color = UITheme.DARK_TEXT
+	btn.add_theme_stylebox_override("pressed", sk_p)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	add_child(btn)
+	_cutscene_skip_btn = btn
+
+
+func _hide_cutscene_skip() -> void:
+	if is_instance_valid(_cutscene_skip_btn):
+		_cutscene_skip_btn.queue_free()
+	_cutscene_skip_btn = null
+
+
+func _on_cutscene_skip_pressed() -> void:
+	if not _cutscene_playing and GameState.CurrentItemType() != "cutscene":
+		return
+	_cutscene_playing = true
+	_end_timer.stop()
+	_video.stop()
+	_video.stream = null
+	await _on_cutscene_ended()
+
+
+func _on_cutscene_ended() -> void:
+	if not _cutscene_playing and GameState.CurrentItemType() != "cutscene":
+		return
+	_cutscene_playing = false
+	_hide_cutscene_skip()
+	_end_timer.stop()
+	_video.stop()
+	_video.stream = null
+	await _advance_after_cutscene()
+
+
+func _advance_after_cutscene() -> void:
+	# Optional coin + item rewards — granted when the cutscene ends (natural end or
+	# Skip), parity with storyboard / round award_item. Read before Advance().
+	var cut: Dictionary = GameState.CurrentCutscene()
+	var coins: int = int(cut.get("coins", 0))
+	if coins > 0:
+		_grant_coins(coins)
+	var award_item: String = str(cut.get("award_item", ""))
+	if award_item != "":
+		_grant_item(award_item)
 	GameState.Advance()
 	if GameState.IsSequenceDone():
 		_transition_to_end_screen()
@@ -1590,7 +1882,9 @@ const _FINISH_IDLE_TEXT: String = "✔ HOLD TO FINISH"
 # too — but stays clickable at rest so a hold started as it fades isn't broken.
 func _show_finish_button() -> void:
 	_remove_finish_button()
-	if not _allow_finish or _finishing:
+	# Show FINISH when journey-level allow_finish is enabled OR round has release_enabled.
+	var release_available: bool = not _release_cfg.is_empty() and ReleaseLogic.is_available(_release_cfg, GameState.HasFlag)
+	if (not _allow_finish and not release_available) or _finishing:
 		return
 	var btn: Button = Button.new()
 	btn.text = _FINISH_IDLE_TEXT
@@ -1674,6 +1968,12 @@ func _set_finish_fill(t: float) -> void:
 func _finish_journey() -> void:
 	if _finishing:
 		return
+	# If this round has release logic active, dispatch it first before finishing the journey.
+	if not _release_cfg.is_empty() and ReleaseLogic.is_available(_release_cfg, GameState.HasFlag):
+		_on_release_pressed()
+		# If the release action didn't jump/restart (which would reload), proceed with journey finish.
+		if _release_jumping:
+			return  # fail_jump took over; don't also finish
 	_finishing = true
 	_cancel_finish_hold()
 	_remove_finish_button()
@@ -1686,6 +1986,101 @@ func _finish_journey() -> void:
 		await _transition_swap(_load_current_item)  # fade into the aftercare node
 	else:
 		_transition_to_end_screen()
+
+
+# ---------------------------------------------------------------------------
+# Release Logic (per-round "I came" / outcome matrix)
+# ---------------------------------------------------------------------------
+
+
+# Sets up release config for this round and resets press state. Called from _begin_round.
+func _setup_release(round: Dictionary) -> void:
+	_release_cfg = ReleaseLogic.normalize(round)
+	_release_pressed = false
+	_release_deadline_resolved = false
+	_release_jumping = false
+
+
+# Executes the release action based on the current mode. Called when FINISH is confirmed and release is active.
+func _on_release_pressed() -> void:
+	if _release_cfg.is_empty():
+		return
+	_release_pressed = true
+	var action: String = ReleaseLogic.press_action(_release_cfg)
+	match action:
+		ReleaseLogic.ACTION_SET_FLAG:
+			var flag: String = str(_release_cfg.get("release_flag", ""))
+			if flag != "":
+				GameState.SetFlag(flag)
+			# Continue the round (no jump/restart)
+		ReleaseLogic.ACTION_FAIL_JUMP:
+			_release_fail_jump()
+		ReleaseLogic.ACTION_STAMP:
+			# timed_window: just stamp that press happened; deadline awards at window close
+			pass
+		ReleaseLogic.ACTION_RESTART:
+			_release_restart_round()
+		ReleaseLogic.ACTION_SUCCESS_STAMP:
+			# punish_polarity must-release success: stamp flag and continue
+			var flag: String = str(_release_cfg.get("release_flag", ""))
+			if flag != "":
+				GameState.SetFlag(flag)
+		ReleaseLogic.ACTION_NONE:
+			pass
+
+
+# Timed_window deadline tick: awards score when the deadline fires based on whether the player pressed.
+func _tick_release_deadline() -> void:
+	if _release_cfg.is_empty() or _release_deadline_resolved:
+		return
+	if str(_release_cfg.get("release_mode", "")) != "timed_window":
+		return
+	var deadline_ms: int = int(_release_cfg.get("release_deadline_ms", 0))
+	if deadline_ms <= 0:
+		return
+	var elapsed_ms: int = int(_video.stream_position * 1000.0)
+	if elapsed_ms >= deadline_ms:
+		_release_deadline_resolved = true
+		var score_delta: int = ReleaseLogic.deadline_score(_release_cfg, _release_pressed)
+		if score_delta != 0:
+			ScoreService.AddScore(score_delta)
+
+
+# Release fail_jump: stop playback and jump to the designated node.
+func _release_fail_jump() -> void:
+	if _release_jumping:
+		return
+	_release_jumping = true
+	_video.stop()
+	_end_timer.stop()
+	FunscriptPlayer.Stop()
+	_handy_stop()
+	ScoreService.DiscardRound()
+	_exit_boss_mode()
+	var jump_to: String = str(_release_cfg.get("release_jump_to", ""))
+	if jump_to == "" or not GameState.JumpToNode(jump_to):
+		push_warning("GameLoop: release fail_jump target invalid — advancing")
+		GameState.Advance()
+	if GameState.IsSequenceDone():
+		_transition_to_end_screen()
+		return
+	await _transition_swap(func() -> void: _load_current_item())
+
+
+# Release restart: replay the current round from the start.
+func _release_restart_round() -> void:
+	_video.stop()
+	_end_timer.stop()
+	FunscriptPlayer.Stop()
+	_handy_stop()
+	ScoreService.DiscardRound()
+	if not GameState.RestartCurrentRound():
+		push_warning("GameLoop: RestartCurrentRound failed — advancing")
+		GameState.Advance()
+	if GameState.IsSequenceDone():
+		_transition_to_end_screen()
+		return
+	await _transition_swap(func() -> void: _load_current_item())
 
 
 # Exit-to-menu hold-to-confirm. Begins on Esc-key-down or MENU-button-down; a centered overlay fills over
@@ -2200,6 +2595,10 @@ func _start_no_video_fallback() -> void:
 
 
 func _on_round_ended(skipped: bool = false) -> void:
+	# video.finished / _end_timer.timeout can fire for a cutscene too — dispatch and return early.
+	if GameState.CurrentItemType() == "cutscene" or _cutscene_playing:
+		await _on_cutscene_ended()
+		return
 	if _round_ended_guard:
 		return
 	_round_ended_guard = true
@@ -2275,6 +2674,10 @@ func _on_round_ended(skipped: bool = false) -> void:
 		# from `_cur` (still current — Advance happens inside the transition).
 		_grant_item(str(_cur.get("award_item", "")))
 
+	# Release punish_polarity must-release: finishing clean without pressing → fail_jump.
+	if not skipped and ReleaseLogic.fail_on_clean_finish(_release_cfg, _release_pressed):
+		_release_fail_jump()
+		return
 	if GameState.IsLastRound():
 		_transition_to_end_screen()
 		return
@@ -2703,6 +3106,12 @@ func _write_journey_save() -> bool:
 		"round_names": GameState.get_meta("_round_names", PackedStringArray()) as PackedStringArray,
 		"route_trail": GameState.get_meta("_route_trail", []),
 	}
+	# Cooldown calendar: if a cooldown is pending, save its unix timestamp for Resume lockout.
+	if _pending_cooldown_until > 0:
+		payload["cooldown_until"] = _pending_cooldown_until
+	# Unlock-pay-per-use: if PPU is active, save the unlocked set so Resume can restore it.
+	if InventoryService.UnlockPayPerUse:
+		payload["unlocked"] = InventoryService.CaptureUnlockedSaveData()
 	# GameState owns the graph-native position fields (current_node,
 	# rounds_entered, flags, discovered) — merge them in under their own names so
 	# LoadFromSave finds them. (Re-keying these through the old tree-model names
@@ -2762,6 +3171,64 @@ func _on_test_skip_round() -> void:
 	_end_timer.stop()  # funscript-only rounds run on the end timer, not the video clock
 	_show_save_toast("⏭  ROUND COMPLETED (TEST)")
 	_on_round_ended(false)  # false = completed → grants this round's rewards
+
+
+func _dev_cheats_on() -> bool:
+	return SettingsService.get_dev_cheats_enabled()
+
+
+# → : clean-finish the current round (coins/score), or skip a cutscene / cooldown.
+func _dev_complete_round() -> void:
+	if not _dev_cheats_on() and not _test_mode:
+		return
+	if _cooldown_banner_open:
+		_dismiss_cooldown_banner()
+		_dev_skip_cooldown_gap()
+		return
+	if _cutscene_playing or GameState.CurrentItemType() == "cutscene":
+		_show_save_toast("DEV  SKIP CUTSCENE")
+		await _on_cutscene_skip_pressed()
+		return
+	if _is_overlay_open:
+		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
+		return
+	if GameState.CurrentItemType() != "round":
+		_show_save_toast("DEV  NOT IN A ROUND")
+		return
+	_show_save_toast("DEV  COMPLETE ROUND")
+	_video.stop()
+	_end_timer.stop()
+	_on_round_ended(false)  # false = completed → grants rewards
+
+
+# ↑ : jump to the next node without awards (or skip cooldown gap / cutscene).
+func _dev_skip_node() -> void:
+	if not _dev_cheats_on():
+		return
+	if _cooldown_banner_open:
+		_dismiss_cooldown_banner()
+		_dev_skip_cooldown_gap()
+		return
+	if _cutscene_playing or GameState.CurrentItemType() == "cutscene":
+		_show_save_toast("DEV  SKIP CUTSCENE")
+		await _on_cutscene_skip_pressed()
+		return
+	if _is_overlay_open:
+		_show_save_toast("DEV  CLOSE OVERLAY FIRST")
+		return
+	if GameState.CurrentItemType() != "round":
+		_show_save_toast("DEV  NOT IN A ROUND")
+		return
+	_show_save_toast("DEV  SKIP NODE")
+	_video.stop()
+	_end_timer.stop()
+	FunscriptPlayer.Stop()
+	_handy_stop()
+	GameState.Advance()
+	if GameState.IsSequenceDone():
+		_transition_to_end_screen()
+		return
+	await _transition_swap(func() -> void: _load_current_item())
 
 
 func _on_save_item_used() -> void:
@@ -3353,6 +3820,11 @@ func _input(event: InputEvent) -> void:
 					if _map_enabled and (not _is_overlay_open or _overlay_map_allowed):
 						_open_map_viewer()
 						get_viewport().set_input_as_handled()
+				KEY_R:
+					# R: release hotkey — same as FINISH button when release is available.
+					if not _is_overlay_open and not _release_cfg.is_empty() and ReleaseLogic.is_available(_release_cfg, GameState.HasFlag):
+						_on_finish_hold_start()  # reuse the FINISH hold mechanism
+						get_viewport().set_input_as_handled()
 				KEY_SPACE:
 					# Space: pause / resume — blocked while a full-screen overlay is open
 					# (shop / fork / storyboard handles its own input first).
@@ -3365,10 +3837,15 @@ func _input(event: InputEvent) -> void:
 						_on_inventory_pressed()
 						get_viewport().set_input_as_handled()
 				KEY_RIGHT:
-					# Test mode only: complete this round now (grant its rewards) and advance, so a long
-					# journey can be QC'd without watching each video through. No-op outside test mode.
-					if _test_mode and not _is_overlay_open:
-						_on_test_skip_round()
+					# Test mode / dev cheats: complete this round now (grant its rewards) or skip cutscene/cooldown.
+					# Quick Settings open → nudge range instead (handled below via _session_panel branch).
+					if (_test_mode or _dev_cheats_on()) and not is_instance_valid(_session_panel):
+						_dev_complete_round()
+						get_viewport().set_input_as_handled()
+				KEY_UP:
+					# Dev cheats: skip node without rewards (or skip cutscene/cooldown).
+					if _dev_cheats_on() and not _is_overlay_open:
+						_dev_skip_node()
 						get_viewport().set_input_as_handled()
 				KEY_ESCAPE:
 					# Esc: close the Quick Settings drawer or inventory if open, otherwise begin the
@@ -3538,6 +4015,8 @@ func _connect_signals() -> void:
 	InventoryService.connect("SaveRequested", _on_save_item_used)
 	# skip_round utility item: ends the round here, paying nothing.
 	InventoryService.connect("SkipRoundRequested", _on_skip_item_used)
+	# shave_cooldown item: subtract hours from pending cooldown mid-run.
+	InventoryService.connect("ShaveCooldownRequested", _on_shave_cooldown_requested)
 
 	# Device-connection signals — surface a banner when the currently selected
 	# output device drops its connection, and clear it on reconnect. We watch

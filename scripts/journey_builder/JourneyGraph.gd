@@ -228,9 +228,9 @@ static func type_ordinals(nodes: Dictionary) -> Dictionary:
 
 
 # The set (Dictionary-as-set) of node ids reachable from the journey start, following out-edges
-# (post-redirect, when apply_redirects has run). Any node NOT in this set is orphaned — a redirect
-# skipped past it and nothing else leads there. DAG → terminates; `seen` also backstops a malformed
-# cycle. Feeds the builder's live "unreachable" warning.
+# and release_jump_to targets on rounds (fail/EP side-paths are not wired as out-edges — counting
+# them here keeps EP islands from looking like orphans). DAG → terminates; `seen` also backstops a
+# malformed cycle. Feeds the builder's live "unreachable" warning.
 static func reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary:
 	var seen: Dictionary = {}
 	var stack: Array = [from_id if from_id != "" else str(graph.get("start", ""))]
@@ -241,6 +241,11 @@ static func reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary
 		seen[id] = true
 		for e: Dictionary in out_edges(graph, id):
 			stack.append(str(e.get("to", "")))
+		# Release / EP jumps are runtime edges, not graph outs — still reachable in play.
+		var data: Dictionary = (node(graph, id) as Dictionary).get("data", {})
+		var jump: String = str(data.get("release_jump_to", "")).strip_edges()
+		if jump != "":
+			stack.append(jump)
 	return seen
 
 
@@ -534,6 +539,9 @@ static func resolve_paths(graph: Dictionary, base: String) -> void:
 				_resolve_round_paths(n.get("data", {}), base)
 			"storyboard":
 				_resolve_storyboard_paths(n.get("data", {}), base)
+			"cutscene":
+				var cd: Dictionary = n.get("data", {})
+				cd["video_path"] = _abs(str(cd.get("video_path", "")), base)
 			"fork":
 				for e: Dictionary in n.get("out", []):
 					e["image_path"] = _abs(str(e.get("image_path", "")), base)

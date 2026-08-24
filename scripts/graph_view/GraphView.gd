@@ -1069,6 +1069,10 @@ func _type_color(item_type: String) -> Color:
 			return UITheme.SUCCESS
 		"loop_start", "loop_end":
 			return UITheme.TOXIC_GREEN
+		"cooldown":
+			return UITheme.DANGER
+		"cutscene":
+			return UITheme.TOXIC_GREEN
 	return UITheme.PURPLE_MID
 
 
@@ -1088,6 +1092,10 @@ func _type_icon(item_type: String) -> String:
 			return "▸"
 		"loop_end":
 			return "↺"
+		"cooldown":
+			return "⏳"
+		"cutscene":
+			return "▣"
 	return "•"
 
 
@@ -1135,6 +1143,12 @@ func _type_label(item: Dictionary) -> String:
 			return "Loop Start"
 		"loop_end":
 			return "Loop End"
+		"cooldown":
+			var cname: String = item.get("name", "")
+			return cname if cname != "" else "Cooldown"
+		"cutscene":
+			var csname: String = item.get("name", "")
+			return csname if csname != "" else "Cutscene"
 	return "?"
 
 
@@ -1204,6 +1218,11 @@ func _type_sublabel(item: Dictionary) -> String:
 				return "LOOP   " + _loop_cond_short(conds[0])  # show the actual rule, not "1 condition"
 			var combine: String = "ALL" if str(item.get("loop_combine", "any")) == "all" else "ANY"
 			return "LOOP   EXIT %s OF %d" % [combine, conds.size()]
+		"cooldown":
+			var days: int = int(item.get("days", 1))
+			return "COOLDOWN   %d DAY%s" % [days, "S" if days != 1 else ""]
+		"cutscene":
+			return "CUTSCENE"
 	return ""
 
 

@@ -118,6 +118,7 @@ var _journey_auto_advance_fork_secs: int = 45  # fork-decision countdown when en
 var _journey_shown_counters: Array = []  # Array[String] of counter names surfaced to the player (HUD + inventory)
 var _journey_allow_finish: bool = false  # author opt-in: the player "I came" / FINISH button ends the run early
 var _journey_finish_node: String = ""  # entry node of the off-graph aftercare sequence played on FINISH (round/storyboard; optional)
+var _journey_unlock_pay_per_use: bool = false  # PPU mode: modifiers unlock (free) then activate (cost coins), not charges
 var _journey_items: Array = []  # author-defined journey-scoped items (runtime snake-case dicts)
 var _journey_characters: Array = []  # storyboard cast (runtime dicts: id/name/portraits[]/placements[])
 
@@ -1250,6 +1251,8 @@ func _show_canvas_context_menu(world_pos: Vector2) -> void:
 		["＋ SHOP", "shop"],
 		["＋ STORYBOARD", "storyboard"],
 		["＋ FORK", "fork"],
+		["＋ COOLDOWN", "cooldown"],
+		["＋ CUTSCENE", "cutscene"],
 		["＋ CHECKPOINT", "checkpoint"],
 		["＋ LOOP", "loop"],
 	]:
@@ -2005,6 +2008,8 @@ func _show_shortcuts_overlay() -> void:
 				["Ctrl + 2", "Add a shop"],
 				["Ctrl + 3", "Add a storyboard"],
 				["Ctrl + 4", "Add a fork"],
+				["Ctrl + 5", "Add a cooldown"],
+				["Ctrl + 6", "Add a cutscene"],
 			]
 		],
 		[
@@ -2133,13 +2138,13 @@ func _input(event: InputEvent) -> void:
 				if not _save_btn.disabled:
 					_on_save_pressed()
 				get_viewport().set_input_as_handled()
-			KEY_1, KEY_2, KEY_3, KEY_4:
+			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6:
 				# Quick-create a node by type, placed near the current selection. Stand down inside a
 				# text field (the author may be typing, and Ctrl+digit can be a native shortcut).
 				if _focus_is_text_field():
 					return
 				_create_graph_node(
-					{KEY_1: "round", KEY_2: "shop", KEY_3: "storyboard", KEY_4: "fork"}[k.keycode]
+					{KEY_1: "round", KEY_2: "shop", KEY_3: "storyboard", KEY_4: "fork", KEY_5: "cooldown", KEY_6: "cutscene"}[k.keycode]
 				)
 				get_viewport().set_input_as_handled()
 			KEY_Z:
@@ -2602,6 +2607,7 @@ func _load_graph(journey: Dictionary) -> void:
 	_journey_auto_advance_fork_secs = int(parsed.get("auto_advance_fork_secs", 45))
 	_journey_allow_finish = bool(parsed.get("allow_finish", false))
 	_journey_finish_node = str(parsed.get("finish_node", ""))
+	_journey_unlock_pay_per_use = bool(parsed.get("unlock_pay_per_use", false))
 	if (parsed["cover_path"] as String) != "":
 		_cover_path = parsed["cover_path"]
 		_update_cover_preview()
@@ -4837,6 +4843,7 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		"ShownCounters": JourneyData.clean_flag_list(_journey_shown_counters),
 		"AllowFinish": _journey_allow_finish,
 		"FinishNode": _journey_finish_node,
+		"UnlockPayPerUse": _journey_unlock_pay_per_use,
 		"Items": JourneyData.coerce_journey_items(items_for_save),
 		"Characters": JourneyData.coerce_journey_characters(characters_for_save),
 	}

@@ -43,47 +43,6 @@ def link_or_copy(src: Path, dst: Path) -> str:
         return "copy"
 
 
-def classify_funscript(stem: str, label_b_slug: str = "prostate") -> tuple[str, str] | None:
-    """Return (slot, axis) or ('l0','') for main. Mirrors RestimAxisKit priority."""
-    low = stem.lower()
-    kit = [
-        "pulse_interval_random",
-        "pulse_frequency",
-        "pulse_rise_time",
-        "pulse_width",
-        "sensor_suppression",
-        "frequency",
-        "volume",
-        "alpha",
-        "beta",
-        "e1",
-        "e2",
-        "e3",
-        "e4",
-    ]
-    # explicit .a. / .b.
-    for slot in ("a", "b"):
-        for axis in kit:
-            if low.endswith(f".{slot}.{axis}") or low.endswith(f"_{slot}_{axis}"):
-                return slot, axis
-    # label-tagged
-    for axis in kit:
-        if low.endswith(f".{axis}-{label_b_slug}") or low.endswith(f"_{axis}_{label_b_slug}"):
-            return "b", axis
-    # plain kit
-    for axis in kit:
-        if low.endswith(f".{axis}") or low.endswith(f"_{axis}"):
-            if axis.startswith("pulse_") or axis == "sensor_suppression":
-                return "shared", axis
-            return "a", axis
-    # vib
-    for vib in (".vib1", "_vib1", ".vibe1", "_vibe1", ".vib2", "_vib2", ".vibe2", "_vibe2"):
-        if low.endswith(vib):
-            return "vib", "vib1" if "1" in vib else "vib2"
-    # main L0 if no kit suffix
-    return "l0", ""
-
-
 def main() -> None:
     # size -> v1 path
     v1_by_size: dict[int, Path] = {}
@@ -159,8 +118,9 @@ def main() -> None:
             d["action_count"] = 0
             d["length_ms"] = 0
             d["axis_scripts"] = {}
+            d["estim_scripts"] = {}
             d["vib_scripts"] = {}
-            d["restim_axis_scripts"] = {"a": {}, "b": {}, "shared": {}}
+            d.pop("restim_axis_scripts", None)
             rounds_cleared += 1
             for pe in d.get("pool_entries") or []:
                 if isinstance(pe, dict):
@@ -171,8 +131,9 @@ def main() -> None:
                     pe["action_count"] = 0
                     pe["length_ms"] = 0
                     pe["axis_scripts"] = {}
+                    pe["estim_scripts"] = {}
                     pe["vib_scripts"] = {}
-                    pe["restim_axis_scripts"] = {"a": {}, "b": {}, "shared": {}}
+                    pe.pop("restim_axis_scripts", None)
 
     JSON_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     print(f"rewrote video_path on {videos_rewritten} nodes; cleared scripts on {rounds_cleared} rounds")

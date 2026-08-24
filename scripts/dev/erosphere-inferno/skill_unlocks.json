@@ -30,9 +30,8 @@
       "unlock_video": "Inferno_C02_S01_Feign_Death.mp4",
       "video_node_id": "unlock_vid_feign",
       "insert_after": "inferno_C02_002",
-      "continue_to": null,
-      "enabled": false,
-      "note": "Canto II not scaffolded yet — enable when C02_002 exists."
+      "continue_to": "inferno_C02_003",
+      "enabled": true
     },
     {
       "item_id": "erosphere_blinding_light",
@@ -41,9 +40,8 @@
       "unlock_video": "Inferno_C02_S02_Blinding_Light.mp4",
       "video_node_id": "unlock_vid_blinding",
       "insert_after": "inferno_C02_004",
-      "continue_to": null,
-      "enabled": false,
-      "note": "Canto II not scaffolded yet."
+      "continue_to": "inferno_C02_005",
+      "enabled": true
     },
     {
       "item_id": "erosphere_time_control",
@@ -51,10 +49,9 @@
       "unlocked_by": "inferno_C02_EP5",
       "unlock_video": "Inferno_C02_S03_Time_Control.mp4",
       "video_node_id": "unlock_vid_time",
-      "insert_after": null,
-      "continue_to": null,
-      "enabled": false,
-      "note": "Canto II EP5 consequences — wire when C02 EP5 subgraph exists."
+      "insert_after": "inferno_C02_EP5_fate",
+      "continue_to": "c02_ep5_cd1",
+      "enabled": true
     }
   ]
 }

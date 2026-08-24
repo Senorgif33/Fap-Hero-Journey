@@ -133,19 +133,3 @@ func test_new_item_cooldown_cutscene() -> void:
 	assert_int(int(cut.get("coins", -1))).is_equal(0)
 	assert_bool(bool(cut.get("is_checkpoint", true))).is_false()
 	assert_bool(cut.has("funscript_path")).is_false()
-
-
-# Legacy round.cooldown_days still exposes via CurrentRound (back-compat path).
-func test_legacy_round_cooldown_days_still_readable() -> void:
-	var g := _g(
-		"gap",
-		{
-			"gap":
-			_n("round", ["session"], {"name": "Legacy Gap", "coins": 0, "cooldown_days": 1}),
-			"session": _n("round", [], {"name": "Next", "coins": 0}),
-		}
-	)
-	GameState.StartJourney(g)
-	assert_str(GameState.CurrentItemType()).is_equal("round")
-	assert_int(int(GameState.CurrentRound().get("cooldown_days", 0))).is_equal(1)
-	assert_bool(GameState.CurrentCooldown().is_empty()).is_true()
