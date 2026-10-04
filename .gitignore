@@ -51,3 +51,26 @@ export_presets.cfg
 bin/*.exe
 bin/ffmpeg.exe
 bin/ffprobe.exe
+
+# Local Godot editor unpack (do not commit the engine into the repo).
+/Godot_v*/
+
+# Local journey installs / pack backups (machine-specific).
+/local/
+
+# Ad-hoc Inferno scaffold helpers kept on disk, not part of the shipped tree.
+/scripts/dev/scaffold_*.py
+/scripts/dev/scaffold-*.ps1
+/scripts/dev/restore_inferno_named_media.py
+
+# Machine-local editor path (Godot Tools).
+.vscode/
+
+# Debug / Restim capture logs.
+*.log
+/debug-*.log
+/restim_tcode*.log
+
+# Local layout reference (keep on disk, do not commit).
+/Erosphere_Inferno_layout.png
+/Erosphere_Inferno_layout.png.import
