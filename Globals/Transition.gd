@@ -109,3 +109,7 @@ func change_scene(path: String) -> void:
 	_overlay.visible = false
 	_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_busy = false
+
+
+func is_busy() -> bool:
+	return _busy

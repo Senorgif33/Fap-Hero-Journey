@@ -654,8 +654,45 @@ static func normalize_effect_round(src: Dictionary) -> Dictionary:
 	}
 
 
+static func normalize_release_band(src: Dictionary) -> Dictionary:
+	# coins / expire_coins are canonical; accept legacy score / expire_score.
+	var coins: int = int(src.get("coins", src.get("score", 0)))
+	var expire_coins: int = int(src.get("expire_coins", src.get("expire_score", 0)))
+	return {
+		"until_ms": maxi(0, int(src.get("until_ms", 0))),
+		"flag": str(src.get("flag", "")).strip_edges(),
+		"jump_to": str(src.get("jump_to", "")).strip_edges(),
+		"coins": coins,
+		"expire_coins": expire_coins,
+		"seek_to_ms": int(src.get("seek_to_ms", -1)),
+	}
+
+
+# Ordered release time-bands for mode "windows". Finite until_ms ascending; until_ms==0 last
+# means through end of round. Empty/invalid entries dropped.
+static func normalize_release_windows(src: Variant) -> Array:
+	var raw: Array = src as Array if src is Array else []
+	var bands: Array = []
+	for item: Variant in raw:
+		if item is Dictionary:
+			bands.append(normalize_release_band(item))
+	bands.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			var ua: int = int(a.get("until_ms", 0))
+			var ub: int = int(b.get("until_ms", 0))
+			# Open-ended (0) sorts last.
+			if ua == 0 and ub != 0:
+				return false
+			if ub == 0 and ua != 0:
+				return true
+			return ua < ub
+	)
+	return bands
+
+
 static func normalize_release_round(src: Dictionary) -> Dictionary:
 	var modes: Array[String] = [
+		"windows",
 		"stamp_flag",
 		"fail_jump",
 		"timed_window",
@@ -676,7 +713,37 @@ static func normalize_release_round(src: Dictionary) -> Dictionary:
 		"release_remove_on_press": bool(src.get("release_remove_on_press", true)),
 		"release_invert": bool(src.get("release_invert", false)),
 		"release_disabled_if_flag": str(src.get("release_disabled_if_flag", "")).strip_edges(),
+		"release_seek_to_ms": int(src.get("release_seek_to_ms", -1)),
+		"release_windows": normalize_release_windows(src.get("release_windows", [])),
 	}
+
+
+# Authoring checks for windows bands. Returns warning strings (empty = ok).
+static func validate_release_windows(bands: Array, full_ms: int = 0) -> Array:
+	var warns: Array = []
+	if bands.is_empty():
+		warns.append("windows mode needs at least one band")
+		return warns
+	var last_until: int = -1
+	for i: int in bands.size():
+		var b: Dictionary = bands[i] as Dictionary
+		var until: int = int(b.get("until_ms", 0))
+		var is_last: bool = i == bands.size() - 1
+		if is_last:
+			if until != 0:
+				warns.append("last band must be open-ended (until_ms == 0)")
+		else:
+			if until <= 0:
+				warns.append("band %d needs until_ms > 0" % (i + 1))
+			elif until <= last_until:
+				warns.append("band %d until_ms must be strictly increasing" % (i + 1))
+			last_until = until
+		var seek: int = int(b.get("seek_to_ms", -1))
+		if seek >= 0 and full_ms > 0 and seek > full_ms:
+			warns.append("band %d seek_to_ms past round end" % (i + 1))
+		if str(b.get("jump_to", "")).strip_edges() != "" and seek >= 0:
+			warns.append("band %d: jump_to wins over seek_to_ms" % (i + 1))
+	return warns
 
 
 # ── Round serialization ──────────────────────────────────────────────────────
@@ -1117,6 +1184,163 @@ static func parse_journey_items(raw: Array) -> Array:
 		if r is Dictionary:
 			out.append(parse_journey_item(r))
 	return out
+
+
+# Journey-level custom events (Vector EVT triggers). Storage: journey.json Events[] +
+# EventsDefinitionsPath. Runtime snake_case; definitions path is informational in v1
+# (Vector loads defs in its GUI — Fap-Hero does not require the file at playback).
+static func coerce_journey_event(event: Dictionary) -> Dictionary:
+	var params_out: Dictionary = {}
+	var raw_params: Variant = event.get("params", {})
+	if raw_params is Dictionary:
+		for k: Variant in raw_params:
+			params_out[str(k)] = raw_params[k]
+	return {
+		"RoundId": str(event.get("round_id", "")),
+		"TimeMs": maxi(0, int(event.get("time_ms", 0))),
+		"Name": str(event.get("name", "")),
+		"Params": params_out,
+	}
+
+
+static func coerce_journey_events(events: Array) -> Array:
+	var out: Array = []
+	for e: Variant in events:
+		if e is Dictionary:
+			out.append(coerce_journey_event(e))
+	return out
+
+
+static func parse_journey_event(raw: Dictionary) -> Dictionary:
+	# Accept PascalCase (disk) or snake_case (already-parsed / builder passthrough).
+	var params: Dictionary = {}
+	var raw_params: Variant = raw.get("Params", raw.get("params", {}))
+	if raw_params is Dictionary:
+		for k: Variant in raw_params:
+			params[str(k)] = raw_params[k]
+	return {
+		"round_id": str(raw.get("RoundId", raw.get("round_id", ""))),
+		"time_ms": maxi(0, int(raw.get("TimeMs", raw.get("time_ms", 0)))),
+		"name": str(raw.get("Name", raw.get("name", ""))),
+		"params": params,
+	}
+
+
+static func parse_journey_events(raw: Array) -> Array:
+	var out: Array = []
+	for r: Variant in raw:
+		if r is Dictionary:
+			out.append(parse_journey_event(r))
+	return out
+
+
+# Index Events[] by round_id for O(1) lookup at round start. Empty list → {}.
+static func index_journey_events(events: Array) -> Dictionary:
+	var by_round: Dictionary = {}
+	for e: Variant in events:
+		if not (e is Dictionary):
+			continue
+		var rid: String = str((e as Dictionary).get("round_id", ""))
+		if not by_round.has(rid):
+			by_round[rid] = []
+		(by_round[rid] as Array).append(e)
+	return by_round
+
+
+# Events for one round, sorted by time_ms ascending (stable for equal times).
+static func events_for_round(events: Array, round_id: String) -> Array:
+	var rid: String = str(round_id)
+	var out: Array = []
+	for e: Variant in events:
+		if e is Dictionary and str((e as Dictionary).get("round_id", "")) == rid:
+			out.append(e)
+	out.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool: return int(a.get("time_ms", 0)) < int(
+			b.get("time_ms", 0)
+		)
+	)
+	return out
+
+
+# Replace all events for `round_id` with `round_events` (runtime snake_case dicts). Other rounds
+# keep their rows. Empty round_events → that round simply has no events (valid).
+static func replace_round_events(events: Array, round_id: String, round_events: Array) -> Array:
+	var rid: String = str(round_id)
+	var out: Array = []
+	for e: Variant in events:
+		if e is Dictionary and str((e as Dictionary).get("round_id", "")) != rid:
+			out.append(e)
+	for e: Variant in round_events:
+		if not (e is Dictionary):
+			continue
+		var row: Dictionary = (e as Dictionary).duplicate(true)
+		row["round_id"] = rid
+		row["time_ms"] = maxi(0, int(row.get("time_ms", 0)))
+		row["name"] = str(row.get("name", ""))
+		if not (row.get("params") is Dictionary):
+			row["params"] = {}
+		out.append(row)
+	return out
+
+
+# Seed a new runtime event from optional definition defaults.
+static func default_journey_event(
+	round_id: String, name: String = "", default_params: Dictionary = {}
+) -> Dictionary:
+	return {
+		"round_id": str(round_id),
+		"time_ms": 0,
+		"name": str(name),
+		"params": default_params.duplicate(true),
+	}
+
+
+# Authoring warnings for one event against a round clock. Empty Array = OK.
+# `round_length_ms` <= 0 skips length checks (clock unknown yet).
+static func validate_journey_event(event: Dictionary, round_length_ms: int = 0) -> Array:
+	var warnings: Array = []
+	var name: String = str(event.get("name", "")).strip_edges()
+	if name.is_empty():
+		warnings.append("Event has no name.")
+	var time_ms: int = maxi(0, int(event.get("time_ms", 0)))
+	var params: Dictionary = event.get("params", {}) as Dictionary
+	var duration_ms: int = maxi(0, int(params.get("duration_ms", 0)))
+	if round_length_ms > 0:
+		if time_ms > round_length_ms:
+			warnings.append(
+				"Start %d ms is past round length (%d ms)." % [time_ms, round_length_ms]
+			)
+		elif duration_ms > 0 and time_ms + duration_ms > round_length_ms:
+			warnings.append(
+				(
+					"Event spans past round end (%d + %d > %d ms)."
+					% [time_ms, duration_ms, round_length_ms]
+				)
+			)
+	return warnings
+
+
+# Warnings across a round's events: per-event issues + duplicate name at the same time.
+static func validate_round_events(events: Array, round_length_ms: int = 0) -> Array:
+	var warnings: Array = []
+	var seen: Dictionary = {}  # "time|name" → true
+	for e: Variant in events:
+		if not (e is Dictionary):
+			continue
+		var ev: Dictionary = e
+		for w: Variant in validate_journey_event(ev, round_length_ms):
+			warnings.append(w)
+		var key: String = "%d|%s" % [int(ev.get("time_ms", 0)), str(ev.get("name", ""))]
+		if seen.has(key):
+			warnings.append(
+				(
+					"Duplicate '%s' at %d ms."
+					% [str(ev.get("name", "")), int(ev.get("time_ms", 0))]
+				)
+			)
+		else:
+			seen[key] = true
+	return warnings
 
 
 # Override script bundle: runtime {main, axes{name:path}, vibes{ch(int):path}} ⇄ journey.json

@@ -372,6 +372,53 @@ func _on_card_input(event: InputEvent, card: Control, use_lbl: Label, slot_idx: 
 			_activate_charge_card(card, use_lbl, slot_idx)
 
 
+# Pay-per-use unlocked modifier: spend coins, keep the unlock, activate without a charge slot.
+func _activate_unlocked_card(card: Control, use_lbl: Label, id: String) -> void:
+	if _activating:
+		return
+	var data: Dictionary = InventoryService.GetItemData(id)
+	if data.is_empty():
+		return
+	var price: int = int(data.get("price", 0))
+	if not CoinService.CanAfford(price):
+		return
+	if _held_by_boss(data):
+		_refuse_card(card)
+		return
+	var host: Node = _inventory_host()
+	if host != null and host.has_method("inventory_activation_gate"):
+		var gate: String = host.inventory_activation_gate(data)
+		if gate == "disabled":
+			return
+		if gate != "":
+			if host.has_method("_show_save_toast"):
+				host._show_save_toast(gate)
+			elif host.has_method("_show_toast"):
+				host._show_toast(gate)
+			return
+	_activating = true
+	if str(data.get("sound", "")) == "":
+		UISound.item_use()
+	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	use_lbl.text = "✓ ACTIVATED"
+	use_lbl.add_theme_color_override("font_color", UITheme.TOXIC_GREEN)
+
+	var tw: Tween = create_tween()
+	tw.tween_property(card, "modulate", Color(1.8, 1.8, 1.8, 1.0), 0.09)
+	tw.tween_property(card, "modulate:a", 0.0, 0.24).set_ease(Tween.EASE_IN)
+	(
+		tw
+		. parallel()
+		. tween_property(card, "position:x", card.position.x + 90.0, 0.24)
+		. set_ease(Tween.EASE_IN)
+		. set_trans(Tween.TRANS_CUBIC)
+	)
+	var dur_override: int = -1
+	if host != null and host.has_method("inventory_duration_override_ms"):
+		dur_override = int(host.inventory_duration_override_ms(data))
+	tw.tween_callback(func() -> void: InventoryService.ActivateUnlocked(id, dur_override))
+
+
 # Plays the activation feedback — a bright flash, an "ACTIVATED" label swap, and
 # a slide-out — then actually activates the item. A panel-wide guard blocks any
 # further card clicks until the inventory list rebuilds.

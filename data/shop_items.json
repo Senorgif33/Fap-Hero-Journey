@@ -111,7 +111,7 @@
 	{
 		"id":           "soft_touch",
 		"name":         "Soft Touch",
-		"description":  "Softens intensity for 30 seconds (linear stroke scale).",
+		"description":  "Softens intensity for 30 seconds (Restim volume / Vector ramp scale).",
 		"category":     "modifier",
 		"price":        35,
 		"duration_ms":  30000,

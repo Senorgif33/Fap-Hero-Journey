@@ -316,6 +316,9 @@ var _test_seed_coins: int = 0
 var _test_seed_flags: Array = []
 var _test_seed_items: Array = []  # item ids to grant before the first node loads
 var _test_seed_counters: Dictionary = {}  # counter name -> value to pre-set
+# Test-mode progress scrub: taller invisible hit target over the thin progress bar.
+var _test_scrub_hit: Control = null
+var _test_scrubbing: bool = false
 # Set once this run's outcome has been logged to the scoreboard (on completion)
 # or when leaving via Save & Quit (a resume, not an abandon) — so the menu exit
 # doesn't also record an abandoned run.
@@ -335,6 +338,7 @@ var _release_cfg: Dictionary = {}
 var _release_pressed: bool = false  # set when FINISH/R pressed (for timed_window / punish_polarity checks)
 var _release_deadline_resolved: bool = false  # timed_window deadline fired → no longer penalize
 var _release_jumping: bool = false  # fail_jump in progress (guards re-entry)
+var _release_expire_fired: Dictionary = {}  # windows: band index → true after expire_score awarded
 
 
 func _ready() -> void:
@@ -391,6 +395,10 @@ func _ready() -> void:
 	# since they're journey definitions, not run-state. Before Reset so a fresh run's registry is
 	# populated when the first grant happens.
 	InventoryService.LoadJourneyItems(GameState.Journey.get("items", []))
+	# Journey-level Vector EVT events — indexed by round_id for O(1) bind at round start.
+	_journey_events_by_round = JourneyData.index_journey_events(
+		GameState.Journey.get("events", [])
+	)
 
 	var is_resuming: bool = bool(GameState.get_meta("_resuming", false))
 	# A run resumed from a checkpoint save should skip that checkpoint's banner and go straight
@@ -424,6 +432,7 @@ func _ready() -> void:
 			GameState.SeedCounters(_test_seed_counters)
 	_build_round_timer()
 	_refresh_coin_label(true)
+	FunscriptPlayer.ResetVectorSessionSitting()
 	# Handy WiFi only: sync the device ONCE before the first round (behind a brief overlay) so round 1 isn't
 	# the one that eats the ~9-call handshake, and so you can see + feel it's ready before play. No-op for
 	# every other stroker, in test mode, or when already connected.
@@ -432,6 +441,7 @@ func _ready() -> void:
 	_show_hud()
 	if _test_mode:
 		_show_test_banner()
+		_setup_test_progress_scrub()
 
 	# Re-fit the video whenever the logical viewport changes. This fires on
 	# window resize, fullscreen toggle, resolution change, AND UI-scale
@@ -491,6 +501,7 @@ func _process(delta: float) -> void:
 				FunscriptPlayer.SyncTo(_video.stream_position)
 			_handy_feed()
 		_tick_round_timeline(delta)
+		_tick_journey_events()
 		_tick_release_deadline()
 	_apply_pause_penalty(delta)
 	_apply_pause_regen(delta)
@@ -644,6 +655,7 @@ func _record_trail_node() -> void:
 
 
 func _show_storyboard_screen(sb_data: Dictionary) -> void:
+	_remove_finish_button()
 	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
@@ -695,6 +707,7 @@ func _on_storyboard_completed(coins: int) -> void:
 
 
 func _show_shop_screen(shop_data: Dictionary) -> void:
+	_remove_finish_button()
 	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
@@ -730,6 +743,7 @@ func _on_shop_closed() -> void:
 
 
 func _show_fork_screen(fork_data: Dictionary) -> void:
+	_remove_finish_button()
 	_is_overlay_open = true
 	_video.paused = true
 	FunscriptPlayer.Pause()
@@ -1002,9 +1016,8 @@ func _begin_round(round: Dictionary, cover: Control = null) -> void:
 	_update_round_timer(true)  # this round's full length, before the first frame ticks
 
 	# Auto-detect sibling scripts sitting next to the main funscript on disk — e.g. a per-round
-	# folder holding <name>.beta / <name>.carrier_frequency next to <name>.funscript. This lets
-	# EXISTING journeys (whose journey.json has empty AxisScripts) drive restim without a
-	# re-import. Explicit journey.json entries always win over an auto-detected sibling.
+	# folder holding <name>.surge next to <name>.funscript. This lets EXISTING journeys (whose
+	# journey.json has empty AxisScripts) drive secondary axes without a re-import.
 	var axis_scripts: Dictionary = (round.get("axis_scripts", {}) as Dictionary).duplicate()
 	var estim_scripts: Dictionary = (round.get("estim_scripts", {}) as Dictionary).duplicate()
 	if fs_path != "":
@@ -1018,8 +1031,8 @@ func _begin_round(round: Dictionary, cover: Control = null) -> void:
 			if not estim_scripts.has(eax):
 				estim_scripts[eax] = sib["estim"][eax]
 
-	# Load secondary axis scripts (serial + restim motion axes). Clear first so stale axes
-	# from a prior round are never replayed.
+	# Load secondary axis scripts (serial + restim motion axes).
+	# are never replayed.
 	FunscriptPlayer.ClearAxisScripts()
 	for axis: String in axis_scripts:
 		var ax_path: String = axis_scripts[axis]
@@ -1037,13 +1050,24 @@ func _begin_round(round: Dictionary, cover: Control = null) -> void:
 			var channel: int = 0 if ch_key == "vib1" else 1
 			FunscriptPlayer.LoadVibScript(channel, vib_path)
 
-	# Load restim (E-Stim Full) parameter scripts (restim output only; ignored when
-	# restim isn't connected). Clear first so a prior round's params aren't replayed.
+	# Load restim (E-Stim Full) parameter scripts when Restim is the active e-stim path.
 	FunscriptPlayer.ClearRestimScripts()
 	for eax: String in estim_scripts:
 		var estim_path: String = estim_scripts[eax]
 		if estim_path != "":
 			FunscriptPlayer.LoadRestimScript(eax, estim_path)
+
+	# Vector session timeline — update ramp band for this round (no sitting reset).
+	var level_duration_ms: int = int(round.get("level_duration_ms", 0))
+	if level_duration_ms <= 0:
+		level_duration_ms = int(round.get("length_ms", 0))
+	FunscriptPlayer.ConfigureVectorSessionRound(
+		GameState.RoundNumber,
+		GameState.TotalRounds(),
+		level_duration_ms / 1000.0,
+		float(round.get("stim_ramp_ms", 0)),
+		float(round.get("stim_ceiling", 0)),
+	)
 
 	# Boss / effect setup must run before _load_video → FunscriptPlayer.Play() so
 	# the forced modifier is already active on the first dispatched stroke. Each
@@ -1052,6 +1076,7 @@ func _begin_round(round: Dictionary, cover: Control = null) -> void:
 	# The authored encounter, if this round has one. Adopted before the video loads; the scheduler
 	# builds itself once the stream length is known (see _tick_round_timeline).
 	_load_round_timeline(round)
+	_load_journey_events()
 	if _is_boss_round:
 		_enter_boss_mode(round)
 	elif _is_effect_round:
@@ -1290,6 +1315,7 @@ func _skip_failed_round() -> void:
 # written by _arm_checkpoint_save on arrival, so the button is about LEAVING, not about saving — a
 # player who closes the window instead keeps the same resume point. Dispatched from _load_current_item.
 func _show_checkpoint_gate() -> void:
+	_remove_finish_button()
 	var data: Dictionary = GameState.CurrentItem().get("data", {})
 	_is_overlay_open = true  # suppress gameplay hotkeys while the banner is up
 	_halt_playback_for_gate()  # freeze any leftover playback so the score can't tick
@@ -1393,6 +1419,7 @@ func _advance_from_checkpoint() -> void:
 # Calendar lockout node — stamp cooldown_until and show Force Save & Quit.
 # No video / funscript / score. Save&Quit and Dev Continue both Advance past this node.
 func _load_current_cooldown() -> void:
+	_remove_finish_button()
 	var cd: Dictionary = GameState.CurrentCooldown().duplicate(true)
 	if cd.is_empty():
 		push_error("GameLoop: GameState has no current cooldown — returning to menu")
@@ -1523,6 +1550,7 @@ func _on_shave_cooldown_requested(hours: int) -> void:
 
 # Watch-then-advance video (EP / Fate / Credits / unlock). No FunscriptPlayer or ScoreService.
 func _load_current_cutscene() -> void:
+	_remove_finish_button()
 	var cut: Dictionary = GameState.CurrentCutscene().duplicate(true)
 	if cut.is_empty():
 		push_error("GameLoop: GameState has no current cutscene — returning to menu")
@@ -2266,6 +2294,9 @@ const _FINISH_IDLE_TEXT: String = "✔ HOLD TO FINISH"
 # too — but stays clickable at rest so a hold started as it fades isn't broken.
 func _show_finish_button() -> void:
 	_remove_finish_button()
+	# Rounds only — cutscenes / overlays must never inherit a leftover FINISH affordance.
+	if GameState.CurrentItemType() != "round" or _cutscene_playing:
+		return
 	# Show FINISH when journey-level allow_finish is enabled OR round has release_enabled.
 	var release_available: bool = not _release_cfg.is_empty() and ReleaseLogic.is_available(_release_cfg, GameState.HasFlag)
 	if (not _allow_finish and not release_available) or _finishing:
@@ -2352,12 +2383,21 @@ func _set_finish_fill(t: float) -> void:
 func _finish_journey() -> void:
 	if _finishing:
 		return
-	# If this round has release logic active, dispatch it first before finishing the journey.
+	# Mid-round Release: apply mode outcomes and stay in-round when the mode continues.
+	# Session finish (aftercare / end screen) only runs when release is not what kept us here.
 	if not _release_cfg.is_empty() and ReleaseLogic.is_available(_release_cfg, GameState.HasFlag):
 		_on_release_pressed()
-		# If the release action didn't jump/restart (which would reload), proceed with journey finish.
 		if _release_jumping:
-			return  # fail_jump took over; don't also finish
+			return  # fail_jump / band jump took over
+		var action: String = ReleaseLogic.press_action(_release_cfg)
+		if action == ReleaseLogic.ACTION_RESTART:
+			return  # restart reloads the round
+		if ReleaseLogic.keeps_playing(action):
+			_cancel_finish_hold()
+			_set_finish_fill(0.0)
+			if bool(_release_cfg.get("release_remove_on_press", true)):
+				_remove_finish_button()
+			return
 	_finishing = true
 	_cancel_finish_hold()
 	_remove_finish_button()
@@ -2366,6 +2406,7 @@ func _finish_journey() -> void:
 	# Same flag as running out of attempts raises: losing is losing, however it happened.
 	_apply_outcome_flag("lost_flag")
 	_finish_round_timeline()  # this path never reaches _on_round_ended, so the encounter is dropped here
+	_finish_journey_events()
 	_video.stop()
 	_end_timer.stop()
 	FunscriptPlayer.Stop()
@@ -2388,20 +2429,24 @@ func _setup_release(round: Dictionary) -> void:
 	_release_pressed = false
 	_release_deadline_resolved = false
 	_release_jumping = false
+	_release_expire_fired = {}
 
 
-# Executes the release action based on the current mode. Called when FINISH is confirmed and release is active.
+# Executes the release action based on the current mode. Called when FINISH/R is confirmed
+# and release is active. Continuing modes may seek; jump/restart leave the round.
 func _on_release_pressed() -> void:
 	if _release_cfg.is_empty():
 		return
 	_release_pressed = true
 	var action: String = ReleaseLogic.press_action(_release_cfg)
 	match action:
+		ReleaseLogic.ACTION_WINDOWS:
+			_apply_release_windows_press()
 		ReleaseLogic.ACTION_SET_FLAG:
 			var flag: String = str(_release_cfg.get("release_flag", ""))
 			if flag != "":
 				GameState.SetFlag(flag)
-			# Continue the round (no jump/restart)
+			_maybe_release_round_seek(action)
 		ReleaseLogic.ACTION_FAIL_JUMP:
 			_release_fail_jump()
 		ReleaseLogic.ACTION_STAMP:
@@ -2411,23 +2456,59 @@ func _on_release_pressed() -> void:
 			_release_restart_round()
 		ReleaseLogic.ACTION_SUCCESS_STAMP:
 			# punish_polarity must-release success: stamp flag and continue
-			var flag: String = str(_release_cfg.get("release_flag", ""))
-			if flag != "":
-				GameState.SetFlag(flag)
+			var flag2: String = str(_release_cfg.get("release_flag", ""))
+			if flag2 != "":
+				GameState.SetFlag(flag2)
+			_maybe_release_round_seek(action)
 		ReleaseLogic.ACTION_NONE:
 			pass
 
 
-# Timed_window deadline tick: awards score when the deadline fires based on whether the player pressed.
-func _tick_release_deadline() -> void:
-	if _release_cfg.is_empty() or _release_deadline_resolved:
+func _apply_release_windows_press() -> void:
+	var t_ms: int = int(_video.stream_position * 1000.0) if _video != null else 0
+	var band: Dictionary = ReleaseLogic.resolve_window(_release_cfg, t_ms)
+	if band.is_empty():
+		push_warning("GameLoop: release windows press with empty/invalid bands — no-op")
 		return
-	if str(_release_cfg.get("release_mode", "")) != "timed_window":
+	var flag: String = str(band.get("flag", ""))
+	if flag != "":
+		GameState.SetFlag(flag)
+	var coins_delta: int = int(band.get("coins", band.get("score", 0)))
+	if coins_delta != 0:
+		_grant_coins(coins_delta)
+	var jump_to: String = str(band.get("jump_to", "")).strip_edges()
+	if jump_to != "":
+		_release_fail_jump_to(jump_to)
+		return
+	var seek_ms: int = int(band.get("seek_to_ms", -1))
+	if seek_ms >= 0:
+		_jump_playhead_to(seek_ms)
+
+
+func _maybe_release_round_seek(action: String) -> void:
+	if not ReleaseLogic.applies_round_seek(_release_cfg, action):
+		return
+	_jump_playhead_to(int(_release_cfg.get("release_seek_to_ms", -1)))
+
+
+# Timed_window deadline + windows "award coins if no release" tick.
+func _tick_release_deadline() -> void:
+	if _release_cfg.is_empty():
+		return
+	var elapsed_ms: int = int(_video.stream_position * 1000.0)
+	var mode: String = str(_release_cfg.get("release_mode", ""))
+	if mode == "windows":
+		var delta: int = ReleaseLogic.expire_coins_due(
+			_release_cfg, elapsed_ms, _release_pressed, _release_expire_fired
+		)
+		if delta != 0:
+			_grant_coins(delta)
+		return
+	if _release_deadline_resolved or mode != "timed_window":
 		return
 	var deadline_ms: int = int(_release_cfg.get("release_deadline_ms", 0))
 	if deadline_ms <= 0:
 		return
-	var elapsed_ms: int = int(_video.stream_position * 1000.0)
 	if elapsed_ms >= deadline_ms:
 		_release_deadline_resolved = true
 		var score_delta: int = ReleaseLogic.deadline_score(_release_cfg, _release_pressed)
@@ -2437,16 +2518,20 @@ func _tick_release_deadline() -> void:
 
 # Release fail_jump: stop playback and jump to the designated node.
 func _release_fail_jump() -> void:
+	_release_fail_jump_to(str(_release_cfg.get("release_jump_to", "")))
+
+
+func _release_fail_jump_to(jump_to: String) -> void:
 	if _release_jumping:
 		return
 	_release_jumping = true
+	_remove_finish_button()
 	_video.stop()
 	_end_timer.stop()
 	FunscriptPlayer.Stop()
 	_handy_stop()
 	ScoreService.DiscardRound()
 	_exit_boss_mode()
-	var jump_to: String = str(_release_cfg.get("release_jump_to", ""))
 	if jump_to == "" or not GameState.JumpToNode(jump_to):
 		push_warning("GameLoop: release fail_jump target invalid — advancing")
 		GameState.Advance()
@@ -2474,10 +2559,14 @@ func _release_restart_round() -> void:
 
 # Exit-to-menu hold-to-confirm. Begins on Esc-key-down or MENU-button-down; a centered overlay fills over
 # EXIT_HOLD_SECS and leaves to the menu at completion. Releasing (key / button up) cancels before then.
+# While the hold runs the HUD stays visible so MenuBtn doesn't synthesize button_up from a hide.
 func _begin_exit_hold() -> void:
 	if _exiting:
 		return
 	_cancel_exit_hold()
+	_show_hud()
+	_hide_timer.stop()  # after _show_hud — keep MenuBtn alive for the full hold
+	_set_cursor_hidden(false)
 	_show_exit_hold_overlay()
 	_exit_hold_tween = create_tween()
 	_exit_hold_tween.tween_method(_set_exit_hold_fill, 0.0, 1.0, EXIT_HOLD_SECS)
@@ -2485,6 +2574,8 @@ func _begin_exit_hold() -> void:
 
 
 func _cancel_exit_hold() -> void:
+	if _exiting:
+		return  # confirm already won — ignore late MENU button_up / Esc release
 	if _exit_hold_tween != null and _exit_hold_tween.is_valid():
 		_exit_hold_tween.kill()
 	_exit_hold_tween = null
@@ -2494,9 +2585,14 @@ func _cancel_exit_hold() -> void:
 func _confirm_exit() -> void:
 	if _exiting:
 		return
-	_exiting = true
 	_exit_hold_tween = null
 	_hide_exit_hold_overlay()
+	# Latch only after Transition can accept — a busy inbound fade must not
+	# permanently block later MENU holds.
+	if Transition.is_busy():
+		_show_toast("…  TRY EXIT AGAIN")
+		return
+	_exiting = true
 	_go_to_menu()
 
 
@@ -2919,7 +3015,7 @@ func _find_video(folder: String) -> String:
 	return ""
 
 
-func _load_video(path: String) -> void:
+func _load_video(path: String, with_funscript: bool = true) -> void:
 	_video.position = Vector2.ZERO
 	_video.size = get_viewport_rect().size
 	if path == "":
@@ -2934,7 +3030,8 @@ func _load_video(path: String) -> void:
 		if stream and stream is VideoStream:
 			_video.stream = stream as VideoStream
 			_video.play()
-			FunscriptPlayer.Play()
+			if with_funscript:
+				FunscriptPlayer.Play()
 			return
 		push_warning("GameLoop: could not load .ogv at %s" % path)
 		_start_no_video_fallback()
@@ -2965,9 +3062,17 @@ func _load_video(path: String) -> void:
 	if not _video.is_playing():
 		push_warning("GameLoop: video failed to open '%s' — funscript-only fallback." % abs_path)
 		_video.stream = null
-		_start_no_video_fallback()
+		if with_funscript:
+			_start_no_video_fallback()
+		elif _cutscene_playing:
+			# Cutscene with a broken/missing file — advance rather than hang.
+			await _on_cutscene_ended()
 		return
-	FunscriptPlayer.Play()
+	if with_funscript:
+		FunscriptPlayer.Play()
+	elif _cutscene_playing and _active_round_length_ms <= 0:
+		# Prefer video.finished; length_ms is optional UI metadata only.
+		pass
 
 
 func _start_no_video_fallback() -> void:
@@ -2990,6 +3095,7 @@ func _start_no_video_fallback() -> void:
 func _on_round_ended(skipped: bool = false) -> void:
 	# video.finished / _end_timer.timeout can fire for a cutscene too — dispatch and return early.
 	if GameState.CurrentItemType() == "cutscene" or _cutscene_playing:
+		_remove_finish_button()
 		await _on_cutscene_ended()
 		return
 	# The defeat moment AWAITS its hold while the round plays on behind it, so a FINISH pressed near the
@@ -3015,6 +3121,7 @@ func _on_round_ended(skipped: bool = false) -> void:
 	_remove_warmup_skip_button()
 	_remove_finish_button()  # FINISH is a during-round affordance; it doesn't carry into overlays
 	_finish_round_timeline()  # drop anything the authored encounter still holds
+	_finish_journey_events()
 	_handy_stop()  # the device would otherwise keep playing into the transition
 	# Extract the name here in GDScript where Dictionary access is reliable,
 	# then pass it explicitly so C# never needs to look up the key itself.
@@ -3034,6 +3141,13 @@ func _on_round_ended(skipped: bool = false) -> void:
 	GameState.set_meta("_round_names", _names)
 	# A skipped round banks nothing: the partial score is discarded rather than added, so
 	# LastRoundScore still reports the last round actually played (score-based forks read it).
+	# Windows open-ended "award coins if no release" must land before EndRound.
+	if not skipped and not _release_pressed:
+		var end_expire: int = ReleaseLogic.expire_coins_at_round_end(
+			_release_cfg, _release_pressed, _release_expire_fired
+		)
+		if end_expire != 0:
+			_grant_coins(end_expire)
 	if skipped:
 		ScoreService.DiscardRound()
 	else:
@@ -3527,7 +3641,7 @@ func _exit_test_to_builder() -> void:
 # Top-center "TEST MODE" indicator shown for the duration of a test play, so the
 # author always knows this is a preview and how to leave it.
 func _show_test_banner() -> void:
-	var text: String = "▶  TEST MODE  —  →  SKIP ROUND (KEEP REWARDS)  ·  ESC TO EXIT"
+	var text: String = "▶  TEST MODE  —  DRAG PROGRESS TO SEEK  ·  →  SKIP ROUND  ·  ESC TO EXIT"
 	if _test_seed_score > 0 or _test_seed_coins > 0:
 		text += "    (SEED  %d PTS / ♦ %d)" % [_test_seed_score, _test_seed_coins]
 	var banner: Label = Label.new()
@@ -3540,6 +3654,63 @@ func _show_test_banner() -> void:
 	banner.offset_top = 12
 	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(banner)
+
+
+# Taller hit target over the thin progress bar so test scrubbing is usable.
+func _setup_test_progress_scrub() -> void:
+	if is_instance_valid(_test_scrub_hit):
+		return
+	var hit: Control = Control.new()
+	hit.name = "TestProgressScrub"
+	hit.anchor_left = 0.1
+	hit.anchor_right = 0.9
+	hit.anchor_top = 1.0
+	hit.anchor_bottom = 1.0
+	hit.offset_left = 0
+	hit.offset_right = 0
+	hit.offset_top = -28
+	hit.offset_bottom = 0
+	hit.mouse_filter = Control.MOUSE_FILTER_STOP
+	hit.mouse_default_cursor_shape = Control.CURSOR_HSIZE
+	hit.gui_input.connect(_on_test_scrub_gui_input)
+	# Above the progress bar visually for hits; bar still draws the fill.
+	_hud.add_child(hit)
+	_test_scrub_hit = hit
+
+
+func _on_test_scrub_gui_input(event: InputEvent) -> void:
+	if not _test_mode:
+		return
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index != MOUSE_BUTTON_LEFT:
+			return
+		if mb.pressed:
+			_test_scrubbing = true
+			_seek_from_scrub_x(mb.position.x)
+		else:
+			_test_scrubbing = false
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseMotion and _test_scrubbing:
+		_seek_from_scrub_x((event as InputEventMouseMotion).position.x)
+		get_viewport().set_input_as_handled()
+
+
+func _seek_from_scrub_x(local_x: float) -> void:
+	if _video == null or _video.stream == null:
+		return
+	var len_sec: float = _video.get_stream_length()
+	if len_sec <= 0.0:
+		return
+	var width: float = _test_scrub_hit.size.x if is_instance_valid(_test_scrub_hit) else 1.0
+	if width <= 1.0:
+		return
+	var frac: float = clampf(local_x / width, 0.0, 1.0)
+	# Leave a tiny tail so seeking to the end doesn't instantly finish the round.
+	var target_ms: int = clampi(int(frac * len_sec * 1000.0), 0, maxi(0, int(len_sec * 1000.0) - 250))
+	_jump_playhead_to(target_ms, true)
+	_progress.value = frac
+	_update_round_timer()
 
 
 # ---------------------------------------------------------------------------
@@ -3681,6 +3852,7 @@ func _dev_skip_node() -> void:
 		_show_save_toast("DEV  NOT IN A ROUND")
 		return
 	_show_save_toast("DEV  SKIP NODE")
+	_remove_finish_button()
 	_video.stop()
 	_end_timer.stop()
 	FunscriptPlayer.Stop()
@@ -3841,6 +4013,11 @@ func _show_pop(title: String, detail: String, tail: String, accent: Color) -> vo
 
 # Brief auto-dismissing notification used after the save_now item fires. Keeps
 # the player in the round instead of pulling them into a modal.
+# Alias kept for inventory / cooldown call sites that still use the old name.
+func _show_save_toast(text: String, hold: float = 1.6) -> void:
+	_show_toast(text, hold)
+
+
 func _show_toast(text: String, hold: float = 1.6) -> void:
 	var toast: PanelContainer = PanelContainer.new()
 	toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -4212,6 +4389,9 @@ var _timeline_data: Dictionary = {}
 # Built lazily on the first frame the video's length is known — end-anchored events cannot resolve
 # without it. Null while there is nothing to drive.
 var _timeline_scheduler: RoundTimelineScheduler = null
+# Journey Events[] → Vector EVT (early-fire by video position − lookahead).
+var _event_scheduler: JourneyEventScheduler = null
+var _journey_events_by_round: Dictionary = {}  # round_id → Array of runtime events
 
 # Presentation for the encounter, created on demand and torn down with the round.
 var _cue_layer: BossCueLayer = null
@@ -4476,16 +4656,18 @@ func _jump_after_win() -> void:
 	_jump_playhead_to(target)
 
 
-# Moves the round's playhead FORWARD, taking the device and the scheduler with it. Shared by the win
-# jump and by a region whose rule failed, because both are the same move for different reasons.
+# Moves the round's playhead, taking the device and the scheduler with it. Shared by the win
+# jump, region fail jumps, and test-mode progress scrub.
 #
-# Forward only. A backward jump would re-fire a stretch the encounter has already played and re-anchor
-# the device against a clip it has passed — which is why the fight loop replays whole ROUNDS (§13.2).
-func _jump_playhead_to(target: int) -> void:
+# Live play is forward-only: a backward jump would re-anchor the device against a clip it has
+# passed — which is why the fight loop replays whole ROUNDS (§13.2). Test scrub may rewind.
+func _jump_playhead_to(target: int, allow_rewind: bool = false) -> void:
 	if _video == null or _video.stream == null:
 		return
 	var now: int = int(_video.stream_position * 1000.0)
-	if target <= now:
+	if target == now:
+		return
+	if target < now and not allow_rewind:
 		return
 	# The VIDEO moves LAST, and that order is load-bearing.
 	#
@@ -4501,8 +4683,16 @@ func _jump_playhead_to(target: int) -> void:
 		# seek(), not tick(): everything skipped over counts as already past rather than firing in one
 		# burst on the far side of the jump.
 		_apply_timeline_decisions(_timeline_scheduler.seek(target, _round_player_state()))
+	# Journey EVT: catch-up on forward seek; rewind rearms future events without re-firing past ones.
+	if _event_scheduler != null and VectorService.VectorConnected:
+		_event_scheduler.set_lookahead_ms(SettingsService.get_vector_lookahead_ms())
+		for e: Dictionary in _event_scheduler.tick(target):
+			if target > now:
+				VectorService.SendEvt(str(e.get("name", "")), e.get("params", {}) as Dictionary)
 	HandyService.seek(target)
 	_video.stream_position = target / 1000.0
+	if not _cutscene_playing:
+		FunscriptPlayer.SyncTo(_video.stream_position)
 
 
 # Clears the fight down to a standing start. Safe to call before the round's timeline is known, which is
@@ -5017,6 +5207,39 @@ func _finish_round_timeline() -> void:
 	_disable_hp_bar()
 
 
+# ── Journey Events → Vector EVT ───────────────────────────────────────────────
+
+
+func _load_journey_events() -> void:
+	_event_scheduler = null
+	var round_id: String = GameState.CurrentNodeId()
+	var events: Array = _journey_events_by_round.get(round_id, []) as Array
+	if events.is_empty():
+		return
+	_event_scheduler = JourneyEventScheduler.new()
+	_event_scheduler.load_events(events, SettingsService.get_vector_lookahead_ms())
+
+
+func _tick_journey_events() -> void:
+	if _event_scheduler == null or _event_scheduler.is_idle():
+		return
+	# Live lookahead so Options tweaks apply mid-round; skip send when Vector is down
+	# (do not advance the scheduler — reconnect can catch up).
+	if not VectorService.VectorConnected:
+		return
+	_event_scheduler.set_lookahead_ms(SettingsService.get_vector_lookahead_ms())
+	var due: Array = _event_scheduler.tick(int(_video.stream_position * 1000.0))
+	for e: Dictionary in due:
+		var params: Dictionary = e.get("params", {}) as Dictionary
+		VectorService.SendEvt(str(e.get("name", "")), params)
+
+
+func _finish_journey_events() -> void:
+	if _event_scheduler != null:
+		_event_scheduler.clear()
+	_event_scheduler = null
+
+
 # ---------------------------------------------------------------------------
 # Pause muffle — "stepping out of the room"
 # ---------------------------------------------------------------------------
@@ -5147,10 +5370,20 @@ func _show_hud(fade: bool = false) -> void:
 		create_tween().tween_property(_hud, "modulate:a", 1.0, 0.3)
 	else:
 		_hud.modulate = Color(1, 1, 1, 1)
-	_hide_timer.start(SettingsService.get_hud_hide_delay())
+	# Don't arm the idle-hide timer while MENU/Esc exit-hold is filling — _input
+	# calls _show_hud on the same button_down that started the hold, which used
+	# to restart the timer and synthesize button_up when the HUD hid.
+	if _exit_hold_tween != null and _exit_hold_tween.is_valid():
+		_hide_timer.stop()
+	else:
+		_hide_timer.start(SettingsService.get_hud_hide_delay())
 
 
 func _on_hide_timer_timeout() -> void:
+	# Never hide the HUD while MENU/Esc exit-hold is filling — visibility flip
+	# synthesizes button_up on MenuBtn and cancels the hold.
+	if _exit_hold_tween != null and _exit_hold_tween.is_valid():
+		return
 	_hud.visible = false
 	_fade_warmup_skip_button(false)
 	_fade_finish_button(false)

@@ -1,0 +1,41 @@
+# Minimal event_definitions.yml fixture for EventDefinitions parser tests.
+normalization:
+  volume:
+    max: 1.0
+
+groups:
+  - name: "General"
+    prefix: ""
+
+definitions:
+  edge:
+    default_params:
+      duration_ms: 15000
+      buzz_freq: 10
+      buzz_intensity: 0.07
+      volume_boost: 0.15
+      ramp_up_ms: 500
+    steps:
+      - operation: apply_modulation
+        axis: volume
+        params:
+          waveform: sin
+          duration_ms: $duration_ms
+  fast:
+    default_params:
+      duration_ms: 15000
+      volume_boost: 0.03
+      ramp_up_ms: 2500
+    steps:
+      - operation: apply_linear_change
+        axis: volume
+        params:
+          start_value: 0
+          end_value: 1
+          duration_ms: $duration_ms
+  cum:
+    default_params:
+      duration_ms: 15000
+      volume_boost: 0.2
+      enabled: true
+    steps: []

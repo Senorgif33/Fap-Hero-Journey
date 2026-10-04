@@ -30,18 +30,10 @@ public partial class RestimService : Node
     public const string DefaultPath = "/tcode";
 
     private const int ConnectTimeoutMs = 8000;
-    // Bounded so a stalled socket can't grow the queue without bound; oldest frames
-    // are dropped under backpressure (a skipped realtime update is harmless).
     private const int SendQueueCapacity = 256;
 
-    // ── E-Stim Full axis map (from MultiFunPlayer.config.json) ──────────────────
-    // Primary stroke → restim Alpha (position).
     public const string StrokeAxis = "L0";
 
-    // Game secondary T-code axis (as keyed in FunscriptPlayer._axes) → restim axis.
-    //   L1 surge → L1 (Beta) · R0 twist → C0 (carrier) · R2 pitch → P0 (pulse freq)
-    //   L2 sway  → V1 (vib1 freq) · R1 roll → V2 (vib1 strength)
-    // (surge maps to L1 only — P1/pulse-width is a manual-only axis by design.)
     public static readonly System.Collections.Generic.Dictionary<string, string> MotionAxisMap =
         new System.Collections.Generic.Dictionary<string, string>
         {
@@ -52,9 +44,6 @@ public partial class RestimService : Node
             { "R1", "V2" },
         };
 
-    // All 18 "E-Stim Full" axes, in a stable display/stream order. The first six are
-    // the motion-capable axes (driven live by funscripts when present, else by their
-    // manual value); the rest are manual-only.
     public static readonly string[] AllAxes =
     {
         "L0", "L1", "C0", "P0", "V1", "V2",
@@ -65,8 +54,6 @@ public partial class RestimService : Node
     private CancellationTokenSource _cts;
     private Channel<string> _sendChannel;
 
-    // Open state. Reads are lock-free; _ws is only replaced under the connect/disconnect flow.
-    // Named RestimConnected (not Connected) to avoid clashing with the generated Connected signal.
     public bool RestimConnected => _ws != null && _ws.State == WebSocketState.Open;
 
     public override void _Ready()
@@ -79,8 +66,6 @@ public partial class RestimService : Node
         Connect(BuildAddress(server, path));
     }
 
-    // Build the full ws:// URI from a server ("ws://host:port") and a path ("/tcode").
-    // Kept here so callers (Options) and defaults agree on how the two fields combine.
     public static string BuildAddress(string server, string path)
     {
         server = (server ?? "").Trim().TrimEnd('/');
@@ -92,7 +77,6 @@ public partial class RestimService : Node
 
     public async void Connect(string address)
     {
-        // Tear down any previous socket first so a retry starts clean.
         Disconnect();
 
         var ws = new ClientWebSocket();
@@ -124,12 +108,11 @@ public partial class RestimService : Node
             _ = Task.Run(() => SendLoop(_ws, _sendChannel, _cts.Token));
             _ = Task.Run(() => ReceiveLoop(_ws, _cts.Token));
 
-            // Turn off the serial T-code device (both are T-code sinks; restim replaces it)
-            // and announce the connection — both on the main thread.
             Callable.From(() =>
             {
                 var serial = GetNodeOrNull<SerialDeviceService>("/root/SerialDeviceService");
                 serial?.Disconnect();
+                GetNodeOrNull<VectorService>("/root/VectorService")?.Disconnect();
                 EmitSignal(SignalName.Connected);
             }).CallDeferred();
         }
@@ -158,16 +141,14 @@ public partial class RestimService : Node
             return;
 
         chan?.Writer.TryComplete();
-        try { cts?.Cancel(); } catch { /* best effort */ }
+        try { cts?.Cancel(); } catch { }
         try { _ = ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None); } catch { }
         try { cts?.Dispose(); } catch { }
-        // ws is disposed by the send/receive loops when they observe cancellation/close.
         try { ws.Dispose(); } catch { }
 
         Callable.From(() => EmitSignal(SignalName.Disconnected)).CallDeferred();
     }
 
-    // Queue a single T-code command. value01 is 0-1; intervalMs>0 adds an "I" interpolation hint.
     public void SendTCode(string axis, double value01, uint intervalMs = 0)
     {
         var chan = _sendChannel;
@@ -176,7 +157,6 @@ public partial class RestimService : Node
         chan.Writer.TryWrite(FormatCommand(axis, value01, intervalMs));
     }
 
-    // Queue several commands as ONE space-separated frame (fewer WS sends per game frame).
     public void SendBatch(IEnumerable<(string axis, double value01, uint intervalMs)> commands)
     {
         var chan = _sendChannel;
@@ -194,7 +174,6 @@ public partial class RestimService : Node
             chan.Writer.TryWrite(sb.ToString());
     }
 
-    // "AABBBB[ICCCC]" — 4-digit value (matches OutputPrecision:4 and SerialDeviceService).
     private static string FormatCommand(string axis, double value01, uint intervalMs)
     {
         int ticks = Math.Clamp((int)Math.Round(value01 * 9999.0), 0, 9999);
@@ -203,8 +182,6 @@ public partial class RestimService : Node
             : $"{axis}{ticks:D4}";
     }
 
-    // Drains the send channel and writes each frame to the socket in order. One reader,
-    // so ClientWebSocket.SendAsync is never called concurrently. Any failure disconnects.
     private async Task SendLoop(ClientWebSocket ws, Channel<string> chan, CancellationToken token)
     {
         try
@@ -219,15 +196,13 @@ public partial class RestimService : Node
                 }
             }
         }
-        catch (OperationCanceledException) { /* normal on disconnect */ }
+        catch (OperationCanceledException) { }
         catch (Exception e)
         {
             _OnLoopFailure(ws, $"restim send failed: {e.Message}");
         }
     }
 
-    // restim's /tcode endpoint is send-only from our side, but we must keep reading so the
-    // socket detects a server-side close. Incoming data is discarded.
     private async Task ReceiveLoop(ClientWebSocket ws, CancellationToken token)
     {
         var buffer = new byte[1024];
@@ -243,19 +218,17 @@ public partial class RestimService : Node
                 }
             }
         }
-        catch (OperationCanceledException) { /* normal on disconnect */ }
+        catch (OperationCanceledException) { }
         catch (Exception e)
         {
             _OnLoopFailure(ws, $"restim connection lost: {e.Message}");
         }
     }
 
-    // A loop observed the socket die. If this is still the active socket, drop it and
-    // notify — guarded so send+receive both failing only reports once.
     private void _OnLoopFailure(ClientWebSocket ws, string message)
     {
         if (_ws != ws)
-            return; // already replaced/disconnected
+            return;
         _ws = null;
         _sendChannel?.Writer.TryComplete();
         _sendChannel = null;
@@ -270,8 +243,6 @@ public partial class RestimService : Node
         Callable.From(() => EmitSignal(SignalName.ErrorOccurred, message)).CallDeferred();
     }
 
-    // On app quit, tell restim to go silent (volume 0) and neutralize position, then close.
-    // Synchronous and best-effort — the e-stim equivalent of the serial DSTOP.
     public override void _Notification(int what)
     {
         if (what != NotificationWMCloseRequest && what != NotificationExitTree)
@@ -281,8 +252,6 @@ public partial class RestimService : Node
         if (ws == null || ws.State != WebSocketState.Open)
             return;
 
-        // Stop the background send loop first so this synchronous send is the only
-        // outstanding SendAsync on the socket (concurrent sends are illegal).
         try { _cts?.Cancel(); } catch { }
 
         try

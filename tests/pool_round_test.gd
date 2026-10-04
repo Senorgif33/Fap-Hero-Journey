@@ -145,6 +145,27 @@ func test_pool_entry_paths_resolve_on_scan() -> void:
 	)
 
 
+func test_resolve_paths_does_not_double_absolute_cutscene() -> void:
+	# Cutscenes saved with an absolute video_path must not get base prepended again.
+	var abs_vid: String = "E:/pack/content/Inferno_C01_EP1.mp4"
+	var graph: Dictionary = {
+		"start": "ep1",
+		"nodes":
+		{
+			"ep1":
+			{"type": "cutscene", "data": {"name": "EP1", "video_path": abs_vid}, "out": []}
+		},
+	}
+	JourneyGraph.resolve_paths(graph, "E:/pack")
+	assert_str(str(graph["nodes"]["ep1"]["data"]["video_path"])).is_equal(abs_vid)
+	# Relative paths still resolve.
+	graph["nodes"]["ep1"]["data"]["video_path"] = "content/Inferno_C01_EP1.mp4"
+	JourneyGraph.resolve_paths(graph, "E:/pack")
+	assert_str(str(graph["nodes"]["ep1"]["data"]["video_path"])).is_equal(
+		"E:/pack/content/Inferno_C01_EP1.mp4"
+	)
+
+
 func test_weighted_pick_favors_heavy_entry() -> void:
 	# weights [1,3]: r=0 → index 0; r in {1,2,3} → index 1 (the heavier entry).
 	var weights: Array = JourneyData.pool_entry_weights([{"weight": 1}, {"weight": 3}])

@@ -1,0 +1,679 @@
+{
+  "Name": "Erosphere Inferno",
+  "Start": "c01_intro_sb",
+  "node_count": 82,
+  "Nodes": [
+    {
+      "id": "c01_intro_sb",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_001"
+      ]
+    },
+    {
+      "id": "inferno_C01_001",
+      "type": "round",
+      "name": "Canto I: Intro",
+      "out": [
+        "inferno_C01_002"
+      ]
+    },
+    {
+      "id": "inferno_C01_002",
+      "type": "round",
+      "name": "Canto I: The Cats Part I",
+      "out": [
+        "inferno_C01_003"
+      ]
+    },
+    {
+      "id": "inferno_C01_003",
+      "type": "round",
+      "name": "Canto I: The Cats Part II",
+      "out": [
+        "inferno_C01_004"
+      ]
+    },
+    {
+      "id": "inferno_C01_004",
+      "type": "round",
+      "name": "Canto I: Virgo's Training",
+      "out": [
+        "inferno_C01_005"
+      ]
+    },
+    {
+      "id": "inferno_C01_005",
+      "type": "round",
+      "name": "Canto I: Charon",
+      "out": [
+        "inferno_C01_006"
+      ]
+    },
+    {
+      "id": "inferno_C01_006",
+      "type": "round",
+      "name": "Canto I: The Battle of River Styx",
+      "out": [
+        "c01_006_fork"
+      ]
+    },
+    {
+      "id": "c01_006_fork",
+      "type": "fork",
+      "name": "After the Battle",
+      "out": [
+        "inferno_C01_007",
+        "inferno_C01_008"
+      ]
+    },
+    {
+      "id": "inferno_C01_007",
+      "type": "round",
+      "name": "Canto I: Fate",
+      "out": [
+        "inferno_C01_EP6"
+      ]
+    },
+    {
+      "id": "inferno_C01_008",
+      "type": "round",
+      "name": "Canto II or Anjelica's Reward",
+      "out": [
+        "c01_008_fork"
+      ]
+    },
+    {
+      "id": "c01_008_fork",
+      "type": "fork",
+      "name": "Canto II or Anjelica's Reward",
+      "out": [
+        "inferno_C02_001",
+        "inferno_C01_009"
+      ]
+    },
+    {
+      "id": "inferno_C01_009",
+      "type": "round",
+      "name": "Anjelica's Dream",
+      "out": [
+        "inferno_C01_credits"
+      ]
+    },
+    {
+      "id": "inferno_C01_credits",
+      "type": "cutscene",
+      "name": "Credits",
+      "out": [
+        "c01_end_fork"
+      ]
+    },
+    {
+      "id": "c01_end_fork",
+      "type": "fork",
+      "name": "Canto I Complete",
+      "out": [
+        "inferno_C02_001",
+        "c01_canto2_checkpoint"
+      ]
+    },
+    {
+      "id": "c01_canto2_checkpoint",
+      "type": "checkpoint",
+      "name": "Canto II ready",
+      "out": [
+        "inferno_C02_001"
+      ]
+    },
+    {
+      "id": "inferno_C01_EP1",
+      "type": "cutscene",
+      "name": "Canto I: Epilogue 1",
+      "out": [
+        "c01_ep1_cd"
+      ]
+    },
+    {
+      "id": "c01_ep1_cd",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 1 \u2014 Cooldown",
+      "out": [
+        "fp_exit_ep1"
+      ]
+    },
+    {
+      "id": "inferno_C01_EP2",
+      "type": "cutscene",
+      "name": "Canto I: Epilogue 2",
+      "out": [
+        "c01_ep2_cd"
+      ]
+    },
+    {
+      "id": "c01_ep2_cd",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 2 \u2014 Cooldown",
+      "out": [
+        "fp_exit_ep2"
+      ]
+    },
+    {
+      "id": "inferno_C01_EP3",
+      "type": "cutscene",
+      "name": "Canto I: Epilogue 3",
+      "out": [
+        "c01_ep3_cd"
+      ]
+    },
+    {
+      "id": "c01_ep3_cd",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 3 \u2014 Cooldown",
+      "out": [
+        "fp_exit_ep3"
+      ]
+    },
+    {
+      "id": "inferno_C01_EP4",
+      "type": "cutscene",
+      "name": "Canto I: Epilogue 4",
+      "out": [
+        "c01_ep4_cd1"
+      ]
+    },
+    {
+      "id": "c01_ep4_cd1",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 4 \u2014 Cooldown 1",
+      "out": [
+        "c01_ep4_s1"
+      ]
+    },
+    {
+      "id": "c01_ep4_s1",
+      "type": "round",
+      "name": "Punishment: Virgo's Training \u2014 Session 1 of 3",
+      "out": [
+        "c01_ep4_cd2"
+      ]
+    },
+    {
+      "id": "c01_ep4_cd2",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 4 \u2014 Cooldown 2",
+      "out": [
+        "c01_ep4_s2"
+      ]
+    },
+    {
+      "id": "c01_ep4_s2",
+      "type": "round",
+      "name": "Punishment: Virgo's Training \u2014 Session 2 of 3",
+      "out": [
+        "c01_ep4_cd3"
+      ]
+    },
+    {
+      "id": "c01_ep4_cd3",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 4 \u2014 Cooldown 3",
+      "out": [
+        "c01_ep4_s3"
+      ]
+    },
+    {
+      "id": "c01_ep4_s3",
+      "type": "round",
+      "name": "Punishment: Virgo's Training \u2014 Session 3 of 3",
+      "out": [
+        "fp_exit_ep4"
+      ]
+    },
+    {
+      "id": "inferno_C01_EP5",
+      "type": "cutscene",
+      "name": "Canto I: Epilogue 5",
+      "out": [
+        "unlock_vid_amulet"
+      ]
+    },
+    {
+      "id": "c01_ep5_cd1",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 5 \u2014 Cooldown 1",
+      "out": [
+        "c01_ep5_s1"
+      ]
+    },
+    {
+      "id": "c01_ep5_s1",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 1 of 5",
+      "out": [
+        "c01_ep5_cd2"
+      ]
+    },
+    {
+      "id": "c01_ep5_cd2",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 5 \u2014 Cooldown 2",
+      "out": [
+        "c01_ep5_s2"
+      ]
+    },
+    {
+      "id": "c01_ep5_s2",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 2 of 5",
+      "out": [
+        "c01_ep5_cd3"
+      ]
+    },
+    {
+      "id": "c01_ep5_cd3",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 5 \u2014 Cooldown 3",
+      "out": [
+        "c01_ep5_s3"
+      ]
+    },
+    {
+      "id": "c01_ep5_s3",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 3 of 5",
+      "out": [
+        "c01_ep5_cd4"
+      ]
+    },
+    {
+      "id": "c01_ep5_cd4",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 5 \u2014 Cooldown 4",
+      "out": [
+        "c01_ep5_s4"
+      ]
+    },
+    {
+      "id": "c01_ep5_s4",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 4 of 5",
+      "out": [
+        "c01_ep5_cd5"
+      ]
+    },
+    {
+      "id": "c01_ep5_cd5",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 5 \u2014 Cooldown 5",
+      "out": [
+        "c01_ep5_s5"
+      ]
+    },
+    {
+      "id": "c01_ep5_s5",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 5 of 5",
+      "out": [
+        "fp_exit_ep5"
+      ]
+    },
+    {
+      "id": "inferno_C01_EP6",
+      "type": "cutscene",
+      "name": "Canto I: Epilogue 6",
+      "out": [
+        "unlock_vid_psychic"
+      ]
+    },
+    {
+      "id": "c01_ep6_cd1",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 6 \u2014 Cooldown 1",
+      "out": [
+        "c01_ep6_s1a"
+      ]
+    },
+    {
+      "id": "c01_ep6_s1a",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 1 of 5",
+      "out": [
+        "c01_ep6_s1b"
+      ]
+    },
+    {
+      "id": "c01_ep6_s1b",
+      "type": "round",
+      "name": "Punishment: The Battle of River Styx \u2014 Session 1 of 5",
+      "out": [
+        "c01_ep6_cd2"
+      ]
+    },
+    {
+      "id": "c01_ep6_cd2",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 6 \u2014 Cooldown 2",
+      "out": [
+        "c01_ep6_s2a"
+      ]
+    },
+    {
+      "id": "c01_ep6_s2a",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 2 of 5",
+      "out": [
+        "c01_ep6_s2b"
+      ]
+    },
+    {
+      "id": "c01_ep6_s2b",
+      "type": "round",
+      "name": "Punishment: The Battle of River Styx \u2014 Session 2 of 5",
+      "out": [
+        "c01_ep6_cd3"
+      ]
+    },
+    {
+      "id": "c01_ep6_cd3",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 6 \u2014 Cooldown 3",
+      "out": [
+        "c01_ep6_s3a"
+      ]
+    },
+    {
+      "id": "c01_ep6_s3a",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 3 of 5",
+      "out": [
+        "c01_ep6_s3b"
+      ]
+    },
+    {
+      "id": "c01_ep6_s3b",
+      "type": "round",
+      "name": "Punishment: The Battle of River Styx \u2014 Session 3 of 5",
+      "out": [
+        "c01_ep6_cd4"
+      ]
+    },
+    {
+      "id": "c01_ep6_cd4",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 6 \u2014 Cooldown 4",
+      "out": [
+        "c01_ep6_s4a"
+      ]
+    },
+    {
+      "id": "c01_ep6_s4a",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 4 of 5",
+      "out": [
+        "c01_ep6_s4b"
+      ]
+    },
+    {
+      "id": "c01_ep6_s4b",
+      "type": "round",
+      "name": "Punishment: The Battle of River Styx \u2014 Session 4 of 5",
+      "out": [
+        "c01_ep6_cd5"
+      ]
+    },
+    {
+      "id": "c01_ep6_cd5",
+      "type": "cooldown",
+      "name": "Canto I: Epilogue 6 \u2014 Cooldown 5",
+      "out": [
+        "c01_ep6_s5a"
+      ]
+    },
+    {
+      "id": "c01_ep6_s5a",
+      "type": "round",
+      "name": "Punishment: Charon \u2014 Session 5 of 5",
+      "out": [
+        "c01_ep6_s5b"
+      ]
+    },
+    {
+      "id": "c01_ep6_s5b",
+      "type": "round",
+      "name": "Punishment: The Battle of River Styx \u2014 Session 5 of 5",
+      "out": [
+        "fp_exit_ep6"
+      ]
+    },
+    {
+      "id": "inferno_C01_EP7",
+      "type": "cutscene",
+      "name": "Canto I: Epilogue 7",
+      "out": [
+        "fp_hub_1"
+      ]
+    },
+    {
+      "id": "fp_gate_ep1",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_EP1"
+      ]
+    },
+    {
+      "id": "fp_gate_ep2",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_EP2"
+      ]
+    },
+    {
+      "id": "fp_gate_ep3",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_EP3"
+      ]
+    },
+    {
+      "id": "fp_gate_ep4",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_EP4"
+      ]
+    },
+    {
+      "id": "fp_gate_ep5",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_EP5"
+      ]
+    },
+    {
+      "id": "fp_gate_ep6",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_EP6"
+      ]
+    },
+    {
+      "id": "fp_gate_007",
+      "type": "storyboard",
+      "name": "",
+      "out": [
+        "inferno_C01_007"
+      ]
+    },
+    {
+      "id": "fp_exit_ep1",
+      "type": "fork",
+      "name": "Canto I: Epilogue 1 \u2014 Punishment Complete",
+      "out": [
+        "fp_hub_1",
+        "inferno_C01_001"
+      ]
+    },
+    {
+      "id": "fp_exit_ep2",
+      "type": "fork",
+      "name": "Canto I: Epilogue 2 \u2014 Punishment Complete",
+      "out": [
+        "fp_hub_1",
+        "inferno_C01_001"
+      ]
+    },
+    {
+      "id": "fp_exit_ep3",
+      "type": "fork",
+      "name": "Canto I: Epilogue 3 \u2014 Punishment Complete",
+      "out": [
+        "fp_hub_1",
+        "inferno_C01_001"
+      ]
+    },
+    {
+      "id": "fp_exit_ep4",
+      "type": "fork",
+      "name": "Canto I: Epilogue 4 \u2014 Punishment Complete",
+      "out": [
+        "fp_hub_1",
+        "inferno_C01_005"
+      ]
+    },
+    {
+      "id": "fp_exit_ep5",
+      "type": "fork",
+      "name": "Canto I: Epilogue 5 \u2014 Punishment Complete",
+      "out": [
+        "fp_hub_1",
+        "inferno_C01_006"
+      ]
+    },
+    {
+      "id": "fp_exit_ep6",
+      "type": "fork",
+      "name": "Canto I: Epilogue 6 \u2014 Punishment Complete",
+      "out": [
+        "fp_hub_1",
+        "inferno_C01_006"
+      ]
+    },
+    {
+      "id": "fp_C01_001",
+      "type": "round",
+      "name": "Canto I: Intro",
+      "out": [
+        "fp_hub_1"
+      ]
+    },
+    {
+      "id": "fp_C01_002",
+      "type": "round",
+      "name": "Canto I: The Cats Part I",
+      "out": [
+        "fp_hub_1"
+      ]
+    },
+    {
+      "id": "fp_C01_003",
+      "type": "round",
+      "name": "Canto I: The Cats Part II",
+      "out": [
+        "fp_hub_1"
+      ]
+    },
+    {
+      "id": "fp_C01_004",
+      "type": "round",
+      "name": "Canto I: Virgo's Training",
+      "out": [
+        "fp_hub_1"
+      ]
+    },
+    {
+      "id": "fp_C01_005",
+      "type": "round",
+      "name": "Canto I: Charon",
+      "out": [
+        "fp_hub_1"
+      ]
+    },
+    {
+      "id": "fp_C01_006",
+      "type": "round",
+      "name": "Canto I: The Battle of River Styx",
+      "out": [
+        "fp_006_fork"
+      ]
+    },
+    {
+      "id": "fp_006_fork",
+      "type": "fork",
+      "name": "After the Battle",
+      "out": [
+        "fp_gate_007",
+        "fp_hub_1"
+      ]
+    },
+    {
+      "id": "fp_hub_1",
+      "type": "fork",
+      "name": "Inferno",
+      "out": [
+        "fp_C01_001",
+        "fp_C01_002",
+        "fp_C01_003",
+        "fp_hub_2"
+      ]
+    },
+    {
+      "id": "fp_hub_2",
+      "type": "fork",
+      "name": "Inferno",
+      "out": [
+        "fp_hub_1",
+        "fp_C01_004",
+        "fp_C01_005",
+        "fp_hub_3"
+      ]
+    },
+    {
+      "id": "fp_hub_3",
+      "type": "fork",
+      "name": "Inferno",
+      "out": [
+        "fp_hub_2",
+        "fp_C01_006",
+        "inferno_C01_009"
+      ]
+    },
+    {
+      "id": "inferno_C02_001",
+      "type": "storyboard",
+      "name": "",
+      "out": []
+    },
+    {
+      "id": "unlock_vid_amulet",
+      "type": "cutscene",
+      "name": "Amulet of Sustenance",
+      "out": [
+        "c01_ep5_cd1"
+      ]
+    },
+    {
+      "id": "unlock_vid_psychic",
+      "type": "cutscene",
+      "name": "Psychic Divorce",
+      "out": [
+        "c01_ep6_cd1"
+      ]
+    }
+  ]
+}

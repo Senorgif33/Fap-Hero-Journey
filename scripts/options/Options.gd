@@ -165,9 +165,17 @@ var _intiface_delay_lbl: Label = null
 var _transcode_section: VBoxContainer = null
 var _credits_section: VBoxContainer = null
 
-# restim (e-stim), split across two tabs: the connection block (server/path/
-# auto-connect) sits on CONNECTION next to the other transports, while the
-# per-axis levels are device tuning and live on DEVICE beside the T-code ranges.
+# Vector 1A (e-stim via TCP to user-run Vector GUI).
+var _vector_section: VBoxContainer = null
+var _vector_host_input: LineEdit = null
+var _vector_port_input: LineEdit = null
+var _vector_lookahead_input: LineEdit = null
+var _vector_enabled_toggle: Button = null
+var _vector_auto_toggle: Button = null
+var _vector_connect_btn: Button = null
+var _vector_status_lbl: Label = null
+
+# restim (e-stim), split across CONNECTION + DEVICE tabs.
 var _restim_section: VBoxContainer = null
 var _restim_axes_section: VBoxContainer = null
 var _restim_server_input: LineEdit = null
@@ -175,12 +183,9 @@ var _restim_path_input: LineEdit = null
 var _restim_auto_toggle: Button = null
 var _restim_connect_btn: Button = null
 var _restim_status_lbl: Label = null
-var _restim_axis_sliders: Dictionary = {}  # axis id → HSlider
-var _restim_axis_value_lbls: Dictionary = {}  # axis id → value Label
+var _restim_axis_sliders: Dictionary = {}
+var _restim_axis_value_lbls: Dictionary = {}
 
-# The 18 "E-Stim Full" axes, grouped for the UI. [axis id, friendly label].
-# Motion axes (L0/L1/C0/P0/V1/V2) note their driving funscript; those sliders are the
-# fallback used only when the round has no such script.
 const RESTIM_AXIS_GROUPS: Array = [
 	["MASTER", [["V0", "Volume"]]],
 	["POSITION", [["L0", "Alpha ← stroke"], ["L1", "Beta ← surge"]]],
@@ -1106,6 +1111,7 @@ func _apply_layout() -> void:
 	_build_routing_section()
 	_build_handy_section()
 	_build_restim_section()
+	_build_vector_section()
 	_build_restim_axes_section()
 
 	var filler_header: Label = Label.new()
@@ -1324,6 +1330,7 @@ func _on_tab_changed(idx: int) -> void:
 			_routing_section,
 			_handy_section,
 			_restim_section,
+			_vector_section,
 		],
 		# DEVICE
 		[_range_section, _restim_axes_section, _filler_section],
@@ -2641,7 +2648,6 @@ func _build_restim_section() -> void:
 	divider.add_theme_stylebox_override("separator", _make_separator_style())
 	section.add_child(divider)
 
-	# Address is two fields (server + path) so the endpoint path can't be missed.
 	_restim_server_input = _add_restim_text_row(section, "Server", "ws://127.0.0.1:12346")
 	_restim_path_input = _add_restim_text_row(section, "Path", "/tcode")
 
@@ -2671,12 +2677,11 @@ func _build_restim_section() -> void:
 	conn_row.add_child(_restim_status_lbl)
 
 	var hint: Label = Label.new()
-	hint.text = "Streams the round's funscripts to restim as E-Stim Full T-code over WebSocket. Connecting turns the serial device off. Per-axis levels (Volume, Alpha/Beta, Carrier, Pulse, Vibration) live under E-STIM DEVICE on the Device tab."
+	hint.text = "Direct WebSocket to Restim (:12346/tcode). Streams funscripts as E-Stim Full T-code. Per-axis levels live under E-STIM DEVICE on the Device tab. Connecting disconnects Vector and serial."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(hint, UITheme.SEPARATOR, 11, false)
 	section.add_child(hint)
 
-	# Seed controls BEFORE connecting handlers so setup doesn't fire saves.
 	_restim_server_input.text = SettingsService.get_restim_server()
 	_restim_path_input.text = SettingsService.get_restim_path()
 	var auto_on: bool = SettingsService.get_restim_auto_connect()
@@ -2703,9 +2708,6 @@ func _build_restim_section() -> void:
 	_sync_restim_state()
 
 
-# Per-axis e-stim levels. Deliberately on the DEVICE tab rather than CONNECTION:
-# these are ongoing output tuning (the same kind of thing as the T-code ranges
-# above them), not part of getting connected. Each row seeds and saves itself.
 func _build_restim_axes_section() -> void:
 	var section: VBoxContainer = VBoxContainer.new()
 	section.add_theme_constant_override("separation", 10)
@@ -2722,7 +2724,7 @@ func _build_restim_axes_section() -> void:
 	section.add_child(divider)
 
 	var hint: Label = Label.new()
-	hint.text = "Motion axes (Alpha/Beta/Carrier/Pulse-freq/Vib1) follow their funscripts when a round provides them; these sliders set every other axis. Raise Volume — at 0 restim is silent. Changes apply live to a connected session."
+	hint.text = "Used with direct Restim only (not Vector). Motion axes follow funscripts when a round provides them; these sliders set every other axis."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_style_label(hint, UITheme.SEPARATOR, 11, false)
 	section.add_child(hint)
@@ -2831,8 +2833,8 @@ func _on_restim_connected() -> void:
 	_style_button(_restim_connect_btn, UITheme.MAGENTA)
 	_restim_connect_btn.text = "> DISCONNECT"
 	FunscriptPlayer.SendRestimManualState()
-	# restim turns the serial device off on connect — refresh the serial UI to match.
 	_sync_serial_state()
+	_sync_vector_state()
 
 
 func _on_restim_disconnected() -> void:
@@ -2861,6 +2863,235 @@ func _sync_restim_state() -> void:
 		_set_restim_status("● DISCONNECTED", UITheme.ERROR)
 		_style_button(_restim_connect_btn, UITheme.PURPLE_BRIGHT)
 		_restim_connect_btn.text = "> CONNECT"
+
+
+# ---------------------------------------------------------------------------
+# Vector 1A section — TCP T-code to user-run Vector GUI
+# ---------------------------------------------------------------------------
+
+
+func _build_vector_section() -> void:
+	var section: VBoxContainer = VBoxContainer.new()
+	section.add_theme_constant_override("separation", 10)
+	_content_vbox.add_child(section)
+	_vector_section = section
+
+	var header: Label = Label.new()
+	header.text = "VECTOR 1A (E-STIM)"
+	_style_label(header, UITheme.PURPLE_BRIGHT, 13, true)
+	section.add_child(header)
+
+	var divider: HSeparator = HSeparator.new()
+	divider.add_theme_stylebox_override("separator", _make_separator_style())
+	section.add_child(divider)
+
+	_vector_host_input = _add_vector_text_row(section, "Host", "127.0.0.1")
+	_vector_port_input = _add_vector_text_row(section, "Port", "12345")
+
+	var lookahead_row: HBoxContainer = HBoxContainer.new()
+	lookahead_row.add_theme_constant_override("separation", 16)
+	section.add_child(lookahead_row)
+	var lookahead_lbl: Label = Label.new()
+	lookahead_lbl.text = "Event look-ahead (ms)"
+	lookahead_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(lookahead_lbl, UITheme.WHITE_SOFT, 14, false)
+	lookahead_row.add_child(lookahead_lbl)
+	_vector_lookahead_input = LineEdit.new()
+	_vector_lookahead_input.text = str(SettingsService.DEFAULT_VECTOR_LOOKAHEAD_MS)
+	_vector_lookahead_input.custom_minimum_size = Vector2(100, 0)
+	_vector_lookahead_input.placeholder_text = str(SettingsService.DEFAULT_VECTOR_LOOKAHEAD_MS)
+	_style_line_edit(_vector_lookahead_input)
+	lookahead_row.add_child(_vector_lookahead_input)
+	var lookahead_unit: Label = Label.new()
+	lookahead_unit.text = "ms"
+	_style_label(lookahead_unit, UITheme.SEPARATOR, 12, false)
+	lookahead_row.add_child(lookahead_unit)
+
+	var enabled_row: HBoxContainer = HBoxContainer.new()
+	enabled_row.add_theme_constant_override("separation", 16)
+	section.add_child(enabled_row)
+	var enabled_lbl: Label = Label.new()
+	enabled_lbl.text = "Enable Vector output"
+	enabled_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(enabled_lbl, UITheme.WHITE_SOFT, 14, false)
+	enabled_row.add_child(enabled_lbl)
+	_vector_enabled_toggle = Button.new()
+	_vector_enabled_toggle.toggle_mode = true
+	_vector_enabled_toggle.focus_mode = Control.FOCUS_NONE
+	enabled_row.add_child(_vector_enabled_toggle)
+
+	var auto_row: HBoxContainer = HBoxContainer.new()
+	auto_row.add_theme_constant_override("separation", 16)
+	section.add_child(auto_row)
+	var auto_lbl: Label = Label.new()
+	auto_lbl.text = "Auto-connect on launch"
+	auto_lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(auto_lbl, UITheme.WHITE_SOFT, 14, false)
+	auto_row.add_child(auto_lbl)
+	_vector_auto_toggle = Button.new()
+	_vector_auto_toggle.toggle_mode = true
+	_vector_auto_toggle.focus_mode = Control.FOCUS_NONE
+	auto_row.add_child(_vector_auto_toggle)
+
+	var conn_row: HBoxContainer = HBoxContainer.new()
+	conn_row.add_theme_constant_override("separation", 16)
+	section.add_child(conn_row)
+	_vector_connect_btn = Button.new()
+	_vector_connect_btn.text = "> CONNECT"
+	_vector_connect_btn.focus_mode = Control.FOCUS_NONE
+	_style_button(_vector_connect_btn, UITheme.PURPLE_BRIGHT)
+	conn_row.add_child(_vector_connect_btn)
+	_vector_status_lbl = Label.new()
+	_style_label(_vector_status_lbl, UITheme.SEPARATOR, 12, true)
+	conn_row.add_child(_vector_status_lbl)
+
+	var hint: Label = Label.new()
+	hint.text = (
+		"Alternative to direct Restim below: run Vector 1A + Restim externally. "
+		+ "In Vector: Start listener → Connect Restim → Resume → enable Media volume ramp. "
+		+ "For journey custom events: also Enable custom events + load event definitions "
+		+ "(leave Vector's events file empty/unused). "
+		+ "Event look-ahead must match Vector's Look-ahead / delay. "
+		+ "Fap-Hero sends L0 stroke plus T0/T1 session timeline; Vector generates e-stim axes. "
+		+ "Connecting disconnects direct Restim and serial."
+	)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_style_label(hint, UITheme.SEPARATOR, 11, false)
+	section.add_child(hint)
+
+	_vector_host_input.text = SettingsService.get_vector_host()
+	_vector_port_input.text = str(SettingsService.get_vector_port())
+	_vector_lookahead_input.text = str(SettingsService.get_vector_lookahead_ms())
+	var enabled_on: bool = SettingsService.get_vector_enabled()
+	_vector_enabled_toggle.button_pressed = enabled_on
+	_style_toggle(_vector_enabled_toggle, enabled_on)
+	var auto_on: bool = SettingsService.get_vector_auto_connect()
+	_vector_auto_toggle.button_pressed = auto_on
+	_style_toggle(_vector_auto_toggle, auto_on)
+
+	_vector_host_input.text_changed.connect(
+		func(t: String) -> void:
+			SettingsService.set_vector_host(t)
+			SettingsService.save()
+	)
+	_vector_port_input.text_changed.connect(
+		func(t: String) -> void:
+			var port: int = int(t) if t.is_valid_int() else SettingsService.DEFAULT_VECTOR_PORT
+			SettingsService.set_vector_port(port)
+			SettingsService.save()
+	)
+	_vector_lookahead_input.text_changed.connect(
+		func(t: String) -> void:
+			var ms: int = (
+				int(t) if t.is_valid_int() else SettingsService.DEFAULT_VECTOR_LOOKAHEAD_MS
+			)
+			if ms < 0:
+				ms = SettingsService.DEFAULT_VECTOR_LOOKAHEAD_MS
+			SettingsService.set_vector_lookahead_ms(ms)
+			SettingsService.save()
+	)
+	_vector_enabled_toggle.toggled.connect(_on_vector_enabled_toggled)
+	_vector_auto_toggle.toggled.connect(_on_vector_auto_toggled)
+	_vector_connect_btn.pressed.connect(_on_vector_connect_pressed)
+
+	VectorService.connect("Connected", _on_vector_connected)
+	VectorService.connect("Disconnected", _on_vector_disconnected)
+	VectorService.connect("ErrorOccurred", _on_vector_error)
+
+	_sync_vector_state()
+
+
+func _add_vector_text_row(
+	parent: VBoxContainer, label_text: String, placeholder: String
+) -> LineEdit:
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl: Label = Label.new()
+	lbl.text = label_text
+	lbl.custom_minimum_size = Vector2(ROW_LABEL_W, 0)
+	_style_label(lbl, UITheme.WHITE_SOFT, 14, false)
+	row.add_child(lbl)
+
+	var edit: LineEdit = LineEdit.new()
+	edit.placeholder_text = placeholder
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_line_edit(edit)
+	row.add_child(edit)
+	return edit
+
+
+func _on_vector_enabled_toggled(pressed: bool) -> void:
+	_style_toggle(_vector_enabled_toggle, pressed)
+	SettingsService.set_vector_enabled(pressed)
+	SettingsService.save()
+	if not pressed and VectorService.VectorConnected:
+		VectorService.Disconnect()
+
+
+func _on_vector_auto_toggled(pressed: bool) -> void:
+	_style_toggle(_vector_auto_toggle, pressed)
+	SettingsService.set_vector_auto_connect(pressed)
+	SettingsService.save()
+
+
+func _on_vector_connect_pressed() -> void:
+	if VectorService.VectorConnected:
+		VectorService.Disconnect()
+		return
+
+	if not _vector_enabled_toggle.button_pressed:
+		_set_vector_status("● DISABLED", UITheme.ERROR)
+		return
+
+	var host: String = _vector_host_input.text.strip_edges()
+	if host.is_empty():
+		_set_vector_status("● NO HOST", UITheme.ERROR)
+		return
+	var port_text: String = _vector_port_input.text.strip_edges()
+	var port: int = int(port_text) if port_text.is_valid_int() else SettingsService.DEFAULT_VECTOR_PORT
+
+	_set_vector_status("● CONNECTING…", UITheme.PURPLE_MID)
+	_vector_connect_btn.disabled = true
+	VectorService.Connect(host, port)
+
+
+func _on_vector_connected() -> void:
+	_vector_connect_btn.disabled = false
+	_set_vector_status("● CONNECTED", UITheme.OK)
+	_style_button(_vector_connect_btn, UITheme.MAGENTA)
+	_vector_connect_btn.text = "> DISCONNECT"
+	_sync_serial_state()
+	_sync_restim_state()
+
+
+func _on_vector_disconnected() -> void:
+	_vector_connect_btn.disabled = false
+	_set_vector_status("● DISCONNECTED", UITheme.ERROR)
+	_style_button(_vector_connect_btn, UITheme.PURPLE_BRIGHT)
+	_vector_connect_btn.text = "> CONNECT"
+
+
+func _on_vector_error(message: String) -> void:
+	_vector_connect_btn.disabled = false
+	_set_vector_status("● ERROR: " + message.left(60).to_upper(), UITheme.ERROR)
+
+
+func _set_vector_status(text: String, color: Color) -> void:
+	_vector_status_lbl.text = text
+	_vector_status_lbl.add_theme_color_override("font_color", color)
+
+
+func _sync_vector_state() -> void:
+	if VectorService.VectorConnected:
+		_set_vector_status("● CONNECTED", UITheme.OK)
+		_style_button(_vector_connect_btn, UITheme.MAGENTA)
+		_vector_connect_btn.text = "> DISCONNECT"
+	else:
+		_set_vector_status("● DISCONNECTED", UITheme.ERROR)
+		_style_button(_vector_connect_btn, UITheme.PURPLE_BRIGHT)
+		_vector_connect_btn.text = "> CONNECT"
 
 
 # Sets the Handy status line's text + colour together (green ● for good, red ✕ for bad, neutral purple for

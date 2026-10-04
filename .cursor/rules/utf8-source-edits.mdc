@@ -1,0 +1,26 @@
+---
+description: Never corrupt Unicode UI glyphs; edit source only with UTF-8-safe tools
+alwaysApply: true
+---
+
+# UTF-8 source edits (Windows)
+
+This repo’s Builder UI strings use real Unicode (▲▼✕📁🗑⏱—·⚠◇ etc.). On Windows, **PowerShell and some edit paths replace those with `?` / `??`**, often rewriting the whole file.
+
+## Hard rule for `BuilderSidePanel.gd`
+
+That file is glyph-dense and has been wiped repeatedly. For **any** change to it:
+
+1. Prefer a **Python script** that reads/writes with `encoding="utf-8"` (patch by exact string replace in Python, then `Path.write_text(..., encoding="utf-8")`).
+2. After the write, verify non-ASCII still present (e.g. `▲` / `📁` / `—`), not `?`.
+3. Do **not** use PowerShell `Set-Content` / here-strings / `Get-Content` round-trips.
+4. If symbols are already `?`, restore from `git show HEAD:scripts/journey_builder/BuilderSidePanel.gd` via the corrupt-form aligner, then re-apply only intentional logic — do not ship a `?`-filled panel.
+
+## Other source files
+
+- Edit with Cursor Write/StrReplace when safe; still avoid PowerShell for Unicode.
+- Prefer `\uXXXX` escapes for **new** symbol-heavy strings when touching glyph-dense UI.
+
+## If symbology is already `?`
+
+Restore from HEAD (or last good commit) for corrupted lines; re-apply only intentional ASCII/logic edits.

@@ -33,15 +33,18 @@ const DEFAULT_SERIAL_BAUD: int = 115200
 const DEFAULT_SERIAL_AUTO: bool = false
 
 # ── restim (e-stim, network T-code over WebSocket) ──
-# Address is split into server + path so the endpoint path can't be missed. The restim
-# in this workspace routes T-code on /tcode; a user on a build expecting /ws can edit it.
 const DEFAULT_RESTIM_SERVER: String = "ws://127.0.0.1:12346"
 const DEFAULT_RESTIM_PATH: String = "/tcode"
 const DEFAULT_RESTIM_AUTO: bool = false
-# Per-axis manual value (percent 0–100) for each of the 18 "E-Stim Full" axes. Motion
-# axes (L0/L1/C0/P0/V1/V2) use this only as a fallback when the round has no matching
-# funscript; the rest always send this value. Default 0 mirrors the profile's DefaultValue.
 const DEFAULT_RESTIM_AXIS: int = 0
+
+# ── Vector 1A (e-stim via TCP T-code to user-run Vector GUI) ──
+const DEFAULT_VECTOR_HOST: String = "127.0.0.1"
+const DEFAULT_VECTOR_PORT: int = 12345
+const DEFAULT_VECTOR_AUTO: bool = false
+const DEFAULT_VECTOR_ENABLED: bool = true
+# Early-send offset for journey Events → EVT. Must match Vector's Look-ahead / delay.
+const DEFAULT_VECTOR_LOOKAHEAD_MS: int = 2000
 const DEFAULT_RANGE_MIN: int = 0
 const DEFAULT_RANGE_MAX: int = 100
 const DEFAULT_HOME_POSITION: int = 50
@@ -223,9 +226,29 @@ func get_restim_auto_connect() -> bool:
 	return bool(_config.get_value("restim", "auto_connect", DEFAULT_RESTIM_AUTO))
 
 
-# Manual value (percent 0–100) for one E-Stim Full axis, e.g. "V0", "P1", "C0".
 func get_restim_axis(axis: String) -> int:
 	return int(_config.get_value("restim", "axis_%s" % axis, DEFAULT_RESTIM_AXIS))
+
+
+# ── vector ──
+func get_vector_host() -> String:
+	return str(_config.get_value("vector", "host", DEFAULT_VECTOR_HOST))
+
+
+func get_vector_port() -> int:
+	return int(_config.get_value("vector", "port", DEFAULT_VECTOR_PORT))
+
+
+func get_vector_auto_connect() -> bool:
+	return bool(_config.get_value("vector", "auto_connect", DEFAULT_VECTOR_AUTO))
+
+
+func get_vector_enabled() -> bool:
+	return bool(_config.get_value("vector", "enabled", DEFAULT_VECTOR_ENABLED))
+
+
+func get_vector_lookahead_ms() -> int:
+	return int(_config.get_value("vector", "lookahead_ms", DEFAULT_VECTOR_LOOKAHEAD_MS))
 
 
 func get_range_min() -> int:
@@ -626,6 +649,27 @@ func set_restim_auto_connect(value: bool) -> void:
 
 func set_restim_axis(axis: String, value: int) -> void:
 	_config.set_value("restim", "axis_%s" % axis, value)
+
+
+# ── vector ──
+func set_vector_host(value: String) -> void:
+	_config.set_value("vector", "host", value)
+
+
+func set_vector_port(value: int) -> void:
+	_config.set_value("vector", "port", value)
+
+
+func set_vector_auto_connect(value: bool) -> void:
+	_config.set_value("vector", "auto_connect", value)
+
+
+func set_vector_enabled(value: bool) -> void:
+	_config.set_value("vector", "enabled", value)
+
+
+func set_vector_lookahead_ms(value: int) -> void:
+	_config.set_value("vector", "lookahead_ms", maxi(0, value))
 
 
 func set_range_min(value: int) -> void:

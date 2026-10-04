@@ -246,6 +246,12 @@ static func reachable_ids(graph: Dictionary, from_id: String = "") -> Dictionary
 		var jump: String = str(data.get("release_jump_to", "")).strip_edges()
 		if jump != "":
 			stack.append(jump)
+		# Windows bands may also jump mid-round.
+		for b: Variant in data.get("release_windows", []):
+			if b is Dictionary:
+				var bj: String = str((b as Dictionary).get("jump_to", "")).strip_edges()
+				if bj != "":
+					stack.append(bj)
 	return seen
 
 
@@ -590,5 +596,11 @@ static func _resolve_storyboard_paths(d: Dictionary, base: String) -> void:
 
 
 # Prepends the journey base to a non-empty relative path; "" stays "".
+# Already-absolute paths (OS / res:// / user://) are left alone so a re-load after a
+# Builder save that wrote absolutes cannot double-prefix (…/pack/E:/…/file.mp4).
 static func _abs(rel: String, base: String) -> String:
-	return (base + "/" + rel) if rel != "" else ""
+	if rel == "":
+		return ""
+	if rel.begins_with("res://") or rel.begins_with("user://") or rel.is_absolute_path():
+		return rel
+	return base + "/" + rel

@@ -122,6 +122,12 @@ var _journey_allow_finish: bool = false  # author opt-in: the player "I came" / 
 var _journey_finish_node: String = ""  # entry node of the off-graph aftercare sequence played on FINISH (round/storyboard; optional)
 var _journey_unlock_pay_per_use: bool = false  # PPU mode: modifiers unlock (free) then activate (cost coins), not charges
 var _journey_items: Array = []  # author-defined journey-scoped items (runtime snake-case dicts)
+var _journey_events: Array = []  # journey-level Vector EVT events (Builder UI + runtime)
+var _journey_events_definitions_path: String = ""  # user-designated event_definitions.yml
+var _event_defs_cache_path: String = ""  # last path loaded into _event_defs_cache
+var _event_defs_cache: Dictionary = {}  # EventDefinitions.parse result
+var _events_panel_expanded: bool = true  # side-panel CUSTOM EVENTS open/closed across rebuilds
+var _events_selected_index: int = -1  # selected row in the current round's events list
 var _journey_characters: Array = []  # storyboard cast (runtime dicts: id/name/portraits[]/placements[])
 
 # Folder the journey was loaded from when editing. If the journey is renamed,
@@ -222,6 +228,9 @@ var _invalidated_save_count: int = 0
 # runtime graph by it, and _launch_test_play seeks GameState there.
 # Set by _save_and_test_from, reset in _reset_save_state.
 var _pending_test_location: Dictionary = {}
+# When true, _do_save skips ffmpeg planning and refuses any media that still needs
+# encode/bake — for fast JSON iteration / Quick Test. Reset in _reset_save_state.
+var _quick_save: bool = false
 
 # Starting score / coin balance for a test play, applied by GameLoop before the
 # first node loads. Lets the author exercise Conditional / Sacrifice forks (which
@@ -463,7 +472,7 @@ func _structural_warning_text(kind: String) -> String:
 		"dangling":
 			return "A connection points to a node that no longer exists."
 		"cycle":
-			return "Part of a loop — a journey must flow forward (no cycles)."
+			return "Part of a loop (allowed — freeplay hubs / punish rematches)."
 	return ""
 
 
@@ -541,6 +550,22 @@ func _apply_theme() -> void:
 	UITheme.style_button(_back_btn, UITheme.MAGENTA)
 	UITheme.style_button(_save_btn, UITheme.PURPLE_BRIGHT)
 	_save_btn.custom_minimum_size = Vector2(180, 0)
+	_save_btn.tooltip_text = UITheme.wrap_tip("Full save — verifies and re-encodes media when needed")
+
+	# Quick Save sits left of Save: JSON + hardlink pooled media, no ffmpeg.
+	if _top_bar.get_node_or_null("QuickSaveButton") == null:
+		var qbtn: Button = Button.new()
+		qbtn.name = "QuickSaveButton"
+		qbtn.text = "⚡ QUICK SAVE"
+		qbtn.focus_mode = Control.FOCUS_NONE
+		qbtn.tooltip_text = UITheme.wrap_tip(
+			"Save journey data without re-encoding. Requires media already pooled (use full Save once first). Stays in the editor."
+		)
+		UITheme.style_button(qbtn, UITheme.AMBER)
+		qbtn.custom_minimum_size = Vector2(140, 0)
+		qbtn.pressed.connect(_on_quick_save_pressed)
+		_top_bar.add_child(qbtn)
+		_top_bar.move_child(qbtn, _save_btn.get_index())
 
 	_status_lbl.add_theme_font_size_override("font_size", 13)
 	_status_lbl.visible = false
@@ -2179,8 +2204,12 @@ func _input(event: InputEvent) -> void:
 		match k.keycode:
 			KEY_S:
 				# Save is global — fires even from inside a text field.
+				# Ctrl+Shift+S = Quick Save; Ctrl+S = full Save.
 				if not _save_btn.disabled:
-					_on_save_pressed()
+					if k.shift_pressed:
+						_on_quick_save_pressed()
+					else:
+						_on_save_pressed()
 				get_viewport().set_input_as_handled()
 			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6:
 				# Quick-create a node by type, placed near the current selection. Stand down inside a
@@ -2659,6 +2688,11 @@ func _load_graph(journey: Dictionary) -> void:
 	# NOT from `parsed`, whose "items" key is JourneyData.parse_journey's NODE SEQUENCE (a name
 	# collision). Reading `parsed["items"]` here loaded the round/shop nodes as blank custom items.
 	_journey_items = (journey.get("items", []) as Array).duplicate(true)
+	# Journey Events[] — Builder UI edits these; runtime fires EVT from the same list.
+	_journey_events = (journey.get("events", []) as Array).duplicate(true)
+	_journey_events_definitions_path = str(journey.get("events_definitions_path", ""))
+	_invalidate_event_defs_cache()
+	_events_selected_index = -1
 	# Cast roster — from the scanner's resolved `characters` (absolute portrait paths for display), same
 	# reasoning as items above (`parsed["characters"]` would be the raw pass-through, unresolved).
 	_journey_characters = (journey.get("characters", []) as Array).duplicate(true)
@@ -3349,7 +3383,8 @@ func _remove_overlay_fork_choice(fork_id: String, edge_idx: int) -> void:
 
 # Completes a click-to-connect: wires the armed source to `target_id` — either a fork choice's
 # out-edge (when _connecting_edge_idx >= 0) or a regular node's single out-edge. Rejects a
-# self-link or anything that would form a cycle (the runtime is a DAG). Re-selects the source.
+# self-link. Cycles are allowed (freeplay hubs, punish rematches) — runtime must terminate via
+# player choice / release jumps / loop_end, not assume a DAG.
 func _finish_connect(target_id: String) -> void:
 	var source: String = _connecting_from
 	var edge_idx: int = _connecting_edge_idx
@@ -3367,10 +3402,6 @@ func _finish_connect(target_id: String) -> void:
 		return
 	if target_id == source or not nodes.has(target_id):
 		_show_status("Connect cancelled (can't link a node to itself).", true)
-		_graph.select_graph_node(source)
-		return
-	if JourneyGraph.reachable_ids(_graph_model, target_id).has(source):
-		_show_status("Can't connect — that would create a loop.", true)
 		_graph.select_graph_node(source)
 		return
 	# A fork can't point two of its choices at the same node — one choice per target.
@@ -3407,9 +3438,6 @@ func _finish_anchor(source: String, target_id: String, edge_idx: int = -1) -> vo
 		_show_status("Anchor to a NEW node — not the locked base.", true)
 		return
 	if target_id == source:
-		return
-	if JourneyGraph.reachable_ids(_graph_model, target_id).has(source):
-		_show_status("Can't anchor — that would create a loop.", true)
 		return
 	var out: Array = (nodes[source] as Dictionary).get("out", [])
 	# A fork choice handle. Two cases, distinguished by whether this out-edge is already an overlay anchor:
@@ -3648,6 +3676,33 @@ func _restore_graph_snapshot(snap: Dictionary) -> void:
 
 
 # ---------------------------------------------------------------------------
+# Journey custom events (event_definitions.yml + Events[])
+# ---------------------------------------------------------------------------
+
+
+func _invalidate_event_defs_cache() -> void:
+	_event_defs_cache_path = ""
+	_event_defs_cache = {}
+
+
+func set_events_definitions_path(path: String) -> void:
+	_journey_events_definitions_path = path.strip_edges()
+	_invalidate_event_defs_cache()
+
+
+## Cached parse of the user-designated definitions file. Empty path → empty defs (no error).
+func get_event_definitions() -> Dictionary:
+	var path: String = _journey_events_definitions_path.strip_edges()
+	if path.is_empty():
+		return EventDefinitions.EMPTY.duplicate(true)
+	if path == _event_defs_cache_path and not _event_defs_cache.is_empty():
+		return _event_defs_cache
+	_event_defs_cache = EventDefinitions.load_path(path)
+	_event_defs_cache_path = path
+	return _event_defs_cache
+
+
+# ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
 
@@ -3668,6 +3723,15 @@ func _on_save_pressed() -> void:
 	_commit_focused_field()
 	_save_btn.disabled = true
 	_reset_save_state()
+	if not await _do_save():
+		_save_btn.disabled = false
+
+
+func _on_quick_save_pressed() -> void:
+	_commit_focused_field()
+	_save_btn.disabled = true
+	_reset_save_state()
+	_quick_save = true
 	if not await _do_save():
 		_save_btn.disabled = false
 
@@ -3700,6 +3764,22 @@ func _save_and_test_from(item: Dictionary, _arr: Array) -> void:
 	if not await _do_save():
 		_save_btn.disabled = false
 		_pending_test_location = {}
+
+
+# Quick Test: same as Play From Here but skips ffmpeg — requires already-pooled media.
+func _quick_save_and_test_from(item: Dictionary, _arr: Array) -> void:
+	var node_id: String = str(item.get("node_id", ""))
+	if node_id == "":
+		_show_status("Test play: couldn't identify that node.", true)
+		return
+	_save_btn.disabled = true
+	_reset_save_state()
+	_quick_save = true
+	_pending_test_location = {"node_id": node_id}
+	if not await _do_save():
+		_save_btn.disabled = false
+		_pending_test_location = {}
+		_quick_save = false
 
 
 # Parses the just-saved journey into the runtime GRAPH, starts it in GameState, and
@@ -3748,9 +3828,17 @@ func _launch_test_play(paths: Dictionary) -> void:
 func _do_save() -> bool:
 	# Rendition mode saves an overlay delta to its own folder — never the base — via a separate path.
 	if _rendition_mode:
+		if _quick_save:
+			_show_status("Quick Save isn't available for renditions — use Save.", true)
+			return false
 		return await _save_rendition()
 	if not _validate_presave():
 		return false
+	# Quick Save: JSON-only into the existing folder — never restage/copy/encode media.
+	# (The previous path rebuilt staging and byte-copied every video when hardlinks failed,
+	# which froze the editor on large journeys like Inferno.)
+	if _quick_save:
+		return _do_quick_save_inplace()
 	if not _check_animated_images():
 		return false
 	if not _build_transcode_plan():
@@ -3776,11 +3864,298 @@ func _do_save() -> bool:
 
 	_swap_staging_into_place(paths)
 	_invalidate_existing_run_saves(paths)
+	_original_journey_folder = SettingsService.get_journeys_dir() + "/" + (paths["final_abs_dir"] as String).get_file()
 	if not _pending_test_location.is_empty():
 		_launch_test_play(paths)
 	else:
 		_finalize_save_success()
 	return true
+
+
+# JSON-only save into the on-disk journey folder. Leaves content/ and media/ untouched.
+func _do_quick_save_inplace() -> bool:
+	var blockers: Array = _quick_save_blockers()
+	if not blockers.is_empty():
+		_show_quick_save_blocked(blockers)
+		return false
+
+	var data: Dictionary = _build_quick_save_journey_dict()
+	if data.is_empty():
+		_show_status("Quick Save failed: could not build journey data.", true)
+		return false
+
+	var folder_user: String = _original_journey_folder
+	var abs_dir: String = ProjectSettings.globalize_path(folder_user)
+	var tmp_path: String = abs_dir + "/journey.json.tmp"
+	var json_path: String = abs_dir + "/journey.json"
+	var f: FileAccess = FileAccess.open(tmp_path, FileAccess.WRITE)
+	if f == null:
+		_show_save_error_single(
+			"QUICK SAVE FAILED",
+			CAUSE_DST_UNWRITABLE,
+			"journey.json",
+			"Could not write %s." % tmp_path,
+			"Check that the journeys folder is writable."
+		)
+		return false
+	f.store_string(JSON.stringify(data, "\t"))
+	f.close()
+	# Replace atomically-ish: remove old then rename temp into place.
+	if FileAccess.file_exists(json_path):
+		DirAccess.remove_absolute(json_path)
+	var ren_err: Error = DirAccess.rename_absolute(tmp_path, json_path)
+	if ren_err != OK:
+		# Fallback copy if rename fails across odd mounts.
+		if FileAccess.file_exists(tmp_path):
+			DirAccess.copy_absolute(tmp_path, json_path)
+			DirAccess.remove_absolute(tmp_path)
+		if not FileAccess.file_exists(json_path):
+			_show_status("Quick Save failed: could not replace journey.json.", true)
+			return false
+
+	var paths: Dictionary = {
+		"journey_name": _journey_name.strip_edges(),
+		"final_abs_dir": abs_dir,
+		"staging_journey_dir": folder_user,
+		"abs_dir": abs_dir,
+	}
+	_invalidate_existing_run_saves(paths)
+	if not _pending_test_location.is_empty():
+		_launch_test_play(paths)
+	else:
+		_finalize_quick_save_success()
+	return true
+
+
+# Builds journey.json without touching media — relativizes absolute paths under the journey folder.
+func _build_quick_save_journey_dict() -> Dictionary:
+	var out_nodes: Dictionary = {}
+	var nodes_in: Dictionary = _graph_model.get("nodes", {})
+	for id: String in nodes_in:
+		var node: Dictionary = nodes_in[id]
+		var ntype: String = str(node.get("type", "round"))
+		var data_in: Dictionary = node.get("data", {})
+		var saved_data: Variant = _relativize_tree(
+			JourneyData.coerce_node_save_data(ntype, data_in)
+		)
+		var saved_out: Variant
+		if ntype == "fork":
+			# Keep choice config; only rewrite image/audio paths to journey-relative.
+			saved_out = _relativize_tree((node.get("out", []) as Array).duplicate(true))
+		else:
+			saved_out = _clean_regular_out(node.get("out", []))
+		var saved_node: Dictionary = {
+			"type": ntype,
+			"data": saved_data,
+			"out": saved_out,
+		}
+		if node.has("pos"):
+			saved_node["pos"] = node["pos"]
+		out_nodes[id] = saved_node
+
+	var node_block: Dictionary = JourneyGraph.to_json(
+		{"start": _graph_model.get("start", ""), "nodes": out_nodes}
+	)
+
+	var items_for_save: Array = []
+	for it: Dictionary in _journey_items:
+		items_for_save.append(_relativize_tree((it as Dictionary).duplicate(true)))
+
+	var characters_for_save: Array = []
+	for c: Dictionary in _journey_characters:
+		characters_for_save.append(_relativize_tree((c as Dictionary).duplicate(true)))
+
+	var result: Dictionary = {
+		"Name": _journey_name.strip_edges(),
+		"Author": _journey_author.strip_edges(),
+		"Description": _journey_desc.strip_edges(),
+		"Difficulty": JourneyData.DIFFICULTIES[_journey_difficulty_idx],
+		"Tags": TagRegistry.sanitize(_journey_tags),
+		"MapEnabled": _journey_map_enabled,
+		"ShowForkCounts": _journey_show_fork_counts,
+		"ShowLoopsOnMap": _journey_show_loops_on_map,
+		"MapBackdrops": _quick_save_map_backdrops_meta(),
+		"MapFog": _journey_map_fog,
+		"MapFogReveal": _journey_map_fog_reveal,
+		"MysteryPreview": _journey_mystery_preview,
+		"AutoAdvanceEnabled": _journey_auto_advance_enabled,
+		"AutoAdvanceStoryboardSecs": _journey_auto_advance_storyboard_secs,
+		"AutoAdvanceForkSecs": _journey_auto_advance_fork_secs,
+		"ShownCounters": JourneyData.clean_flag_list(_journey_shown_counters),
+		"AllowFinish": _journey_allow_finish,
+		"FinishNode": _journey_finish_node,
+		"UnlockPayPerUse": _journey_unlock_pay_per_use,
+		"Items": JourneyData.coerce_journey_items(items_for_save),
+		"Characters": JourneyData.coerce_journey_characters(characters_for_save),
+		"Events": JourneyData.coerce_journey_events(_journey_events),
+		"EventsDefinitionsPath": _journey_events_definitions_path,
+	}
+	JourneyData.stamp_journey_identity(result, _journey_id)
+	_journey_id = str(result["JourneyId"])
+	result.merge(node_block)
+	result["Comments"] = _serialize_comments(_graph_model.get("comments", []))
+	result["Groups"] = _serialize_groups(_graph_model.get("groups", []))
+	# Skip _run_audit (reads every funscript) — Quick Save is for fast iteration.
+	result["EstimatedDurationMs"] = 0
+	return result
+
+
+# Map backdrop meta for Quick Save — keep existing media/map_N.* filenames; no copy.
+func _quick_save_map_backdrops_meta() -> Array:
+	var meta: Array = []
+	for i: int in _map_backdrops.size():
+		var b: Dictionary = _map_backdrops[i]
+		var src: String = str(b.get("path", ""))
+		if src == "":
+			continue
+		var rel: String = _rel_journey_media(src)
+		var fname: String = rel.get_file() if rel != "" else src.get_file()
+		if fname == "":
+			continue
+		var off: Vector2 = b.get("offset", Vector2.ZERO)
+		meta.append(
+			{
+				"Image": fname,
+				"X": off.x,
+				"Y": off.y,
+				"Scale": float(b.get("scale", 1.0)),
+				"Opacity": float(b.get("opacity", 0.6)),
+				"Rot": float(b.get("rotation", 0.0)),
+			}
+		)
+	return meta
+
+
+# Turns absolute paths under the journey folder into journey-root-relative paths.
+func _rel_journey_media(path: String) -> String:
+	var raw: String = str(path).strip_edges()
+	if raw == "":
+		return ""
+	var norm: String = raw.replace("\\", "/")
+	if norm.begins_with("content/") or norm.begins_with("media/"):
+		return norm
+	var root: String = ProjectSettings.globalize_path(_original_journey_folder).replace("\\", "/")
+	var abs_path: String = raw
+	if raw.begins_with("user://") or raw.begins_with("res://"):
+		abs_path = ProjectSettings.globalize_path(raw)
+	abs_path = abs_path.replace("\\", "/")
+	if abs_path.begins_with(root + "/"):
+		return abs_path.substr(root.length() + 1)
+	if abs_path.to_lower().begins_with(root.to_lower() + "/"):
+		return abs_path.substr(root.length() + 1)
+	return raw
+
+
+func _relativize_tree(value: Variant) -> Variant:
+	if value is String:
+		var s: String = value as String
+		# Only rewrite strings that look like media paths under this journey.
+		if (
+			s.contains("/content/")
+			or s.contains("\\content\\")
+			or s.contains("/media/")
+			or s.contains("\\media\\")
+			or s.begins_with("content/")
+			or s.begins_with("media/")
+			or s.begins_with("user://")
+		):
+			return _rel_journey_media(s)
+		return s
+	if value is Dictionary:
+		var out: Dictionary = {}
+		for k: Variant in value:
+			out[k] = _relativize_tree(value[k])
+		return out
+	if value is Array:
+		var arr: Array = []
+		for item: Variant in value:
+			arr.append(_relativize_tree(item))
+		return arr
+	return value
+
+
+# Reasons Quick Save must refuse (author needs a full Save with ffmpeg).
+func _quick_save_blockers() -> Array:
+	var out: Array = []
+	if _original_journey_folder.strip_edges() == "":
+		out.append("Journey has never been fully saved — use Save once to pool media.")
+		return out
+	var folder_name: String = JourneyData.sanitize_folder_name(_journey_name.strip_edges())
+	var orig_name: String = (_original_journey_folder as String).get_file()
+	if folder_name != "" and orig_name != "" and folder_name != orig_name:
+		out.append("Journey was renamed — use full Save to move media into the new folder.")
+	if _cover_path != "" and MediaPoolService.is_animated_source(_cover_path):
+		var has_cover: bool = false
+		var media_dir: String = ProjectSettings.globalize_path(_original_journey_folder + "/media")
+		if DirAccess.dir_exists_absolute(media_dir):
+			var d: DirAccess = DirAccess.open(media_dir)
+			if d != null:
+				d.list_dir_begin()
+				var fname: String = d.get_next()
+				while fname != "":
+					if not d.current_is_dir() and fname.begins_with("cover."):
+						has_cover = true
+						break
+					fname = d.get_next()
+				d.list_dir_end()
+		if not has_cover:
+			out.append("Cover still needs a frame extract — full Save required.")
+	for nid: String in _graph_model.get("nodes", {}):
+		var node: Dictionary = _graph_model["nodes"][nid]
+		var ntype: String = str(node.get("type", ""))
+		var data: Dictionary = node.get("data", {})
+		var label: String = str(data.get("name", nid)).strip_edges()
+		if label == "":
+			label = nid
+		if ntype == "round" or ntype == "cutscene":
+			var segs: Array = JourneyData.normalize_segments(data) if ntype == "round" else []
+			if not segs.is_empty():
+				out.append('%s "%s": pending trim/EDL — full Save required to bake.' % [ntype.capitalize(), label])
+			_quick_save_check_video(str(data.get("video_path", "")), label, ntype, out)
+			if ntype == "round":
+				for pe: Variant in data.get("pool_entries", []):
+					var pe_d: Dictionary = pe as Dictionary
+					_quick_save_check_video(
+						str(pe_d.get("video_path", "")),
+						"%s / pool" % label,
+						"round",
+						out
+					)
+				var boss_img: String = str(data.get("boss_image", ""))
+				if boss_img != "" and MediaPoolService.is_animated_source(boss_img):
+					if not MediaPoolService.is_baked_animation(boss_img, JourneyData.ANIM_CAP_BOSS):
+						out.append('Round "%s": boss image still needs bake — full Save required.' % label)
+	return out
+
+
+func _quick_save_check_video(src: String, label: String, ntype: String, out: Array) -> void:
+	if src == "":
+		return
+	if JourneyData.is_pooled_content_path(src):
+		return
+	out.append(
+		'%s "%s": video is not pooled yet (%s) — full Save required.'
+		% [ntype.capitalize(), label, src.get_file()]
+	)
+
+
+func _show_quick_save_blocked(blockers: Array) -> void:
+	var body: String = "Quick Save skips re-encoding and only works when every clip is already pooled.\n\n"
+	for i: int in mini(blockers.size(), 12):
+		body += "• %s\n" % str(blockers[i])
+	if blockers.size() > 12:
+		body += "• …and %d more\n" % (blockers.size() - 12)
+	body += "\nUse Save (full) once, then Quick Save / Quick Test for iteration."
+	_show_builder_message("QUICK SAVE BLOCKED", body)
+
+
+func _finalize_quick_save_success() -> void:
+	_quick_save = false
+	_save_btn.disabled = false
+	var message: String = "Quick saved (no re-encode)."
+	if _invalidated_save_count > 0:
+		message = "Quick saved (player run save reset)."
+	_show_status(message, false)
 
 
 # ── Extract to rendition (feature #3) ─────────────────────────────────────────
@@ -4403,6 +4778,8 @@ func _collect_rendition_presave_issues() -> Array:
 	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model, _journey_finish_node):
 		if str(gi.get("kind", "")) == "no_start":
 			continue  # the rendition inherits the base's start through its anchors
+		if str(gi.get("kind", "")) == "cycle":
+			continue  # cycles advisory-only (same as base journey save)
 		var m: Dictionary = _structural_issue_to_presave(gi)
 		if not m.is_empty():
 			issues.append(m)
@@ -4560,6 +4937,7 @@ func _reset_save_state() -> void:
 	_round_folder_counter = 0
 	_invalidated_save_count = 0
 	_pending_test_location = {}
+	_quick_save = false
 
 
 # Runs the whole-tree presave validation pass. Returns false (and shows the
@@ -4692,6 +5070,12 @@ func _build_transcode_plan() -> bool:
 		if not auto_transcode and not is_trim:
 			continue  # transcode off: only pending cuts are baked
 
+		# Already-pooled journey content was encoded by a prior Save — never re-probe /
+		# re-encode unless a pending trim forces a bake. Stops "every test play re-encodes"
+		# when ffprobe flakes or paths still point at content/*.mp4.
+		if not is_trim and JourneyData.is_pooled_content_path(src):
+			continue
+
 		if not src_info.has(src):
 			src_info[src] = MediaPoolService.probe_stream_info(src)
 		var info: Dictionary = src_info[src]
@@ -4758,7 +5142,10 @@ func _setup_save_folders() -> Dictionary:
 	# the cover slot AND a storyboard wouldn't get copied twice.
 	var copied_images: Dictionary = {}
 	if _cover_path != "":
-		if MediaPoolService.is_animated_source(_cover_path):
+		if _quick_save:
+			# No ffmpeg on Quick Save — reuse the journey's existing media/cover.* when present.
+			_quick_save_seed_cover(abs_media_dir, copied_images)
+		elif MediaPoolService.is_animated_source(_cover_path):
 			# The cover deliberately never animates — it sits in the catalogue grid, where N moving
 			# cards would cost real frames for no gain. But Godot can't read a GIF at all, so bake
 			# its first frame to a PNG. Unlike the in-game surfaces this does NOT go to the content
@@ -4782,6 +5169,33 @@ func _setup_save_folders() -> Dictionary:
 		"final_abs_dir": final_abs_dir,
 		"copied_images": copied_images,
 	}
+
+
+# Seeds staging media/ with the on-disk journey's cover file (hardlink/copy) for Quick Save.
+func _quick_save_seed_cover(abs_media_dir: String, copied_images: Dictionary) -> void:
+	var orig: String = ProjectSettings.globalize_path(_original_journey_folder)
+	var media_dir: String = orig + "/media"
+	if not DirAccess.dir_exists_absolute(media_dir):
+		return
+	var d: DirAccess = DirAccess.open(media_dir)
+	if d == null:
+		return
+	d.list_dir_begin()
+	var fname: String = d.get_next()
+	while fname != "":
+		if not d.current_is_dir() and fname.begins_with("cover."):
+			var src: String = media_dir + "/" + fname
+			var dst: String = abs_media_dir + "/" + fname
+			if not MediaPoolService.try_hardlink(src, dst):
+				DirAccess.copy_absolute(src, dst)
+			copied_images[_cover_path] = fname
+			break
+		fname = d.get_next()
+	d.list_dir_end()
+	# Fall back: static cover path already on disk under media/ or as a still image.
+	if copied_images.is_empty() and _cover_path != "" and not MediaPoolService.is_animated_source(_cover_path):
+		var ext: String = _cover_path.get_extension().to_lower()
+		_copy_image_deduped(_cover_path, abs_media_dir, "cover." + ext, copied_images)
 
 
 # Creates and parents the streaming progress modal IF the save will actually
@@ -4913,6 +5327,8 @@ func _save_graph_nodes(paths: Dictionary, modal: Control) -> Dictionary:
 		"UnlockPayPerUse": _journey_unlock_pay_per_use,
 		"Items": JourneyData.coerce_journey_items(items_for_save),
 		"Characters": JourneyData.coerce_journey_characters(characters_for_save),
+		"Events": JourneyData.coerce_journey_events(_journey_events),
+		"EventsDefinitionsPath": _journey_events_definitions_path,
 	}
 	# Identity + version stamps. _journey_id is empty for a new journey (minted here) and carries
 	# the loaded id for an existing one, so re-saving — or renaming — never changes it.
@@ -4973,6 +5389,24 @@ func _pool_graph_nodes(paths: Dictionary, modal: Control, skip_ids: Dictionary =
 				)
 				if saved_data.is_empty():
 					return {"ok": false, "nodes": {}}  # transcode/copy failure: modal already shown
+			"cutscene":
+				# EP / unlock / credits clips — pool like rounds so journey.json never keeps
+				# absolute or legacy folder-layout paths that resolve_paths would double.
+				var cname: String = str(saved_data.get("name", id)).strip_edges()
+				if cname == "":
+					cname = id
+				var cvres: Dictionary = await _pool_video_into(
+					str(data_in.get("video_path", "")),
+					abs_dir,
+					modal,
+					cname,
+					'Cutscene "%s"' % cname,
+					1,
+					1
+				)
+				if not bool(cvres.get("ok", false)):
+					return {"ok": false, "nodes": {}}
+				saved_data["video_path"] = str(cvres.get("rel", ""))
 			"storyboard":
 				saved_data = await _save_storyboard_node_media(
 					saved_data, data_in, abs_dir, abs_media_dir, id, copied_images, modal
@@ -5248,6 +5682,15 @@ func _pool_video_into(
 		trim_out = int(only.get("out_ms", 0))
 	var plan_key: String = _transcode_plan_key(vid_src, segments)
 	var is_transcode: bool = (not is_edl) and _transcode_plan.has(plan_key)
+	if _quick_save and (is_transcode or is_edl):
+		_show_save_error_single(
+			"QUICK SAVE BLOCKED",
+			CAUSE_TRANSCODE_FAILED,
+			subject,
+			"Quick Save cannot encode or bake '%s'." % subject,
+			"Use full Save once for new or trimmed clips, then Quick Save for later edits."
+		)
+		return {"rel": "", "ok": false}
 	var vid_ext: String = "mp4" if (is_transcode or is_edl) else vid_src.get_extension()
 	var pool: Dictionary = _assign_pooled_media(vid_src, vid_ext, segments)
 	var rel: String = pool["rel"]
@@ -5751,6 +6194,19 @@ func _store_gif_source(
 	if not force_static and MediaPoolService.is_baked_animation(src, cap):
 		return {"handled": true, "rel": _pool_small_file(src, abs_dir, "mp4")}
 
+	# Quick Save never runs ffmpeg — refuse unbaked animated sources.
+	if _quick_save:
+		_save_aborted = true
+		_save_abort_error = {
+			"result": {
+				"ok": false,
+				"reason": CAUSE_TRANSCODE_FAILED,
+				"detail": "Quick Save cannot bake animated images",
+			},
+			"item": src.get_file(),
+		}
+		return {"handled": true, "rel": ""}
+
 	var animated: bool = not force_static and MediaPoolService.probe_is_animated(src)
 	if animated:
 		var rel: String = await _bake_gif_pooled(src, abs_dir, cap, true, modal)
@@ -6045,7 +6501,12 @@ func _copy_file_chunked(src: String, dst: String, progress: Callable = Callable(
 		if progress.is_valid():
 			progress.call(copied, total)
 		if Time.get_ticks_msec() - budget_start >= COPY_FRAME_BUDGET_MS:
-			await get_tree().process_frame
+			var tree: SceneTree = get_tree()
+			if tree == null:
+				src_file.close()
+				dst_file.close()
+				return {"ok": false, "reason": CAUSE_CANCELLED, "detail": "scene tree lost"}
+			await tree.process_frame
 			budget_start = Time.get_ticks_msec()
 
 	src_file.close()
@@ -6374,11 +6835,12 @@ func _collect_presave_issues_graph() -> Array:
 		for k: int in range(before, issues.size()):
 			(issues[k] as Dictionary)["node_id"] = id
 
-	# Structural graph validation (L4): block on graphs the runtime can't cleanly play — a missing
-	# start, an edge to a deleted node, a cycle (the DAG walk would loop forever), or an unreachable
-	# node. Unreachable nodes block so a saved journey never carries media that's never played (a
-	# storage concern): the author must wire the orphan into the flow or delete it before saving.
+	# Structural graph validation: block on missing start, dangling edges, unreachable islands.
+	# Cycles are intentional for Inferno-style freeplay hubs / punish rematches — advisory ⚠ only
+	# (see _compute_node_warnings); do not block save.
 	for gi: Dictionary in JourneyGraph.validate_graph(_graph_model, _journey_finish_node):
+		if str(gi.get("kind", "")) == "cycle":
+			continue
 		var m: Dictionary = _structural_issue_to_presave(gi)
 		if not m.is_empty():
 			# validate_graph carries the offending node's id (empty for no_start) — thread it
@@ -6410,12 +6872,9 @@ func _structural_issue_to_presave(gi: Dictionary) -> Dictionary:
 				"Re-wire that connection to a current node — its target may have been deleted.",
 			}
 		"cycle":
-			return {
-				"cause": CAUSE_CYCLE,
-				"item": _graph_issue_label(str(gi.get("id", ""))),
-				"detail": "This node is part of a loop — a journey must flow forward (no cycles).",
-				"hint": "Remove the connection that loops back to an earlier node.",
-			}
+			# Soft-only — never returned from presave collectors (filtered above). Kept for docs /
+			# any caller that still maps the kind.
+			return {}
 		"unreachable":
 			return {
 				"cause": CAUSE_UNREACHABLE,
@@ -6488,8 +6947,8 @@ func _save_check_encounter(data: Dictionary, ctx: String, issues: Array) -> void
 
 # Graph fork authoring checks (3c-ii): a fork's choices are its out-edges. Mirrors the tree's
 # _save_check_fork — ≥2 choices, a Sacrifice fork needs ≥1 free choice, and each choice needs a
-# name (the player sees it on the choice screen). Structural edge validity (cycles / dangling) is
-# handled separately by JourneyGraph.validate_graph; cycles are also prevented at wire time.
+# name (the player sees it on the choice screen). Structural edge validity (dangling) is
+# handled separately by JourneyGraph.validate_graph; cycles are allowed (advisory ⚠ only).
 # Loop End validation (L4). First the PAIRING: the End's loop_to must point at its Loop Start, or it
 # can't replay (a broken pair — e.g. the Start was deleted). Then SATISFIABILITY: a loop that jumps back
 # must have at least one exit condition its BODY can satisfy, or the player loops forever (a soft-lock).

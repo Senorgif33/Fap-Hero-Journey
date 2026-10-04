@@ -253,6 +253,9 @@ static func parse_journey(path: String, folder: String) -> Dictionary:
 		"created_with": str(data.get("CreatedWith", "")),
 		# Counter names surfaced to the player (see _graph_meta).
 		"shown_counters": JourneyData.clean_flag_list(data.get("ShownCounters", [])),
+		# Journey-level Vector EVT events (informational defs path; runtime fires from Events).
+		"events": JourneyData.parse_journey_events(data.get("Events", [])),
+		"events_definitions_path": str(data.get("EventsDefinitionsPath", "")),
 		# Stable journey id; blank on journeys written before ids existed (see _graph_meta).
 		"journey_id": str(data.get("JourneyId", "")),
 		# Soft edit-lock: true on a journey installed from a paid pack, so the buyer can't open it in the
@@ -620,6 +623,9 @@ static func _graph_meta(data: Dictionary, path: String, folder: String) -> Dicti
 		# Storyboard cast — referenced by each storyboard line's `stage`. Each character carries its own
 		# portraits (paths resolved) and placements (position/size boxes).
 		"characters": _journey_characters_resolved(data, path),
+		# Journey-level Vector EVT events. Definitions path is informational (Vector loads defs in GUI).
+		"events": JourneyData.parse_journey_events(data.get("Events", [])),
+		"events_definitions_path": str(data.get("EventsDefinitionsPath", "")),
 		"cover_path": find_cover_image(path),
 		"modified_time": FileAccess.get_modified_time(path + "/journey.json"),
 		"rounds": [],

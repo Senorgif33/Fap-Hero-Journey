@@ -432,6 +432,9 @@ func show_journey_info_panel() -> void:
 	side_vbox.add_child(_make_custom_items_section())
 
 	side_vbox.add_child(_side_section_separator())
+	side_vbox.add_child(_make_events_definitions_section())
+
+	side_vbox.add_child(_side_section_separator())
 	side_vbox.add_child(_make_characters_section())
 
 	side_vbox.add_child(_side_section_separator())
@@ -3598,10 +3601,19 @@ func _make_test_controls(item: Dictionary, arr: Array) -> Control:
 	var btn: Button = UITheme.make_icon_btn("▶  PLAY FROM HERE", false, UITheme.SUCCESS)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn.tooltip_text = UITheme.wrap_tip(
-		"Save the journey and play it in the real runtime starting at this node."
+		"Full save then play from this node. May re-encode media."
 	)
 	btn.pressed.connect(func() -> void: _owner._save_and_test_from(item, arr))
 	panel.add_child(btn)
+
+	# Fast iteration: skip ffmpeg when media is already pooled.
+	var qbtn: Button = UITheme.make_icon_btn("⚡  QUICK TEST", false, UITheme.AMBER)
+	qbtn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	qbtn.tooltip_text = UITheme.wrap_tip(
+		"Quick Save with no re-encode, then play from this node. Requires pooled media."
+	)
+	qbtn.pressed.connect(func() -> void: _owner._quick_save_and_test_from(item, arr))
+	panel.add_child(qbtn)
 
 	# Starting score / coins for the preview. Mainly for Conditional / Sacrifice
 	# forks, which read last-round score and coin balance to resolve. Persist on
@@ -4046,12 +4058,12 @@ func _make_items_blocked_toggle(arr: Array, idx: int) -> Control:
 
 # Mode blurbs shown under the dropdown — only the selected mode's fields appear.
 const _RELEASE_MODE_HINTS: Dictionary = {
+	"windows":
+	"Time bands on the round clock: Release sets flag / awards coins / jump / seek. Optional award coins if no release.",
 	"stamp_flag":
 	"Sets a run flag when Release is pressed, then continues the round. Branch afterward with a fork that checks that flag.",
 	"fail_jump":
 	"On press: end the round and jump to another node. Flags are preserved.",
-	"timed_window":
-	"On press before the deadline: mark released. At the deadline: award hit or miss score.",
 	"loop_until_clean":
 	"Pressing Release restarts this round. Finishing without pressing advances to the next node.",
 	"punish_polarity":
@@ -4069,6 +4081,10 @@ func _make_release_expander(arr: Array, idx: int, reselect: Callable) -> Control
 
 	var enabled: bool = bool(arr[idx].get("release_enabled", false))
 	var mode: String = str(arr[idx].get("release_mode", "stamp_flag"))
+	# Deprecated timed_window: keep data, but Builder treats it as windows for editing.
+	if mode == "timed_window":
+		mode = "windows"
+		arr[idx]["release_mode"] = "windows"
 
 	var wrapper: VBoxContainer = VBoxContainer.new()
 	wrapper.add_theme_constant_override("separation", 6)
@@ -4103,11 +4119,11 @@ func _make_release_expander(arr: Array, idx: int, reselect: Callable) -> Control
 	)
 
 	panel.add_child(_side_field_label("MODE"))
-	var modes: Array[String] = ReleaseLogic.MODES.duplicate()
+	var modes: Array[String] = ReleaseLogic.BUILDER_MODES.duplicate()
 	var mode_labels: Array[String] = [
+		"Windows — time bands (flag / coins / jump / seek)",
 		"Stamp flag — set flag, keep playing",
 		"Fail jump — stop and jump to a node",
-		"Timed window — score at a deadline",
 		"Loop until clean — press restarts round",
 		"Punish polarity — fail or must-release",
 	]
@@ -4134,37 +4150,9 @@ func _make_release_expander(arr: Array, idx: int, reselect: Callable) -> Control
 
 	# Mode-specific parameters only (not overrides — blanks for unused modes are ignored).
 	match mode:
-		"stamp_flag":
-			panel.add_child(
-				_make_effect_text_field(
-					arr, idx, "release_flag", "FLAG TO SET (REQUIRED)", "released"
-				)
-			)
+		"windows":
+			panel.add_child(_make_release_windows_summary(arr, idx, reselect))
 			panel.add_child(_make_release_hide_after_press(arr, idx))
-		"fail_jump":
-			panel.add_child(
-				_make_release_jump_picker(arr, idx, "JUMP TO NODE (REQUIRED)")
-			)
-			panel.add_child(_make_release_hide_after_press(arr, idx))
-		"timed_window":
-			panel.add_child(
-				_make_effect_int_field(
-					arr, idx, "release_deadline_ms", "DEADLINE MS (REQUIRED)", 0
-				)
-			)
-			panel.add_child(
-				_make_effect_int_field(arr, idx, "release_score_hit", "SCORE IF RELEASED IN TIME", 0)
-			)
-			panel.add_child(
-				_make_release_signed_int_field(
-					arr, idx, "release_score_miss", "SCORE IF MISSED DEADLINE", 0
-				)
-			)
-			panel.add_child(
-				_make_effect_text_field(
-					arr, idx, "release_flag", "FLAG TO SET ON PRESS (OPTIONAL)", "released"
-				)
-			)
 			panel.add_child(
 				_make_effect_text_field(
 					arr,
@@ -4173,6 +4161,18 @@ func _make_release_expander(arr: Array, idx: int, reselect: Callable) -> Control
 					"HIDE IF THIS FLAG IS ALREADY SET (OPTIONAL)",
 					"early_release"
 				)
+			)
+		"stamp_flag":
+			panel.add_child(
+				_make_effect_text_field(
+					arr, idx, "release_flag", "FLAG TO SET (REQUIRED)", "released"
+				)
+			)
+			panel.add_child(_make_release_seek_field(arr, idx))
+			panel.add_child(_make_release_hide_after_press(arr, idx))
+		"fail_jump":
+			panel.add_child(
+				_make_release_jump_picker(arr, idx, "JUMP TO NODE (REQUIRED)")
 			)
 			panel.add_child(_make_release_hide_after_press(arr, idx))
 		"loop_until_clean":
@@ -4193,9 +4193,425 @@ func _make_release_expander(arr: Array, idx: int, reselect: Callable) -> Control
 					arr, idx, "release_flag", "FLAG ON SUCCESS (OPTIONAL)", "released"
 				)
 			)
+			panel.add_child(_make_release_seek_field(arr, idx))
 			panel.add_child(_make_release_hide_after_press(arr, idx))
 
 	return wrapper
+
+
+func _make_release_windows_summary(arr: Array, idx: int, reselect: Callable) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	var bands: Array = JourneyData.normalize_release_windows(arr[idx].get("release_windows", []))
+	arr[idx]["release_windows"] = bands
+
+	var summary: Label = Label.new()
+	if bands.is_empty():
+		summary.text = "No bands yet — open the overlay to author thresholds against the video clock."
+	else:
+		var bits: PackedStringArray = PackedStringArray()
+		bits.append("%d band(s)" % bands.size())
+		for i: int in mini(3, bands.size()):
+			var b: Dictionary = bands[i] as Dictionary
+			var until: int = int(b.get("until_ms", 0))
+			var label: String = "→ end" if until == 0 else _format_duration(until)
+			bits.append(label)
+		if bands.size() > 3:
+			bits.append("…")
+		summary.text = " · ".join(bits)
+	summary.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	summary.add_theme_font_size_override("font_size", 11)
+	summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(summary)
+
+	var warns: Array = JourneyData.validate_release_windows(bands, _round_clock_ms(arr[idx]))
+	if not warns.is_empty():
+		var w: Label = Label.new()
+		w.text = "⚠ " + " · ".join(PackedStringArray(warns))
+		w.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+		w.add_theme_font_size_override("font_size", 10)
+		w.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		box.add_child(w)
+
+	var open_btn: Button = Button.new()
+	open_btn.text = "⏱ OPEN RELEASE WINDOWS"
+	open_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(open_btn, UITheme.CYAN)
+	open_btn.pressed.connect(
+		func() -> void: _open_journey_events_editor(arr, idx, reselect, true)
+	)
+	box.add_child(open_btn)
+	return box
+
+
+func _make_release_seek_field(arr: Array, idx: int) -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 4)
+	box.add_child(_side_field_label("SEEK TO TIMESTAMP AFTER RELEASE (OPTIONAL)"))
+	var seek: int = int(arr[idx].get("release_seek_to_ms", -1))
+	var enabled: bool = seek >= 0
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	var tog: CheckButton = CheckButton.new()
+	tog.text = "ON" if enabled else "OFF"
+	tog.button_pressed = enabled
+	var mins: SpinBox = SpinBox.new()
+	mins.min_value = 0
+	mins.max_value = 999
+	mins.step = 1
+	mins.prefix = "m "
+	mins.value = (seek / 60000) if enabled else 0
+	mins.editable = enabled
+	mins.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(mins)
+	var secs: SpinBox = SpinBox.new()
+	secs.min_value = 0
+	secs.max_value = 59
+	secs.step = 1
+	secs.prefix = "s "
+	secs.value = ((seek / 1000) % 60) if enabled else 0
+	secs.editable = enabled
+	secs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_spin_box(secs)
+	var write_seek := func() -> void:
+		if not mins.editable:
+			return
+		arr[idx]["release_seek_to_ms"] = int(mins.value) * 60000 + int(secs.value) * 1000
+	mins.value_changed.connect(func(_v: float) -> void: write_seek.call())
+	secs.value_changed.connect(func(_v: float) -> void: write_seek.call())
+	tog.toggled.connect(
+		func(on: bool) -> void:
+			tog.text = "ON" if on else "OFF"
+			mins.editable = on
+			secs.editable = on
+			if on:
+				write_seek.call()
+			else:
+				arr[idx]["release_seek_to_ms"] = -1
+	)
+	row.add_child(tog)
+	row.add_child(mins)
+	row.add_child(secs)
+	box.add_child(row)
+	var hint: Label = Label.new()
+	hint.text = "Forward seek in the same round after a continuing release. Ignored on fail jump / restart."
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(hint)
+	return box
+
+
+
+# Journey Info: user-designated event_definitions.yml path (names + default param keys).
+func _make_events_definitions_section() -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	box.add_child(_side_field_label("EVENT DEFINITIONS"))
+
+	var hint: Label = Label.new()
+	hint.text = (
+		"Path to funscript-tools / Vector event_definitions.yml. Used by the round Custom Events "
+		+ "editor for event names and editable params. Runtime does not require this file — Vector "
+		+ "loads its own copy."
+	)
+	hint.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(hint)
+
+	var zone: PanelContainer = DropZoneScript.new()
+	zone.accepted_extensions = ["yml", "yaml"]
+	zone.picker_title = "Select Event Definitions"
+	zone.picker_filters = ["*.yml,*.yaml ; YAML Files", "*.* ; All Files"]
+	zone.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var rm: Button = UITheme.make_icon_btn(
+		"\u2715", _owner._journey_events_definitions_path == "", UITheme.MAGENTA
+	)
+	rm.tooltip_text = UITheme.wrap_tip("Clear definitions path")
+	rm.pressed.connect(func() -> void: zone.set_file(""))
+
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.add_child(zone)
+	row.add_child(rm)
+	box.add_child(row)
+
+	if _owner._journey_events_definitions_path != "":
+		zone.call_deferred("set_file", _owner._journey_events_definitions_path, false)
+
+	zone.file_dropped.connect(
+		func(p: String) -> void:
+			_owner.set_events_definitions_path(p)
+			rm.disabled = p == ""
+			var defs: Dictionary = _owner.get_event_definitions()
+			var err: String = str(defs.get("error", ""))
+			if p == "":
+				_owner._show_status("Event definitions path cleared.", false)
+			elif err != "":
+				_owner._show_status("Definitions: %s" % err, true)
+			else:
+				_owner._show_status(
+					"Loaded %d event definitions." % (defs.get("names", []) as Array).size(), false
+				)
+	)
+
+	var status: Label = Label.new()
+	status.add_theme_font_size_override("font_size", 10)
+	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	if _owner._journey_events_definitions_path == "":
+		status.text = "No definitions path set — round Custom Events cannot open until one is chosen."
+		status.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	else:
+		var defs2: Dictionary = _owner.get_event_definitions()
+		var err2: String = str(defs2.get("error", ""))
+		if err2 != "":
+			status.text = "\u26a0 %s" % err2
+			status.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+		else:
+			status.text = "%d events available" % (defs2.get("names", []) as Array).size()
+			status.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	box.add_child(status)
+	return box
+
+
+# Round Custom Events: summary + Open Events Editor (full overlay).
+func _make_custom_events_section(arr: Array, idx: int, reselect: Callable) -> Control:
+	var round_id: String = _find_node_id_for_data(arr[idx])
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+
+	var count: int = (
+		JourneyData.events_for_round(_owner._journey_events, round_id).size() if round_id != "" else 0
+	)
+	var hdr: Button = Button.new()
+	hdr.text = "\u25be  CUSTOM EVENTS  (%d)" % count
+	hdr.toggle_mode = true
+	hdr.button_pressed = true
+	hdr.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(hdr, UITheme.CYAN)
+	box.add_child(hdr)
+
+	var panel: VBoxContainer = VBoxContainer.new()
+	panel.add_theme_constant_override("separation", 8)
+	box.add_child(panel)
+	hdr.toggled.connect(
+		func(on: bool) -> void:
+			panel.visible = on
+			hdr.text = (
+				("\u25be  CUSTOM EVENTS  (%d)" % count)
+				if on
+				else ("\u25b8  CUSTOM EVENTS  (%d)" % count)
+			)
+	)
+
+	var tip: Label = Label.new()
+	tip.text = (
+		"Vector EVT triggers for this round (video-relative). Open the editor to place events "
+		+ "on a timeline with the funscript — Apply commits, then Save the journey."
+	)
+	tip.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	tip.add_theme_font_size_override("font_size", 10)
+	tip.uppercase = true
+	tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	panel.add_child(tip)
+
+	if round_id.is_empty():
+		var miss: Label = Label.new()
+		miss.text = "Could not resolve this round's graph id — reselect the node."
+		miss.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+		miss.add_theme_font_size_override("font_size", 10)
+		panel.add_child(miss)
+		return box
+
+	var length_ms: int = _round_clock_ms(arr[idx])
+	var round_events: Array = JourneyData.events_for_round(_owner._journey_events, round_id)
+	var clock_lbl: Label = Label.new()
+	clock_lbl.add_theme_font_size_override("font_size", 10)
+	if length_ms > 0:
+		clock_lbl.text = "Round clock: %s  ·  %d event(s)" % [_format_duration(length_ms), count]
+		clock_lbl.add_theme_color_override("font_color", UITheme.SEPARATOR)
+	else:
+		clock_lbl.text = "Round clock unknown — add video/funscript for length. Editor still opens."
+		clock_lbl.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+	panel.add_child(clock_lbl)
+
+	var warns: Array = JourneyData.validate_round_events(round_events, length_ms)
+	if not warns.is_empty():
+		var warn_lbl: Label = Label.new()
+		warn_lbl.text = "\u26a0 " + "\n\u26a0 ".join(PackedStringArray(warns))
+		warn_lbl.add_theme_color_override("font_color", UITheme.ERROR_SOFT)
+		warn_lbl.add_theme_font_size_override("font_size", 10)
+		warn_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		panel.add_child(warn_lbl)
+
+	for e: Variant in round_events:
+		var ev: Dictionary = e
+		var row: Label = Label.new()
+		var dur: int = int((ev.get("params", {}) as Dictionary).get("duration_ms", 0))
+		row.text = (
+			"? %s @ %s"
+			% [str(ev.get("name", "?")), _format_duration(int(ev.get("time_ms", 0)))]
+		)
+		if dur > 0:
+			row.text += "  (%s)" % _format_duration(dur)
+		row.add_theme_font_size_override("font_size", 11)
+		row.add_theme_color_override(
+			"font_color", EventsTimeline.color_for_name(str(ev.get("name", "")))
+		)
+		panel.add_child(row)
+
+	var open_btn: Button = Button.new()
+	open_btn.text = "\u25c6 OPEN EVENTS EDITOR"
+	open_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	UITheme.style_button(open_btn, UITheme.CYAN)
+	open_btn.pressed.connect(func() -> void: _open_journey_events_editor(arr, idx, reselect))
+	panel.add_child(open_btn)
+	return box
+
+
+func _commit_round_events(round_id: String, round_events: Array) -> void:
+	_owner._journey_events = JourneyData.replace_round_events(
+		_owner._journey_events, round_id, round_events
+	)
+
+
+# Opens the Custom Events / Release Windows overlay.
+# focus_release=true skips the defs requirement (events lane still shows existing events).
+func _open_journey_events_editor(
+	arr: Array, idx: int, reselect: Callable, focus_release: bool = false
+) -> void:
+	var round_id: String = _find_node_id_for_data(arr[idx])
+	if round_id.is_empty():
+		_owner._show_status("Could not resolve round id.", true)
+		return
+	var defs: Dictionary = {}
+	var path: String = _owner._journey_events_definitions_path.strip_edges()
+	if not focus_release:
+		if path.is_empty():
+			_prompt_events_definitions_then_open(arr, idx, reselect)
+			return
+		defs = _owner.get_event_definitions()
+		var err: String = str(defs.get("error", ""))
+		if err != "" or (defs.get("names", []) as Array).is_empty():
+			_owner._show_status(
+				"Event definitions invalid — pick a valid event_definitions.yml.", true
+			)
+			_prompt_events_definitions_then_open(arr, idx, reselect)
+			return
+	elif path != "":
+		defs = _owner.get_event_definitions()
+		if str(defs.get("error", "")) != "":
+			defs = {}
+	var length_ms: int = _round_clock_ms(arr[idx])
+	if length_ms <= 0:
+		length_ms = 60000
+	var round_events: Array = JourneyData.events_for_round(_owner._journey_events, round_id)
+	var release_cfg: Dictionary = JourneyData.normalize_release_round(arr[idx])
+	var known_flags: Array = _collect_release_editor_flags()
+	# Exclude the round being edited (not graph selection — can disagree).
+	var nodes: Dictionary = _owner._graph_model.get("nodes", {})
+	var node_choices: Array = []
+	for nid: Variant in nodes.keys():
+		var id: String = str(nid)
+		if id == "" or id == round_id:
+			continue
+		node_choices.append({"id": id, "label": _graph_node_label(id)})
+	node_choices.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return str(a["label"]).to_lower() < str(b["label"]).to_lower()
+	)
+	var editor: JourneyEventsEditor = JourneyEventsEditor.new()
+	editor.applied.connect(
+		func(rid: String, events: Array) -> void:
+			_commit_round_events(rid, events)
+			_owner._show_status("Custom events applied — Save the journey to write disk.", false)
+			reselect.call(idx)
+	)
+	editor.release_applied.connect(
+		func(rid: String, fields: Dictionary) -> void:
+			if rid != round_id:
+				return
+			for k: Variant in fields.keys():
+				arr[idx][str(k)] = fields[k]
+			_owner._show_status("Release windows applied — Save the journey to write disk.", false)
+			reselect.call(idx)
+			_owner._refresh_graph()
+	)
+	editor.cancelled.connect(func() -> void: pass)
+	editor.open(
+		_owner,
+		round_id,
+		str(arr[idx].get("name", "")),
+		length_ms,
+		str(arr[idx].get("video_path", "")),
+		str(arr[idx].get("funscript_path", "")),
+		defs,
+		round_events,
+		release_cfg,
+		focus_release,
+		known_flags,
+		node_choices
+	)
+
+
+func _prompt_events_definitions_then_open(arr: Array, idx: int, reselect: Callable) -> void:
+	var dialog: FileDialog = FileDialog.new()
+	dialog.access = FileDialog.ACCESS_FILESYSTEM
+	dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	dialog.title = "Select Event Definitions (event_definitions.yml)"
+	dialog.filters = PackedStringArray(["*.yml,*.yaml ; YAML Files", "*.* ; All Files"])
+	SettingsService.remember_browse_dir(dialog)
+	_owner.add_child(dialog)
+	dialog.popup_centered(Vector2i(900, 600))
+	dialog.file_selected.connect(
+		func(p: String) -> void:
+			_owner.set_events_definitions_path(p)
+			dialog.queue_free()
+			var defs: Dictionary = _owner.get_event_definitions()
+			if str(defs.get("error", "")) != "":
+				_owner._show_status("Definitions: %s" % str(defs.get("error", "")), true)
+				return
+			_owner._show_status(
+				"Loaded %d event definitions." % (defs.get("names", []) as Array).size(), false
+			)
+			_open_journey_events_editor(arr, idx, reselect, false)
+	)
+	dialog.canceled.connect(func() -> void: dialog.queue_free())
+
+
+# Flag names for the Release Windows overlay: journey-set flags, release/band/required names,
+# plus common stubs so a fresh journey still has something to quick-pick.
+func _collect_release_editor_flags() -> Array:
+	var flags: Dictionary = (_owner._all_set_flags() as Dictionary).duplicate()
+	for stub: String in ["released", "early_release"]:
+		flags[stub] = true
+	var nodes: Dictionary = _owner._graph_model.get("nodes", {})
+	for nid: Variant in nodes.keys():
+		var n: Dictionary = nodes[nid] as Dictionary
+		var d: Dictionary = n.get("data", {})
+		for key: String in ["release_flag", "release_disabled_if_flag"]:
+			var name: String = str(d.get(key, "")).strip_edges()
+			if name != "":
+				flags[name] = true
+		for b: Variant in d.get("release_windows", []):
+			if not b is Dictionary:
+				continue
+			var bf: String = str((b as Dictionary).get("flag", "")).strip_edges()
+			if bf != "":
+				flags[bf] = true
+		for e: Variant in n.get("out", []):
+			if not e is Dictionary:
+				continue
+			var rf: String = str((e as Dictionary).get("required_flag", "")).strip_edges()
+			if rf != "":
+				flags[rf] = true
+	var out: Array = flags.keys()
+	out.sort_custom(
+		func(a: Variant, b: Variant) -> bool: return str(a).to_lower() < str(b).to_lower()
+	)
+	return out
 
 
 # Dropdown of journey nodes by readable name (fork "Leads to" style). Stores the
@@ -4982,6 +5398,10 @@ func _make_side_round_editor(arr: Array, idx: int, reselect: Callable) -> Contro
 	col.add_child(_side_section_separator())
 	col.add_child(_make_release_expander(arr, idx, reselect))
 
+
+	# Journey-level Vector EVT events for this round.
+	col.add_child(_side_section_separator())
+	col.add_child(_make_custom_events_section(arr, idx, reselect))
 
 	# ── Round behavior ───────────────────────────────────────────────────────────
 	# (Checkpoints are their own node type now — added from the canvas, not a round flag.)
